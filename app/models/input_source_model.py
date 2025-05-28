@@ -3,21 +3,6 @@ from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship # Import relationship
 from app.config.db_config import Base 
 
-# Import the new generated artifact models
-from app.models.generated_cobol_artifact_model import GeneratedCobolArtifact
-from app.models.generated_jcl_artifact_model import GeneratedJclArtifact
-from app.models.generated_unit_test_artifact_model import GeneratedUnitTestArtifact
-
-# Forward declarations for models used in relationships if they are in different files
-# and might cause circular imports. Not strictly necessary if imports are managed well,
-# but can be a safeguard.
-# Procedure = "Procedure" 
-# M204File = "M204File"
-# M204Variable = "M204Variable"
-# ProcedureCall = "ProcedureCall"
-# ImageStatement = "ImageStatement"
-# DDStatement = "DDStatement"
-# M204Field = "M204Field"
 
 
 class InputSource(Base):

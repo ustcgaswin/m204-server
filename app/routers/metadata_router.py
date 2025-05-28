@@ -6,9 +6,10 @@ from app.config.db_config import get_db
 from app.services import metadata_service, project_service, file_service
 from app.schemas.input_source_schema import InputSourceResponseSchema
 from app.schemas.m204_analysis_schema import (
-    M204ProcedureResponseSchema,
+    M204ProcedureResponseSchema, M204ProcedureUpdateSchema,
     M204VariableResponseSchema, M204VariableUpdateSchema,
-    M204FileResponseSchema, M204FileUpdateSchema
+    M204FileResponseSchema, M204FileUpdateSchema,
+    M204FieldResponseSchema, M204FieldUpdateSchema
 )
 from app.schemas.response_schema import ListResponse
 from app.utils.logger import log
@@ -215,7 +216,7 @@ async def list_project_variables(
         limit=limit
     )
 
-# --- PUT routes for editing M204 File and Variable details ---
+# --- PUT routes for editing M204 File, Field, Variable, and Procedure details ---
 
 @router.put("/m204_files/{m204_file_id}", response_model=M204FileResponseSchema)
 async def update_m204_file(
@@ -245,6 +246,34 @@ async def update_m204_file(
     return M204FileResponseSchema.model_validate(updated_m204_file)
 
 
+@router.put("/m204_fields/{m204_field_id}", response_model=M204FieldResponseSchema)
+async def update_m204_field(
+    project_id: int,
+    m204_field_id: int,
+    field_update_data: M204FieldUpdateSchema,
+    db: Session = Depends(get_db)
+):
+    log.info(f"MetadataRouter: Updating M204Field ID: {m204_field_id} for project ID: {project_id}")
+    db_project = await project_service.get_project_by_id(db, project_id=project_id)
+    if not db_project:
+        log.warning(f"MetadataRouter: Project with ID {project_id} not found for M204Field update.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project with ID {project_id} not found.")
+
+    try:
+        updated_m204_field = await metadata_service.update_m204_field_details(
+            db, project_id=project_id, m204_field_id=m204_field_id, update_data=field_update_data
+        )
+    except Exception as e:
+        log.error(f"MetadataRouter: Error updating M204Field ID {m204_field_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to update M204Field: {str(e)}")
+
+    if not updated_m204_field:
+        log.warning(f"MetadataRouter: M204Field with ID {m204_field_id} not found or update failed for project {project_id}.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"M204Field with ID {m204_field_id} not found in project {project_id}, or no update performed.")
+
+    return M204FieldResponseSchema.model_validate(updated_m204_field)
+
+
 @router.put("/variables/{variable_id}", response_model=M204VariableResponseSchema)
 async def update_m204_variable(
     project_id: int,
@@ -271,3 +300,31 @@ async def update_m204_variable(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"M204Variable with ID {variable_id} not found in project {project_id}, or no update performed.")
 
     return M204VariableResponseSchema.model_validate(updated_variable)
+
+
+@router.put("/procedures/{procedure_id}", response_model=M204ProcedureResponseSchema)
+async def update_procedure(
+    project_id: int,
+    procedure_id: int,
+    procedure_update_data: M204ProcedureUpdateSchema,
+    db: Session = Depends(get_db)
+):
+    log.info(f"MetadataRouter: Updating Procedure ID: {procedure_id} for project ID: {project_id}")
+    db_project = await project_service.get_project_by_id(db, project_id=project_id)
+    if not db_project:
+        log.warning(f"MetadataRouter: Project with ID {project_id} not found for Procedure update.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project with ID {project_id} not found.")
+
+    try:
+        updated_procedure = await metadata_service.update_procedure_details(
+            db, project_id=project_id, procedure_id=procedure_id, update_data=procedure_update_data
+        )
+    except Exception as e:
+        log.error(f"MetadataRouter: Error updating Procedure ID {procedure_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to update Procedure: {str(e)}")
+
+    if not updated_procedure:
+        log.warning(f"MetadataRouter: Procedure with ID {procedure_id} not found or update failed for project {project_id}.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Procedure with ID {procedure_id} not found in project {project_id}, or no update performed.")
+
+    return M204ProcedureResponseSchema.model_validate(updated_procedure)

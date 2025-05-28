@@ -9,7 +9,6 @@ import asyncio
 import re
 
 from app.models.m204_file_model import M204File
-from app.models.m204_file_field_model import M204Field # Ensure M204Field is imported
 from app.models.project_model import Project
 from app.models.procedure_model import Procedure
 from app.models.image_statement_model import ImageStatement
@@ -34,28 +33,25 @@ from app.utils.logger import log
 from app.config.llm_config import llm_config
 from pydantic import BaseModel, Field as PydanticField # Added PydanticField
 
-try:
-    from app.services.analysis_service import TestCase, M204ProcedureToCobolOutput, ImageToCobolFDOutput
-except ImportError:
-    log.warning("Could not import TestCase, M204ProcedureToCobolOutput, ImageToCobolFDOutput from analysis_service. Defining placeholders.")
-    # Placeholder class definitions (already present in user's code)
-    class TestCase(BaseModel):
-        test_case_id: str = PydanticField(description="A unique identifier for the test case (e.g., TC_001, TC_VALID_INPUT).")
-        description: str = PydanticField(description="A brief description of what this test case covers.")
-        preconditions: Optional[List[str]] = PydanticField(description="Any preconditions or setup required.", default_factory=list)
-        inputs: Dict[str, Any] = PydanticField(description="Key-value pairs of input parameters or %variables and their test values.")
-        expected_outputs: Dict[str, Any] = PydanticField(description="Key-value pairs of expected output %variables, screen elements, or file states and their values.")
-        expected_behavior_description: str = PydanticField(description="A textual description of the expected behavior, side effects, or outcome.")
-    class M204ProcedureToCobolOutput(BaseModel):
-        m204_procedure_name: str = PydanticField(description="Original M204 procedure name.")
-        cobol_code_block: str = PydanticField(description="Generated COBOL code block.")
-        comments: Optional[str] = PydanticField(description="Conversion comments.", default=None)
-    class ImageToCobolFDOutput(BaseModel):
-        image_logical_name: Optional[str] = PydanticField(description="M204 logical name for SELECT.", default=None)
-        file_control_entry: str = PydanticField(description="COBOL SELECT statement.")
-        file_description_entry: str = PydanticField(description="COBOL FD entry.")
-        working_storage_entries: Optional[str] = PydanticField(description="Optional WORKING-STORAGE items.", default=None)
-        comments: Optional[str] = PydanticField(description="Conversion comments.", default=None)
+class TestCase(BaseModel):
+    test_case_id: str = PydanticField(description="A unique identifier for the test case (e.g., TC_001, TC_VALID_INPUT).")
+    description: str = PydanticField(description="A brief description of what this test case covers.")
+    preconditions: Optional[List[str]] = PydanticField(description="Any preconditions or setup required.", default_factory=list)
+    inputs: Dict[str, Any] = PydanticField(description="Key-value pairs of input parameters or %variables and their test values.")
+    expected_outputs: Dict[str, Any] = PydanticField(description="Key-value pairs of expected output %variables, screen elements, or file states and their values.")
+    expected_behavior_description: str = PydanticField(description="A textual description of the expected behavior, side effects, or outcome.")
+
+class M204ProcedureToCobolOutput(BaseModel):
+    m204_procedure_name: str = PydanticField(description="Original M204 procedure name.")
+    cobol_code_block: str = PydanticField(description="Generated COBOL code block.")
+    comments: Optional[str] = PydanticField(description="Conversion comments.", default=None)
+
+class ImageToCobolFDOutput(BaseModel):
+    image_logical_name: Optional[str] = PydanticField(description="M204 logical name for SELECT.", default=None)
+    file_control_entry: str = PydanticField(description="COBOL SELECT statement.")
+    file_description_entry: str = PydanticField(description="COBOL FD entry.")
+    working_storage_entries: Optional[str] = PydanticField(description="Optional WORKING-STORAGE items.", default=None)
+    comments: Optional[str] = PydanticField(description="Conversion comments.", default=None)
 
 class VsamJclGenerationOutput(BaseModel):
     """Structured output for VSAM JCL generation by LLM."""
@@ -86,7 +82,6 @@ class ArtifactsService:
         return cobol_program_id_base
 
     async def _llm_convert_m204_proc_to_cobol(self, proc: Procedure) -> M204ProcedureToCobolOutput:
-        # ... existing code ...
         if not llm_config._llm or not proc.procedure_content:
             log.warning(f"LLM not available or no content for M204 procedure: {proc.m204_proc_name}. Returning placeholder COBOL.")
             return M204ProcedureToCobolOutput(
@@ -97,20 +92,56 @@ class ArtifactsService:
                 comments="LLM not available or procedure content missing. Manual conversion required. Ensure COBOL6 standard."
             )
         
+        # Sanitize procedure name for use in example in prompt
+        example_proc_name_sanitized = proc.m204_proc_name.upper().replace('%', 'P').replace('$', 'D').replace('_', '-').replace('#','N')
+        if not example_proc_name_sanitized or not (example_proc_name_sanitized[0].isalpha() or example_proc_name_sanitized[0].isdigit()):
+            example_proc_name_sanitized = "M204PROC" + example_proc_name_sanitized
+        # Further ensure it's a valid COBOL paragraph name start if still problematic after prefix
+        if not (example_proc_name_sanitized[0].isalpha() or example_proc_name_sanitized[0].isdigit()):
+             example_proc_name_sanitized = "DEFAULT-" + example_proc_name_sanitized # Add a default prefix if necessary
+        example_proc_name_sanitized = re.sub(r'[^A-Z0-9-]', '', example_proc_name_sanitized)[:28]
+
+
         prompt_fstr = f"""
 You are an expert M204 to COBOL migration specialist.
-Convert the following M204 procedure into a COBOL code block suitable for inclusion in a larger COBOL program's PROCEDURE DIVISION.
-The COBOL code should be well-structured, maintainable, and functionally equivalent to the M204 procedure.
-Use COBOL paragraphs or sections as appropriate. Translate M204 constructs (loops, I/O, variables) to their COBOL counterparts.
-Ensure the generated COBOL code adheres to the COBOL6 standard.
+Convert the following M204 procedure into a COBOL code block. This block will be inserted directly into the PROCEDURE DIVISION of a larger COBOL program, inside an automatically generated COBOL paragraph (e.g., `{example_proc_name_sanitized}-PARA.`).
+
 M204 Procedure Name: {proc.m204_proc_name}
 M204 Parameters: {proc.m204_parameters_string or "None"}
 M204 Procedure Content:
 ```m204
 {proc.procedure_content}
 ```
-Respond with a JSON object structured according to the M204ProcedureToCobolOutput model.
-The `cobol_code_block` should contain only the COBOL code for the procedure division logic.
+
+Your task is to generate *only* the COBOL statements that form the logic of this M204 procedure.
+The generated `cobol_code_block` in your JSON response:
+- MUST be suitable for direct inclusion within such a COBOL paragraph.
+- MUST NOT start with a paragraph name or section definition itself (e.g., do not include `MY-PARA.` or `MY-SECTION SECTION.` at the beginning of the block, as the surrounding paragraph is already provided).
+- MUST NOT include `IDENTIFICATION DIVISION`, `ENVIRONMENT DIVISION`, `DATA DIVISION`, or the `PROCEDURE DIVISION.` header itself.
+- SHOULD be well-structured, using COBOL paragraphs or sections within the block if appropriate for complex logic, and adhere to the COBOL6 standard.
+- MUST assume all required data items (variables, counters, file records, etc.) are already defined in the main program's `DATA DIVISION` (specifically `FILE SECTION` or `WORKING-STORAGE SECTION`). Do not generate any `DATA DIVISION` entries or `FD`s within the `cobol_code_block`. Your code should use variable names as if they exist globally.
+
+Respond with a JSON object structured according to the M204ProcedureToCobolOutput model:
+```json
+{{
+  "m204_procedure_name": "{proc.m204_proc_name}",
+  "cobol_code_block": "string",
+  "comments": "string (optional)"
+}}
+```
+Example of a valid `cobol_code_block` content (this would be placed inside a paragraph like `{example_proc_name_sanitized}-PARA.`):
+```cobol
+      DISPLAY 'Executing logic for {proc.m204_proc_name}'.
+      MOVE ZEROS TO SOME-COUNTER.
+      ADD 1 TO ANOTHER-VARIABLE.
+      IF SOME-CONDITION PERFORM SOME-OTHER-LOGIC-PARA.
+      IF ANOTHER-CONDITION
+          MOVE 'X' TO SOME-FLAG
+      ELSE
+          MOVE 'Y' TO SOME-FLAG
+      END-IF.
+```
+Ensure the `cobol_code_block` contains only the procedural COBOL statements, correctly indented for inclusion within a paragraph (typically starting in Area B, column 12 or further).
 """
         json_text_output: Optional[str] = None
         try:
@@ -127,6 +158,7 @@ The `cobol_code_block` should contain only the COBOL code for the procedure divi
                                  f"      * --- See logs for details ---",
                 comments=f"LLM conversion failed: {str(e)}"
             )
+
 
     async def _llm_convert_image_to_fd(self, image_statement: ImageStatement, m204_file_name_for_select: str) -> ImageToCobolFDOutput:
         # ... existing code ...
@@ -191,9 +223,12 @@ Respond with a JSON object structured according to the ImageToCobolFDOutput mode
         if m204_file_obj.fields:
             for field in m204_file_obj.fields:
                 field_info = f"- Field Name: {field.field_name}"
-                if field.target_vsam_data_type: field_info += f", VSAM Type: {field.target_vsam_data_type}"
-                if field.target_vsam_length: field_info += f", Length: {field.target_vsam_length}"
-                if field.is_primary_key_component: field_info += f", Is Key Component: Yes (Order: {field.target_vsam_key_order or 'N/A'})"
+                if field.target_vsam_data_type:
+                    field_info += f", VSAM Type: {field.target_vsam_data_type}"
+                if field.target_vsam_length:
+                    field_info += f", Length: {field.target_vsam_length}"
+                if field.is_primary_key_component: 
+                    field_info += f", Is Key Component: Yes (Order: {field.target_vsam_key_order or 'N/A'})"
                 field_details_str_parts.append(field_info)
         field_details_str = "\n".join(field_details_str_parts) if field_details_str_parts else "No detailed field information available."
 
@@ -308,10 +343,14 @@ The `jcl_content` should be the complete JCL.
   SET MAXCC=0
   DEFINE CLUSTER (NAME({vsam_ds_name}) -
 """
-        if vsam_type.upper() == "KSDS": jcl_content += f"    INDEXED - KEYS({key_info_str}) -\n"
-        elif vsam_type.upper() == "ESDS": jcl_content += "    NONINDEXED -\n"
-        elif vsam_type.upper() == "RRDS": jcl_content += "    NUMBERED -\n"
-        else: jcl_content += f"    /* VSAM type: {vsam_type}. Add appropriate parameters. */ -\n"
+        if vsam_type.upper() == "KSDS":
+            jcl_content += f"    INDEXED - KEYS({key_info_str}) -\n"
+        elif vsam_type.upper() == "ESDS":
+            jcl_content += "    NONINDEXED -\n"
+        elif vsam_type.upper() == "RRDS":
+            jcl_content += "    NUMBERED -\n"
+        else: 
+            jcl_content += f"    /* VSAM type: {vsam_type}. Add appropriate parameters. */ -\n"
         
         jcl_content += f"""\
     RECORDSIZE({avg_rec_len} {max_rec_len}) -
@@ -321,7 +360,8 @@ The `jcl_content` should be the complete JCL.
   DATA (NAME({vsam_ds_name}.DATA) -
     TRACKS(5 1)) -
 """
-        if vsam_type.upper() == "KSDS": jcl_content += f"  INDEX (NAME({vsam_ds_name}.INDEX) - TRACKS(1 1))\n"
+        if vsam_type.upper() == "KSDS":
+            jcl_content += f"  INDEX (NAME({vsam_ds_name}.INDEX) - TRACKS(1 1))\n"
         jcl_content += "/*\n"
         return jcl_content
 
@@ -383,8 +423,10 @@ The `jcl_content` should be the complete JCL.
                 if isinstance(result, ImageToCobolFDOutput):
                     file_control_entries_str += result.file_control_entry
                     file_section_fds_str += result.file_description_entry + "\n"
-                    if result.working_storage_entries: working_storage_for_fds_str += result.working_storage_entries + "\n"
-                    if result.comments: file_section_fds_str += f"* {result.comments}\n"
+                    if result.working_storage_entries:
+                        working_storage_for_fds_str += result.working_storage_entries + "\n"
+                    if result.comments:
+                        file_section_fds_str += f"* {result.comments}\n"
                 elif isinstance(result, Exception):
                     log.error(f"Error converting IMAGE to FD: {result}", exc_info=True)
                     file_section_fds_str += "* --- ERROR DURING IMAGE TO FD CONVERSION --- \n"
@@ -402,19 +444,22 @@ The `jcl_content` should be the complete JCL.
                 if isinstance(result, M204ProcedureToCobolOutput):
                     para_base = re.sub(r'[^A-Z0-9-]', '', result.m204_procedure_name.upper().replace('%', 'P').replace('$', 'D').replace('_', '-').replace('#','N'))
                     paragraph_name = (para_base[:28] + "-PARA")
-                    if not paragraph_name or not (paragraph_name[0].isalpha() or paragraph_name[0].isdigit()): paragraph_name = "P" + (paragraph_name[1:] if paragraph_name else "")
+                    if not paragraph_name or not (paragraph_name[0].isalpha() or paragraph_name[0].isdigit()):
+                        paragraph_name = "P" + (paragraph_name[1:] if paragraph_name else "")
                     procedure_division_main_logic += f"           PERFORM {paragraph_name}.\n"
                     procedure_division_paragraphs += f"{paragraph_name}.\n{result.cobol_code_block}\n"
-                    if result.comments: cobol_conversion_comments.append(f"* Procedure {result.m204_procedure_name}: {result.comments}")
+                    if result.comments:
+                        cobol_conversion_comments.append(f"* Procedure {result.m204_procedure_name}: {result.comments}")
                 elif isinstance(result, Exception):
                     log.error(f"Error converting procedure to COBOL: {result}", exc_info=True)
-                    procedure_division_paragraphs += f"* --- ERROR DURING PROCEDURE CONVERSION FOR A PROCEDURE --- \n"
+                    procedure_division_paragraphs += "* --- ERROR DURING PROCEDURE CONVERSION FOR A PROCEDURE --- \n"
         else:
             procedure_division_paragraphs = "      * LLM not configured for M204 Procedure to COBOL conversion.\n"
             if related_procedures:
                 for proc in related_procedures:
                      proc_name_sanitized = re.sub(r'[^A-Z0-9-]', '', proc.m204_proc_name.upper().replace('%', 'P').replace('$', 'D').replace('_', '-').replace('#','N'))[:28]
-                     if not proc_name_sanitized or not (proc_name_sanitized[0].isalpha() or proc_name_sanitized[0].isdigit()): proc_name_sanitized = "MOCK-P" + (proc_name_sanitized[1:] if proc_name_sanitized else "")
+                     if not proc_name_sanitized or not (proc_name_sanitized[0].isalpha() or proc_name_sanitized[0].isdigit()):
+                         proc_name_sanitized = "MOCK-P" + (proc_name_sanitized[1:] if proc_name_sanitized else "")
                      proc_name_sanitized += "-PARA"
                      procedure_division_main_logic += f"           PERFORM {proc_name_sanitized}.\n"
                      procedure_division_paragraphs += f"{proc_name_sanitized}.\n           DISPLAY 'MOCK EXECUTION OF {proc.m204_proc_name}'.\n\n"
@@ -458,7 +503,8 @@ MAIN-PARAGRAPH.
             f"Generated from M204 Input Source: {input_source_name_for_comments} (ID: {current_input_source_with_details.input_source_id})\n",
             "Based on M204 Procedures:\n"
         ]
-        if not related_procedures: unit_test_content_parts.append("- No M204 procedures for test case generation.\n")
+        if not related_procedures:
+            unit_test_content_parts.append("- No M204 procedures for test case generation.\n")
         for proc in related_procedures:
             unit_test_content_parts.append(f"\n--- Test Cases for M204 Procedure: {proc.m204_proc_name} ---\n")
             if proc.suggested_test_cases_json:
@@ -468,15 +514,16 @@ MAIN-PARAGRAPH.
                         tc = TestCase(**tc_data) 
                         unit_test_content_parts.extend([
                             f"Test Case ID: {tc.test_case_id}\n  Description: {tc.description}\n",
-                            *(f"  Preconditions:\n" + "".join([f"    - {pre}\n" for pre in tc.preconditions]) if tc.preconditions else ""),
-                            f"  Inputs:\n" + "".join([f"    - {k}: {v}\n" for k, v in tc.inputs.items()]),
-                            f"  Expected Outputs:\n" + "".join([f"    - {k}: {v}\n" for k, v in tc.expected_outputs.items()]),
+                            *("  Preconditions:\n" + "".join([f"    - {pre}\n" for pre in tc.preconditions]) if tc.preconditions else ""),
+                            "  Inputs:\n" + "".join([f"    - {k}: {v}\n" for k, v in tc.inputs.items()]),
+                            "  Expected Outputs:\n" + "".join([f"    - {k}: {v}\n" for k, v in tc.expected_outputs.items()]),
                             f"  Expected Behavior: {tc.expected_behavior_description}\n\n"
                         ])
                 except Exception as e:
                     log.error(f"Error parsing test cases for {proc.m204_proc_name}: {e}", exc_info=True)
                     unit_test_content_parts.append(f"  Error parsing test cases: {str(e)}\n")
-            else: unit_test_content_parts.append("  No pre-defined test cases.\n")
+            else:
+                unit_test_content_parts.append("  No pre-defined test cases.\n")
         
         unit_test_schema = UnitTestOutputSchema(
             input_source_id=current_input_source_with_details.input_source_id, 
@@ -497,14 +544,17 @@ MAIN-PARAGRAPH.
                     log.warning(f"M204File ID {m204_file_obj.m204_file_id} has no m204_file_name; skipping DD card for run JCL.")
                     continue
                 dd_name_candidate = re.sub(r'[^A-Z0-9]', '', raw_dd_name.upper())
-                if not dd_name_candidate: dd_name_candidate = f"M204F{m204_file_obj.m204_file_id}"
-                if not dd_name_candidate[0].isalpha(): dd_name_candidate = "X" + dd_name_candidate
+                if not dd_name_candidate:
+                    dd_name_candidate = f"M204F{m204_file_obj.m204_file_id}"
+                if not dd_name_candidate[0].isalpha():
+                    dd_name_candidate = "X" + dd_name_candidate
                 dd_name_final = dd_name_candidate[:8]
                 if not dd_name_final:
                     log.warning(f"Could not derive valid DDNAME for M204File ID {m204_file_obj.m204_file_id} (raw: {raw_dd_name}) for run JCL.")
                     continue
                 dsn = m204_file_obj.target_vsam_dataset_name or m204_file_obj.m204_logical_dataset_name or f"YOUR.DATASET.FOR.{dd_name_final}"
-                if "." not in dsn: dsn = f"YOUR.APP.{dsn}" # Basic DSN qualification
+                if "." not in dsn:
+                    dsn = f"YOUR.APP.{dsn}" # Basic DSN qualification
                 
                 dd_statements_for_jcl.append(f"//{dd_name_final:<8} DD DSN={dsn},DISP=SHR")
         
@@ -570,9 +620,12 @@ MAIN-PARAGRAPH.
                 jcl_output_schemas.append(jcl_vsam_schema)
                 db_jcl_artifacts_to_add.append(GeneratedJclArtifact(**jcl_vsam_schema.model_dump()))
         
-        if db_cobol_artifacts_to_add: self.db.add_all(db_cobol_artifacts_to_add)
-        if db_jcl_artifacts_to_add: self.db.add_all(db_jcl_artifacts_to_add)
-        if db_unit_test_artifacts_to_add: self.db.add_all(db_unit_test_artifacts_to_add)
+        if db_cobol_artifacts_to_add:
+            self.db.add_all(db_cobol_artifacts_to_add)
+        if db_jcl_artifacts_to_add:
+            self.db.add_all(db_jcl_artifacts_to_add)
+        if db_unit_test_artifacts_to_add:
+            self.db.add_all(db_unit_test_artifacts_to_add)
         
         return GeneratedArtifactsResponse(
             input_source_id=current_input_source_with_details.input_source_id, 

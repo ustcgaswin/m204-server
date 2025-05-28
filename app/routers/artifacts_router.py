@@ -52,7 +52,7 @@ async def generate_artifacts_for_project_route(
     except HTTPException as http_exc:
         log.error(f"HTTPException during artifact JSON generation for project {project_id}: {http_exc.detail}")
         raise http_exc
-    except Exception as e:
+    except Exception:
         log.exception(f"Unexpected error during artifact JSON generation for project {project_id}:") 
         raise HTTPException(
             status_code=500,

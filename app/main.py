@@ -4,15 +4,50 @@ from app.config.db_config import Base, engine
 from app.config.app_config import settings as app_settings 
 from app.utils.logger import log
 from app.routers import project_router, file_router,analysis_router,metadata_router,requirement_document_router,artifacts_router
-from app.services.rag_service import RagService # Import the RagService class
-from app.services.analysis_service import set_global_rag_service # Import the setter function
-import asyncio # Import asyncio
+from app.services.rag_service import RagService, set_global_rag_service, get_global_rag_service
+import asyncio 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI): # Renamed 'app' to 'app_instance' to avoid conflict
+    # Startup logic
+    log.info(f"Application startup: {app_settings.APP_NAME} v{app_settings.APP_VERSION}")
+    log.info(f"Environment: {app_settings.ENV}, Debug mode: {app_settings.DEBUG}")
+    log.info("Creating database tables (if they don't exist)...")
+    await asyncio.to_thread(Base.metadata.create_all, bind=engine)
+    log.info("Database tables checked/created.")
+
+    log.info("Initializing RAG service...")
+    rag_instance = None  # Initialize to None
+    try:
+        rag_instance = RagService() 
+        await rag_instance.initialize()
+        
+        # Store it on app.state for potential direct access if needed elsewhere (optional)
+        app_instance.state.rag_service = rag_instance # Use app_instance here
+        # Set the global instance
+        set_global_rag_service(rag_instance) 
+        
+        if rag_instance.is_ready():
+            log.info(f"RAG service initialized successfully. Loaded documents: {rag_instance.get_loaded_documents_count()}")
+        else:
+            log.error("RAG service initialization failed or not ready after startup. Check RAG service logs.")
+    except Exception as e:
+        log.error(f"Error initializing RAG service during startup: {e}", exc_info=True)
+        # Ensure global service is None if initialization fails critically before setting
+        if rag_instance and not get_global_rag_service():
+             set_global_rag_service(rag_instance) # It might have been partially set up
+    
+    yield
+    # Shutdown logic (if any) can go here
+    log.info("Application shutdown.")
 
 app = FastAPI(
     title=app_settings.APP_NAME,
     version=app_settings.APP_VERSION,
     description="A FastAPI application for converting M204 to Cobol+VSAM.",
     debug=app_settings.DEBUG,
+    lifespan=lifespan # Use the lifespan context manager
 )
 
 
@@ -27,37 +62,6 @@ async def log_requests_middleware(request: Request, call_next):
     response = await call_next(request)
     log.info(f"Outgoing response: {request.method} {path_for_log} - Status: {response.status_code}")
     return response
-
-
-# Create database tables and initialize RAG service on startup
-@app.on_event("startup")
-async def startup_event():
-    log.info(f"Application startup: {app_settings.APP_NAME} v{app_settings.APP_VERSION}")
-    log.info(f"Environment: {app_settings.ENV}, Debug mode: {app_settings.DEBUG}")
-    log.info("Creating database tables (if they don't exist)...")
-    # Base.metadata.create_all is synchronous, run in a thread if it's slow
-    await asyncio.to_thread(Base.metadata.create_all, bind=engine)
-    log.info("Database tables checked/created.")
-
-    log.info("Initializing RAG service...")
-    try:
-        # Create the RAG service instance
-        rag_instance = RagService() 
-        # Initialize the RAG service asynchronously
-        await rag_instance.initialize()
-        
-        # Store it on app.state for potential direct access if needed elsewhere (optional)
-        app.state.rag_service = rag_instance
-        # Pass the instance to analysis_service
-        set_global_rag_service(rag_instance) 
-        
-        if rag_instance.is_ready(): # Use the new is_ready() method
-            log.info(f"RAG service initialized successfully in main.py. Loaded nodes: {rag_instance.get_loaded_documents_count()}")
-        else:
-            log.error("RAG service initialization failed or not ready after startup. Check RAG service logs.")
-    except Exception as e:
-        log.error(f"Error initializing RAG service during startup: {e}", exc_info=True)
-
 
 origins=[
     "http://localhost:5173",
@@ -76,22 +80,23 @@ app.add_middleware(
 @app.get("/health")
 async def get_health_status():
     log.info("Health check endpoint '/health' called.")
-    rag_status = "RAG service instance not found in app state." # Default if rag_service not on app.state
-    if hasattr(app.state, 'rag_service') and isinstance(app.state.rag_service, RagService):
-        rag_instance: RagService = app.state.rag_service
+    rag_instance = get_global_rag_service() # Use the global getter
+    
+    if rag_instance:
         if rag_instance.is_ready():
             rag_status = f"RAG service ready. Documents: {rag_instance.get_loaded_documents_count()}"
-        elif rag_instance._is_initializing: # Accessing internal state for more detail
+        elif hasattr(rag_instance, '_is_initializing') and rag_instance._is_initializing:
             rag_status = "RAG service initialization in progress."
-        elif rag_instance._initialization_failed: # Accessing internal state
+        elif hasattr(rag_instance, '_initialization_failed') and rag_instance._initialization_failed:
             rag_status = "RAG service initialization failed."
-        elif not rag_instance._initialized_event.is_set(): # Check if event is not set and not initializing
+        elif hasattr(rag_instance, '_initialized_event') and not rag_instance._initialized_event.is_set():
             rag_status = "RAG service initialization not yet complete or not started."
-        elif rag_instance._index is None: # Event might be set, not failed, but index is still None
-            rag_status = "RAG service initialized but index is missing (unexpected)."
+        elif hasattr(rag_instance, '_index') and rag_instance._index is None and rag_instance._initialized_event.is_set() and not rag_instance._initialization_failed :
+             rag_status = "RAG service initialized but index is missing (unexpected)."
         else:
-            # This case should ideally not be reached if the above cover all states
             rag_status = "RAG service state unknown but not explicitly failed or initializing."
+    else:
+        rag_status = "RAG service global instance not available."
             
     return {"status":"OK", "rag_service_status": rag_status}
 

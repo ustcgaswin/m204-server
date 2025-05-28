@@ -12,11 +12,20 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.base.response.schema import RESPONSE_TYPE
 from app.config.llm_config import llm_config
 from app.utils.logger import log
-from typing import Optional, List
+from typing import Optional
 
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(APP_ROOT, "data")
 PERSIST_DIR = os.path.join(APP_ROOT, "rag_index_persist")
+
+
+def set_global_rag_service(rag_service: 'RagService'): # Forward reference RagService
+        global _rag_service_instance
+        _rag_service_instance = rag_service
+        log.info(f"Global RAG service instance set in rag_service: {type(rag_service)}")
+
+def get_global_rag_service() -> Optional['RagService']: # Optional: a getter can be useful
+        return _rag_service_instance
 
 class RagService:
     _instance = None
@@ -250,6 +259,7 @@ class RagService:
             except AttributeError: 
                 log.warning("Could not get document count directly from docstore.docs.")
         return 0
+
 
     def is_ready(self) -> bool:
         """Checks if the RAG service is initialized successfully and ready to be used."""

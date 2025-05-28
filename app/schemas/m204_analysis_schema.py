@@ -48,7 +48,8 @@ class M204VariableResponseSchema(M204VariableBaseSchema):
     procedure_name: Optional[str] = None 
     created_at: datetime
     updated_at: datetime
-    class Config: from_attributes = True
+    class Config: 
+        from_attributes = True
 
 # --- Procedure Schemas ---
 class M204ProcedureBaseSchema(BaseModel):
@@ -69,6 +70,19 @@ class M204ProcedureCreateSchema(M204ProcedureBaseSchema):
     project_id: int
     input_source_id: int
 
+class M204ProcedureUpdateSchema(BaseModel):
+    m204_proc_type: Optional[str] = None
+    m204_parameters_string: Optional[str] = None
+    parsed_parameters_json: Optional[Dict[str, Any]] = None
+    start_line_in_source: Optional[int] = None
+    end_line_in_source: Optional[int] = None
+    procedure_content: Optional[str] = None
+    summary: Optional[str] = None
+    target_cobol_program_name: Optional[str] = None
+    suggested_test_cases_json: Optional[List[Dict[str, Any]]] = None
+    is_subroutine: Optional[bool] = None
+    is_public: Optional[bool] = None
+
 class M204ProcedureResponseSchema(M204ProcedureBaseSchema):
     proc_id: int
     project_id: int
@@ -88,27 +102,44 @@ class M204ProcedureResponseSchema(M204ProcedureBaseSchema):
     class Config: 
         from_attributes = True
 
-
-# --- M204 Define Field Schemas ---
-class M204DefineFieldBaseSchema(BaseModel):
+# --- M204 Field Schemas (renamed from M204DefineField for consistency) ---
+class M204FieldBaseSchema(BaseModel):
     field_name: str
     attributes_text: Optional[str] = None
     attributes_json: Optional[Dict[str, Any]] = None
     definition_line_number: Optional[int] = None
+    target_vsam_key_order: Optional[int] = None
+    target_vsam_data_type: Optional[str] = None
+    target_vsam_length: Optional[int] = None
+    is_primary_key_component: Optional[bool] = None
 
-class M204DefineFieldCreateSchema(M204DefineFieldBaseSchema):
+class M204FieldCreateSchema(M204FieldBaseSchema):
     project_id: int
     m204_file_id: Optional[int] = None
     defined_in_input_source_id: int
 
-class M204DefineFieldResponseSchema(M204DefineFieldBaseSchema):
+class M204FieldUpdateSchema(BaseModel):
+    attributes_text: Optional[str] = None
+    attributes_json: Optional[Dict[str, Any]] = None
+    target_vsam_key_order: Optional[int] = None
+    target_vsam_data_type: Optional[str] = None
+    target_vsam_length: Optional[int] = None
+    # Note: is_primary_key_component excluded as requested
+
+class M204FieldResponseSchema(M204FieldBaseSchema):
     m204_field_id: int
     project_id: int
     m204_file_id: Optional[int] = None
     defined_in_input_source_id: int
     created_at: datetime
     updated_at: datetime
-    class Config: from_attributes = True
+    class Config:
+        from_attributes = True
+
+# --- Backward compatibility aliases ---
+M204DefineFieldBaseSchema = M204FieldBaseSchema
+M204DefineFieldCreateSchema = M204FieldCreateSchema
+M204DefineFieldResponseSchema = M204FieldResponseSchema
 
 # --- M204 File Schemas ---
 class M204FileBaseSchema(BaseModel):
@@ -139,9 +170,10 @@ class M204FileResponseSchema(M204FileBaseSchema):
     defined_in_input_source_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
-    fields: List[M204DefineFieldResponseSchema] = Field(default_factory=list)
+    fields: List[M204FieldResponseSchema] = Field(default_factory=list)
     image_statements: List[ImageStatementResponseSchema] = Field(default_factory=list)
-    class Config: from_attributes = True
+    class Config:
+        from_attributes = True
 
 # --- M204 Variable Schemas (Full definition) ---
 # M204VariableBaseSchema and M204VariableResponseSchema are already defined above.
@@ -176,13 +208,14 @@ class M204ProcedureCallResponseSchema(M204ProcedureCallBaseSchema):
     resolved_procedure_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
-    class Config: from_attributes = True
+    class Config:
+        from_attributes = True
 
 # --- M204 Analysis Result Data Schema ---
 class M204AnalysisResultDataSchema(BaseModel):
     procedures_found: List[M204ProcedureResponseSchema] = Field(default_factory=list)
     defined_files_found: List[M204FileResponseSchema] = Field(default_factory=list)
-    defined_fields_found: List[M204DefineFieldResponseSchema] = Field(default_factory=list)
+    defined_fields_found: List[M204FieldResponseSchema] = Field(default_factory=list)
     variables_found: List[M204VariableResponseSchema] = Field(default_factory=list)
     procedure_calls_found: List[M204ProcedureCallResponseSchema] = Field(default_factory=list)
     image_statements_found: List[ImageStatementResponseSchema] = Field(default_factory=list)

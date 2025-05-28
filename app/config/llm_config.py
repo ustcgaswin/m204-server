@@ -1,6 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, SecretStr, PrivateAttr
-from functools import lru_cache
 from llama_index.llms.azure_openai import AzureOpenAI
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.core import Settings
@@ -42,6 +41,7 @@ class LLMConfig(BaseSettings):
             azure_endpoint=self.azure_openai_endpoint,
             api_version=self.azure_openai_api_version,
             temperature=0,
+            timeout=120
         )
 
         self._embed_model = AzureOpenAIEmbedding(

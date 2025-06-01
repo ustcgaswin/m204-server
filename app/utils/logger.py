@@ -48,7 +48,12 @@ def setup_logger():
         console_handler.setLevel(logging.DEBUG)
         file_handler.setLevel(logging.DEBUG)
         logging.getLogger("uvicorn.access").setLevel(logging.INFO)
-        logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING) 
+        logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+        # Suppress noisy HTTP client logs
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        logging.getLogger("requests").setLevel(logging.WARNING)
         print(f"Logger configured for DEVELOPMENT environment. Logging to console and {log_file_path}")
     elif settings.ENV == "prod":
         logger.setLevel(logging.INFO)
@@ -56,11 +61,21 @@ def setup_logger():
         file_handler.setLevel(logging.INFO)
         logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
         logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+        # Suppress noisy HTTP client logs
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        logging.getLogger("requests").setLevel(logging.WARNING)
         print(f"Logger configured for PRODUCTION environment. Logging to console and {log_file_path}")
     else: 
         logger.setLevel(logging.INFO)
         console_handler.setLevel(logging.INFO)
         file_handler.setLevel(logging.INFO)
+        # Suppress noisy HTTP client logs
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        logging.getLogger("requests").setLevel(logging.WARNING)
         print(f"Logger configured for {settings.ENV.upper()} environment with INFO level. Logging to console and {log_file_path}")
 
     return logger

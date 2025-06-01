@@ -1,6 +1,6 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text # Ensure Text is imported
 from sqlalchemy.sql import func 
-from sqlalchemy.orm import relationship # Import relationship
+from sqlalchemy.orm import relationship 
 from app.config.db_config import Base 
 
 
@@ -18,6 +18,8 @@ class InputSource(Base):
     
     last_analyzed_timestamp = Column(DateTime(timezone=True), nullable=True)
     error_message = Column(Text, nullable=True)
+    jcl_detailed_description = Column(Text, nullable=True) 
+    m204_detailed_description = Column(Text, nullable=True) # New field for M204 detailed description
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -29,16 +31,16 @@ class InputSource(Base):
     m204_files_defined = relationship("M204File", back_populates="defined_in_source", cascade="all, delete-orphan", lazy="selectin", foreign_keys="[M204File.defined_in_input_source_id]")
     m204_variables_defined = relationship("M204Variable", back_populates="input_source", cascade="all, delete-orphan", lazy="selectin", foreign_keys="[M204Variable.input_source_id]")
     procedure_calls_made_in = relationship("ProcedureCall", back_populates="calling_input_source", cascade="all, delete-orphan", lazy="selectin", foreign_keys="[ProcedureCall.calling_input_source_id]")
-    image_statements_in = relationship("ImageStatement", back_populates="input_source", cascade="all, delete-orphan", lazy="selectin", foreign_keys="[ImageStatement.input_source_id]")
+    
     dd_statements_in = relationship("DDStatement", back_populates="input_source", cascade="all, delete-orphan", lazy="selectin", foreign_keys="[DDStatement.input_source_id]")
-    m204_fields_defined_in = relationship("M204Field", back_populates="defined_in_input_source", cascade="all, delete-orphan", lazy="selectin", foreign_keys="[M204Field.defined_in_input_source_id]")
+    # m204_fields_defined_in = relationship("M204Field", back_populates="defined_in_input_source", cascade="all, delete-orphan", lazy="selectin", foreign_keys="[M204Field.defined_in_input_source_id]") # Removed
 
     # Relationships to generated artifacts
     generated_cobol_artifacts = relationship(
         "GeneratedCobolArtifact", 
         back_populates="input_source", 
         cascade="all, delete-orphan",
-        lazy="selectin" # Or "dynamic" or "joined" based on your needs
+        lazy="selectin" 
     )
     generated_jcl_artifacts = relationship(
         "GeneratedJclArtifact", 
@@ -55,4 +57,3 @@ class InputSource(Base):
 
     def __repr__(self):
         return f"<InputSource(id={self.input_source_id}, project_id={self.project_id}, original_name='{self.original_filename}', path='{self.file_path_or_identifier}', status='{self.analysis_status}')>"
-

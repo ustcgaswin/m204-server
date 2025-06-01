@@ -14,23 +14,21 @@ from app.schemas.analysis_schema import UnifiedAnalysisReportSchema
 
 from app.utils.logger import log
 from app.config.llm_config import llm_config # For checking if LLM is configured
-from app.services.rag_service import RagService
+from app.services.rag_service import  get_global_rag_service # MODIFIED: Import get_global_rag_service
 
 # Import new service modules
 from app.services import parmlib_analysis_service
 from app.services import jcl_analysis_service
 from app.services import m204_analysis_service
 
+# REMOVED/COMMENTED: _shared_rag_service and local set_global_rag_service
+# _shared_rag_service: Optional[RagService] = None
 
-_shared_rag_service: Optional[RagService] = None
-
-def set_global_rag_service(instance: RagService):
-    """Sets the global RAG service instance for this module and passes it to sub-services if needed."""
-    global _shared_rag_service
-    _shared_rag_service = instance
-    log.info(f"ORCHESTRATOR: Global RAG service instance has been set in analysis_service: {type(instance)}")
-    # If m204_analysis_service also needs a global RAG instance, you could set it here too,
-    # but it's cleaner to pass it as an argument to its processing functions.
+# def set_global_rag_service(instance: RagService):
+#     """Sets the global RAG service instance for this module and passes it to sub-services if needed."""
+#     global _shared_rag_service
+#     _shared_rag_service = instance
+#     log.info(f"ORCHESTRATOR: Global RAG service instance has been set in analysis_service: {type(instance)}")
 
 async def _get_input_source_for_analysis(db: Session, input_source_id: int) -> InputSource:
     input_source = db.query(InputSource).filter(InputSource.input_source_id == input_source_id).first()
@@ -70,6 +68,14 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
     # List to collect M204File objects that are identified as DB files and need VSAM enhancement
     m204_db_files_for_vsam_enhancement: List[M204File] = []
 
+    # Get the RAG service instance from the rag_service module
+    current_rag_service_instance = get_global_rag_service()
+    if current_rag_service_instance:
+        log.info(f"ORCHESTRATOR: Retrieved RAG service instance: {type(current_rag_service_instance)}")
+    else:
+        log.warning("ORCHESTRATOR: RAG service instance is not available globally.")
+
+
     input_source.analysis_status = "analysis_in_progress"
     input_source.error_message = None
     input_source.last_analyzed_timestamp = func.now()
@@ -88,35 +94,51 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
         if file_type == "parmlib":
             analysis_details = await parmlib_analysis_service.process_parmlib_analysis(db, input_source, file_content)
             message = f"PARMLIB analysis completed for {input_source.original_filename}."
-            # Collect M204Files that were marked as DB files (is_db_file=True)
-            # These are present in analysis_details.defined_files_found
+            
             if analysis_details and isinstance(analysis_details, M204AnalysisResultDataSchema):
                 for m204_file_resp_schema in analysis_details.defined_files_found:
-                    # We need the ORM object, not just the schema, for VSAM enhancement
                     m204_file_obj = db.query(M204File).filter(M204File.m204_file_id == m204_file_resp_schema.m204_file_id).first()
                     if m204_file_obj and m204_file_obj.is_db_file:
                         if m204_file_obj not in m204_db_files_for_vsam_enhancement:
                              m204_db_files_for_vsam_enhancement.append(m204_file_obj)
-            log.info(f"ORCHESTRATOR: PARMLIB analysis for {input_source.original_filename} found {len(analysis_details.defined_fields_found if analysis_details else [])} fields. {len(m204_db_files_for_vsam_enhancement)} DB files identified for VSAM enhancement.")
+            
+            total_parmlib_fields_found = 0
+            num_parmlib_files_processed = 0
+            if analysis_details and analysis_details.defined_files_found:
+                num_parmlib_files_processed = len(analysis_details.defined_files_found)
+                for file_schema in analysis_details.defined_files_found:
+                    if file_schema.file_definition_json:
+                        json_data = file_schema.file_definition_json
+                        if isinstance(json_data, dict):
+                            fields_to_count = None
+                            if json_data.get("file_type") == "db_file":
+                                fields_to_count = json_data.get("fields")
+                            elif json_data.get("file_type") == "mixed":
+                                db_def_part = json_data.get("db_file_definition")
+                                if isinstance(db_def_part, dict):
+                                    fields_to_count = db_def_part.get("fields")
+                            
+                            if isinstance(fields_to_count, dict):
+                                total_parmlib_fields_found += len(fields_to_count)
+            
+            log.info(f"ORCHESTRATOR: PARMLIB analysis for {input_source.original_filename} processed {num_parmlib_files_processed} file definitions, finding {total_parmlib_fields_found} fields. {len(m204_db_files_for_vsam_enhancement)} DB files identified for VSAM enhancement.")
 
         elif file_type == "jcl":
             jcl_analysis_result, m204_files_from_jcl = await jcl_analysis_service.process_jcl_analysis(db, input_source, file_content)
             analysis_details = jcl_analysis_result
             message = f"JCL analysis completed for {input_source.original_filename}."
-            # m204_files_from_jcl contains M204File ORM objects that might have been updated (e.g., is_db_file, target_vsam_dataset_name)
             for m204_file_obj in m204_files_from_jcl:
-                if m204_file_obj.is_db_file: # Check if it was marked as a DB file
+                if m204_file_obj.is_db_file: 
                     if m204_file_obj not in m204_db_files_for_vsam_enhancement:
                         m204_db_files_for_vsam_enhancement.append(m204_file_obj)
-            log.info(f"ORCHESTRATOR: JCL analysis for {input_source.original_filename} found {len(analysis_details.dd_statements_found if analysis_details else [])} DD statements. {len(m204_db_files_for_vsam_enhancement)} DB files identified/updated for VSAM enhancement.")
+            log.info(f"ORCHESTRATOR: JCL analysis for {input_source.original_filename} found {len(analysis_details.dd_statements_found if analysis_details and hasattr(analysis_details, 'dd_statements_found') else [])} DD statements. {len(m204_db_files_for_vsam_enhancement)} DB files identified/updated for VSAM enhancement.")
 
-        elif file_type in ["m204", "online", "batch", "include", "screen", "map", "subroutine", "userlanguage"]: # M204 source code
-            m204_analysis_result, m204_db_files_from_m204_service = await m204_analysis_service.process_m204_analysis(db, input_source, file_content, _shared_rag_service)
+        elif file_type in ["m204", "online", "batch", "include", "screen", "map", "subroutine", "userlanguage"]: 
+            m204_analysis_result, m204_db_files_from_m204_service = await m204_analysis_service.process_m204_analysis(db, input_source, file_content, current_rag_service_instance) # MODIFIED: Pass the fetched RAG instance
             analysis_details = m204_analysis_result
             message = f"M204 source code analysis completed for {input_source.original_filename}."
-            # m204_db_files_from_m204_service contains M204File ORM objects identified as DB files (e.g., from DEFINE DATASET)
             for m204_file_obj in m204_db_files_from_m204_service:
-                if m204_file_obj.is_db_file: # Should already be true if returned by this service
+                if m204_file_obj.is_db_file: 
                      if m204_file_obj not in m204_db_files_for_vsam_enhancement:
                         m204_db_files_for_vsam_enhancement.append(m204_file_obj)
             log.info(f"ORCHESTRATOR: M204 source analysis for {input_source.original_filename} completed. {len(m204_db_files_for_vsam_enhancement)} DB files identified for VSAM enhancement.")
@@ -124,40 +146,32 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
         else:
             message = f"File type '{file_type}' for {input_source.original_filename} is not specifically handled by detailed analysis. Basic processing completed."
             log.warning(f"ORCHESTRATOR: Unhandled file type '{file_type}' for InputSource ID: {input_source_id}, File: {input_source.original_filename}")
-            analysis_status_val = "analysis_completed_with_warnings" # Or "completed_no_details"
+            analysis_status_val = "analysis_completed_with_warnings" 
             errors.append(f"File type '{file_type}' not supported for detailed analysis.")
 
-        if not errors and analysis_details is not None: # If primary analysis was successful
+        if not errors and analysis_details is not None: 
             analysis_status_val = "analysis_completed"
         elif not errors and analysis_details is None and file_type not in ["parmlib", "jcl", "m204", "online", "batch", "include", "screen", "map", "subroutine", "userlanguage"]:
-            analysis_status_val = "analysis_completed_no_details" # For unhandled types that don't error
+            analysis_status_val = "analysis_completed_no_details" 
             message = f"Analysis for {input_source.original_filename} (Type: {file_type}) completed. No specific details extracted for this type."
 
 
-        # Perform VSAM enhancement for all identified DB files
         if m204_db_files_for_vsam_enhancement and llm_config._llm:
             log.info(f"ORCHESTRATOR: Starting VSAM enhancement for {len(m204_db_files_for_vsam_enhancement)} M204 DB files related to {input_source.original_filename}.")
             vsam_enhancement_tasks = []
             for m204_db_file in m204_db_files_for_vsam_enhancement:
-                # Ensure the file object is fresh from the session before passing
-                db.refresh(m204_db_file)
-                if m204_db_file.fields: # Pre-load/refresh fields if the relationship is lazy
-                    for f in m204_db_file.fields:
-                        db.refresh(f)
+                db.refresh(m204_db_file) 
                 vsam_enhancement_tasks.append(
                     m204_analysis_service.enhance_m204_db_file_with_vsam_suggestions(db, m204_db_file)
                 )
             
-            await asyncio.gather(*vsam_enhancement_tasks, return_exceptions=True) # Exceptions are logged within the tasks
+            await asyncio.gather(*vsam_enhancement_tasks, return_exceptions=True) 
             log.info(f"ORCHESTRATOR: Completed VSAM enhancement tasks for M204 DB files related to {input_source.original_filename}.")
-            # The analysis_details might now be stale if M204Files or M204Fields were updated.
-            # We will re-fetch/re-validate for the response if necessary.
 
         elif m204_db_files_for_vsam_enhancement and not llm_config._llm:
             log.warning(f"ORCHESTRATOR: LLM not configured. Skipping VSAM enhancement for {len(m204_db_files_for_vsam_enhancement)} M204 DB files.")
 
 
-        # Commit all changes made by the specific analysis service and VSAM enhancement
         db.commit()
         log.info(f"ORCHESTRATOR: Successfully committed all analysis changes for InputSource ID: {input_source_id}, File: {input_source.original_filename}")
         analysis_status_val = "analysis_completed" if not errors else "analysis_completed_with_warnings"
@@ -176,46 +190,29 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
         message = f"Unexpected error during analysis of {input_source.original_filename}."
         analysis_status_val = "analysis_failed"
     
-    # Final update to InputSource status
     input_source.analysis_status = analysis_status_val
     if errors:
-        input_source.error_message = "; ".join(list(set(errors))) # Store unique errors
+        input_source.error_message = "; ".join(list(set(errors))) 
     else:
-        input_source.error_message = None # Clear previous errors if successful
+        input_source.error_message = None 
     
     try:
         db.add(input_source)
         db.commit()
         db.refresh(input_source)
     except Exception as e_commit_final:
-        db.rollback() # Rollback status update if it fails
+        db.rollback() 
         log.error(f"ORCHESTRATOR: Failed to commit final InputSource status for ID {input_source_id}: {e_commit_final}", exc_info=True)
-        # The analysis itself might have been committed earlier, but status update failed.
 
-    # Refresh analysis_details if M204Files were updated by VSAM step, to ensure response has latest data.
-    # This involves re-validating the schema objects from potentially updated ORM objects.
     if analysis_status_val.startswith("analysis_completed") and analysis_details:
         if isinstance(analysis_details, M204AnalysisResultDataSchema):
-            # Re-fetch and re-validate M204FileResponseSchema for defined_files_found
             refreshed_defined_files = []
             for m204_file_resp in analysis_details.defined_files_found:
                 m204_file_orm = db.query(M204File).get(m204_file_resp.m204_file_id)
                 if m204_file_orm:
-                    db.refresh(m204_file_orm) # Refresh the ORM object
-                    if m204_file_orm.fields: # Refresh fields too
-                        for f_orm in m204_file_orm.fields:
-                            db.refresh(f_orm)
+                    db.refresh(m204_file_orm) 
                     refreshed_defined_files.append(M204FileResponseSchema.model_validate(m204_file_orm))
             analysis_details.defined_files_found = refreshed_defined_files
-            # Similar refresh logic could be applied to defined_fields_found if they are directly modified by VSAM step
-            # and part of M204AnalysisResultDataSchema from PARMLIB.
-            # For now, parmlib_analysis_service's _enhance_single_m204_field_with_vsam_suggestions updates fields directly.
-            # The file-level VSAM enhancement in m204_analysis_service also updates fields.
-            # The refresh within those services before returning should be sufficient, but an orchestrator-level refresh ensures consistency.
-
-        # No specific M204File list in GenericAnalysisResultDataSchema to refresh directly here for JCL.
-        # JCL service returns affected M204Files separately, which are used for VSAM enhancement.
-        # The DDStatementResponseSchema in its details should be fine.
     
     return UnifiedAnalysisReportSchema(
         input_source_id=input_source.input_source_id,

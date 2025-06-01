@@ -6,7 +6,6 @@ from app.schemas.project_schema import ProjectCreate, ProjectUpdate
 from app.utils.logger import log
 from sqlalchemy.exc import SQLAlchemyError
 from app.utils import file_utils # Added for filesystem operations
-import os # For os.path.exists and os.path.isdir, though file_utils might encapsulate this
 import pathlib # For path manipulation, assuming file_utils returns Path objects
 
 async def create_project(db: Session, project: ProjectCreate) -> ProjectModel:

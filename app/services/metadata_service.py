@@ -7,44 +7,39 @@ from app.models.procedure_model import Procedure
 from app.models.m204_variable_model import M204Variable
 from app.models.input_source_model import InputSource
 from app.models.m204_file_model import M204File
-from app.models.m204_file_field_model import M204Field
-from app.models.image_statement_model import ImageStatement
-from app.models.dd_statement_model import DDStatement # Added import
-from app.models.procedure_call_model import ProcedureCall # Added import
+from app.models.dd_statement_model import DDStatement
+from app.models.procedure_call_model import ProcedureCall
 
 from app.schemas.m204_analysis_schema import (
     M204FileUpdateSchema, 
     M204VariableUpdateSchema, 
-    M204ProcedureUpdateSchema,
-    M204FieldUpdateSchema
+    M204ProcedureUpdateSchema
 )
 from app.utils.logger import log
 
 # --- InputSource related metadata ---
 async def get_m204_db_definition_files_by_project(db: Session, project_id: int, skip: int = 0, limit: int = 100) -> List[InputSource]:
     log.info(f"MetadataService: Fetching InputSource files that define M204 DB files for project ID: {project_id}")
-    # Files that are PARMLIB or M204 source types and are associated with an M204File marked as is_db_file=True
-    # Or JCL files that have DD statements pointing to known M204 database DSN patterns.
-    # This query identifies InputSource files that *define* or *reference* M204 DB files.
+    
+    m204_def_source_ids_query = db.query(M204File.defined_in_input_source_id)\
+        .filter(M204File.project_id == project_id, M204File.is_db_file == True, M204File.defined_in_input_source_id.isnot(None))\
+        .distinct() # noqa: E712
 
-    # Subquery to find input_source_ids from M204File where is_db_file is true and defined_in_input_source_id is not null
-    m204_def_source_ids = db.query(M204File.defined_in_input_source_id)\
-        .filter(M204File.project_id == project_id, M204File.is_db_file is True, M204File.defined_in_input_source_id.isnot(None))\
-        .distinct()
-
-    # Subquery to find input_source_ids from DDStatement that look like M204 DB DSNs
-    jcl_db_source_ids = db.query(DDStatement.input_source_id)\
+    jcl_db_source_ids_query = db.query(DDStatement.input_source_id)\
         .filter(
             DDStatement.project_id == project_id,
             or_(
-                DDStatement.dsn.ilike('%.DBASEF%'), # Common M204 DB file suffix
-                DDStatement.dsn.ilike('%.%204%')    # Contains '204' often used in M204 DSNs
+                DDStatement.dsn.ilike('%.DBASEF%'), 
+                DDStatement.dsn.ilike('%.%204%')    
             )
         )\
         .distinct()
 
-    combined_source_ids_query = m204_def_source_ids.union(jcl_db_source_ids)
-    source_ids = [row[0] for row in db.execute(combined_source_ids_query).fetchall()]
+    combined_source_ids_query = m204_def_source_ids_query.union(jcl_db_source_ids_query)
+    
+    source_ids_result = db.execute(combined_source_ids_query).fetchall()
+    source_ids = [row[0] for row in source_ids_result if row[0] is not None]
+
 
     if not source_ids:
         return []
@@ -59,10 +54,10 @@ async def get_m204_db_definition_files_by_project(db: Session, project_id: int, 
 
 async def count_m204_db_definition_files_for_project(db: Session, project_id: int) -> int:
     log.info(f"MetadataService: Counting InputSource files that define M204 DB files for project ID: {project_id}")
-    m204_def_source_ids = db.query(M204File.defined_in_input_source_id)\
-        .filter(M204File.project_id == project_id, M204File.is_db_file is True, M204File.defined_in_input_source_id.isnot(None))\
-        .distinct()
-    jcl_db_source_ids = db.query(DDStatement.input_source_id)\
+    m204_def_source_ids_query = db.query(M204File.defined_in_input_source_id)\
+        .filter(M204File.project_id == project_id, M204File.is_db_file == True, M204File.defined_in_input_source_id.isnot(None))\
+        .distinct() # noqa: E712
+    jcl_db_source_ids_query = db.query(DDStatement.input_source_id)\
         .filter(
             DDStatement.project_id == project_id,
             or_(
@@ -71,8 +66,10 @@ async def count_m204_db_definition_files_for_project(db: Session, project_id: in
             )
         )\
         .distinct()
-    combined_source_ids_query = m204_def_source_ids.union(jcl_db_source_ids)
-    source_ids = [row[0] for row in db.execute(combined_source_ids_query).fetchall()]
+    combined_source_ids_query = m204_def_source_ids_query.union(jcl_db_source_ids_query)
+    source_ids_result = db.execute(combined_source_ids_query).fetchall()
+    source_ids = [row[0] for row in source_ids_result if row[0] is not None]
+
     if not source_ids:
         return 0
     return db.query(func.count(InputSource.input_source_id))\
@@ -97,7 +94,7 @@ async def get_m204_database_files_by_project(db: Session, project_id: int, skip:
 
     files = db.query(M204File)\
               .filter(M204File.project_id == project_id, M204File.is_db_file == True)\
-              .options(selectinload(M204File.fields).selectinload(M204Field.defined_in_input_source))\
+              .options(selectinload(M204File.defined_in_source))\
               .order_by(M204File.m204_file_name)\
               .offset(skip)\
               .limit(limit)\
@@ -120,7 +117,7 @@ async def get_other_m204_files_by_project(db: Session, project_id: int, skip: in
     log.info(f"MetadataService: Fetching other (non-DB) M204File entries for project ID: {project_id}")
     files = db.query(M204File)\
               .filter(M204File.project_id == project_id, or_(M204File.is_db_file == False, M204File.is_db_file.is_(None)))\
-              .options(selectinload(M204File.image_statements).selectinload(ImageStatement.input_source))\
+              .options(selectinload(M204File.defined_in_source))\
               .order_by(M204File.m204_file_name)\
               .offset(skip)\
               .limit(limit)\
@@ -139,9 +136,7 @@ async def get_m204_file_by_id(db: Session, project_id: int, m204_file_id: int) -
         M204File.project_id == project_id,
         M204File.m204_file_id == m204_file_id
     ).options(
-        selectinload(M204File.fields).selectinload(M204Field.defined_in_input_source),
-        selectinload(M204File.image_statements).selectinload(ImageStatement.input_source),
-        selectinload(M204File.defined_in_source) # For the file itself
+        selectinload(M204File.defined_in_source) 
     ).first()
     return m204_file
 
@@ -152,7 +147,7 @@ async def update_m204_file_details(
     update_data: M204FileUpdateSchema
 ) -> Optional[M204File]:
     log.info(f"MetadataService: Updating M204File ID: {m204_file_id} for project ID: {project_id}")
-    db_m204_file = await get_m204_file_by_id(db, project_id, m204_file_id) # This already loads related data
+    db_m204_file = await get_m204_file_by_id(db, project_id, m204_file_id) 
     if not db_m204_file:
         log.warning(f"MetadataService: M204File with ID {m204_file_id} not found in project {project_id} for update.")
         return None
@@ -160,63 +155,21 @@ async def update_m204_file_details(
     update_values = update_data.model_dump(exclude_unset=True)
     if not update_values:
         log.info(f"MetadataService: No update values provided for M204File ID: {m204_file_id}")
-        return db_m204_file
+        return db_m204_file # Return the original if no data to update
 
+    log.info(f"MetadataService: Applying update values for M204File ID {m204_file_id}: {update_values}")
     for key, value in update_values.items():
         setattr(db_m204_file, key, value)
 
     try:
         db.add(db_m204_file)
         db.commit()
-        db.refresh(db_m204_file) # Refresh to get any DB-generated changes and ensure relationships are current
+        db.refresh(db_m204_file) 
         log.info(f"MetadataService: M204File ID: {m204_file_id} updated successfully.")
         return db_m204_file
     except SQLAlchemyError as e:
         db.rollback()
         log.error(f"MetadataService: Database error updating M204File ID {m204_file_id}: {e}", exc_info=True)
-        raise
-
-# --- M204Field related metadata ---
-async def get_m204_field_by_id(db: Session, project_id: int, m204_field_id: int) -> Optional[M204Field]:
-    log.info(f"MetadataService: Fetching M204Field by ID: {m204_field_id} for project ID: {project_id}")
-    m204_field = db.query(M204Field).filter(
-        M204Field.project_id == project_id,
-        M204Field.m204_field_id == m204_field_id
-    ).options(
-        selectinload(M204Field.m204_file),
-        selectinload(M204Field.defined_in_input_source)
-    ).first()
-    return m204_field
-
-async def update_m204_field_details(
-    db: Session,
-    project_id: int,
-    m204_field_id: int,
-    update_data: M204FieldUpdateSchema
-) -> Optional[M204Field]:
-    log.info(f"MetadataService: Updating M204Field ID: {m204_field_id} for project ID: {project_id}")
-    db_m204_field = await get_m204_field_by_id(db, project_id, m204_field_id)
-    if not db_m204_field:
-        log.warning(f"MetadataService: M204Field with ID {m204_field_id} not found in project {project_id} for update.")
-        return None
-
-    update_values = update_data.model_dump(exclude_unset=True)
-    if not update_values:
-        log.info(f"MetadataService: No update values provided for M204Field ID: {m204_field_id}")
-        return db_m204_field
-
-    for key, value in update_values.items():
-        setattr(db_m204_field, key, value)
-
-    try:
-        db.add(db_m204_field)
-        db.commit()
-        db.refresh(db_m204_field)
-        log.info(f"MetadataService: M204Field ID: {m204_field_id} updated successfully.")
-        return db_m204_field
-    except SQLAlchemyError as e:
-        db.rollback()
-        log.error(f"MetadataService: Database error updating M204Field ID {m204_field_id}: {e}", exc_info=True)
         raise
 
 # --- Procedure related metadata ---
@@ -225,12 +178,12 @@ async def get_procedures_by_project(db: Session, project_id: int, skip: int = 0,
     procedures = db.query(Procedure)\
                    .filter(Procedure.project_id == project_id)\
                    .options(
-                       selectinload(Procedure.input_source), # Added based on typical needs, can be removed if not used by schema
-                       selectinload(Procedure.variables_in_procedure), # Eager load variables
-                       selectinload(Procedure.calls_made).selectinload(ProcedureCall.resolved_procedure), # Corrected
-                       selectinload(Procedure.calls_made).selectinload(ProcedureCall.calling_input_source), # To know where the call was made from
-                       selectinload(Procedure.calls_received).selectinload(ProcedureCall.calling_procedure), # Corrected
-                       selectinload(Procedure.calls_received).selectinload(ProcedureCall.calling_input_source) # To know where the call that was received originated
+                       selectinload(Procedure.input_source), 
+                       selectinload(Procedure.variables_in_procedure), 
+                       selectinload(Procedure.calls_made).selectinload(ProcedureCall.resolved_procedure), 
+                       selectinload(Procedure.calls_made).selectinload(ProcedureCall.calling_input_source), 
+                       selectinload(Procedure.calls_received).selectinload(ProcedureCall.calling_procedure), 
+                       selectinload(Procedure.calls_received).selectinload(ProcedureCall.calling_input_source) 
                    )\
                    .order_by(Procedure.m204_proc_name)\
                    .offset(skip)\
@@ -277,7 +230,10 @@ async def update_procedure_details(
         return db_procedure
 
     for key, value in update_values.items():
-        setattr(db_procedure, key, value)
+        if key == "suggested_cobol_function_name":  # Assuming M204ProcedureUpdateSchema uses this key
+            setattr(db_procedure, "target_cobol_program_name", value) # Procedure model uses this key
+        else:
+            setattr(db_procedure, key, value)
 
     try:
         db.add(db_procedure)
@@ -296,7 +252,7 @@ async def get_variables_by_project(db: Session, project_id: int, skip: int = 0, 
     variables = (
         db.query(M204Variable)
         .filter(M204Variable.project_id == project_id)
-        .options(selectinload(M204Variable.procedure))  # Eager load the procedure for procedure_name property
+        .options(selectinload(M204Variable.procedure))  
         .order_by(M204Variable.variable_name, M204Variable.scope, M204Variable.procedure_id)
         .offset(skip)
         .limit(limit)
@@ -315,7 +271,7 @@ async def get_m204_variable_by_id(db: Session, project_id: int, variable_id: int
     variable = db.query(M204Variable).filter(
         M204Variable.project_id == project_id,
         M204Variable.variable_id == variable_id
-    ).options(selectinload(M204Variable.procedure)).first() # Eager load procedure
+    ).options(selectinload(M204Variable.procedure)).first() 
     return variable
 
 async def update_m204_variable_details(
@@ -325,7 +281,7 @@ async def update_m204_variable_details(
     update_data: M204VariableUpdateSchema
 ) -> Optional[M204Variable]:
     log.info(f"MetadataService: Updating M204Variable ID: {variable_id} for project ID: {project_id}")
-    db_variable = await get_m204_variable_by_id(db, project_id, variable_id) # This now eager loads the procedure
+    db_variable = await get_m204_variable_by_id(db, project_id, variable_id) 
     if not db_variable:
         log.warning(f"MetadataService: M204Variable with ID {variable_id} not found in project {project_id} for update.")
         return None

@@ -18,7 +18,7 @@ class Procedure(Base):
     start_line_in_source = Column(Integer, nullable=True)
     end_line_in_source = Column(Integer, nullable=True) 
     procedure_content = Column(Text, nullable=True) 
-    target_cobol_program_name = Column(String(255), nullable=True)
+    target_cobol_function_name = Column(String(255), nullable=True) # MODIFIED HERE
     summary = Column(Text, nullable=True)
     suggested_test_cases_json = Column(JSON, nullable=True) # New field for storing test cases
     is_subroutine = Column(Boolean, default=False)

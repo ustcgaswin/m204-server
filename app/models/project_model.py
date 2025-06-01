@@ -32,8 +32,8 @@ class Project(Base):
     # One Project can have many ProcedureCalls
     procedure_calls = relationship("ProcedureCall", back_populates="project", cascade="all, delete-orphan", lazy="selectin")
 
-    # One Project can have many ImageStatements
-    image_statements = relationship("ImageStatement", back_populates="project", cascade="all, delete-orphan", lazy="selectin")
+    # One Project can have many ImageStatements # Removed
+    # image_statements = relationship("ImageStatement", back_populates="project", cascade="all, delete-orphan", lazy="selectin") # Removed
 
     # One Project can have many DDStatements
     dd_statements = relationship("DDStatement", back_populates="project", cascade="all, delete-orphan", lazy="selectin")

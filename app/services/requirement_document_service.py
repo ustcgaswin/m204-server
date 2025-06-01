@@ -6,10 +6,10 @@ import json
 from app.models.project_model import Project
 from app.models.procedure_model import Procedure
 from app.models.m204_file_model import M204File
-# M204Field is not directly used in queries here but is part of M204File relationship
+# M204Field is not directly used in queries here as it was removed
 
 from app.models.m204_variable_model import M204Variable
-from app.models.image_statement_model import ImageStatement
+# from app.models.image_statement_model import ImageStatement # Removed
 from app.models.procedure_call_model import ProcedureCall
 from app.models.dd_statement_model import DDStatement
 from app.models.requirement_document_model import RequirementDocument
@@ -24,7 +24,7 @@ from app.schemas.m204_analysis_schema import ( # For serializing nested data
     M204ProcedureResponseSchema,
     M204FileResponseSchema,
     M204VariableResponseSchema,
-    ImageStatementResponseSchema,
+    # ImageStatementResponseSchema, # Removed
     M204ProcedureCallResponseSchema
 )
 from app.schemas.generic_analysis_schema import DDStatementResponseSchema
@@ -68,6 +68,24 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project with ID {project_id} not found.")
     project_data["project_info"] = _serialize_model_instance(project)
 
+    # Input Source Summaries (JCL and M204 detailed descriptions)
+    if options.include_project_overview: # Tying inclusion to project overview
+        input_sources = db.query(InputSource).filter(InputSource.project_id == project_id).all()
+        source_summaries = []
+        for src in input_sources:
+            summary_item = {
+                "original_filename": src.original_filename,
+                "source_type": src.source_type,
+                "jcl_detailed_description": getattr(src, 'jcl_detailed_description', None), # Use getattr for safety
+                "m204_detailed_description": getattr(src, 'm204_detailed_description', None) # Use getattr for safety
+            }
+            # Only add if there's a relevant description
+            if summary_item["jcl_detailed_description"] or summary_item["m204_detailed_description"]:
+                source_summaries.append(summary_item)
+        if source_summaries:
+            project_data["source_file_llm_summaries"] = source_summaries
+
+
     # M204 Procedures
     if options.include_procedures:
         procedures_query = db.query(Procedure).filter(Procedure.project_id == project_id)
@@ -79,17 +97,17 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
         project_data["procedures"] = [M204ProcedureResponseSchema.model_validate(p).model_dump(exclude_none=True) for p in procedures]
 
 
-    # M204 Files and Fields
+    # M204 Files
     if options.include_files:
-        m204_files = db.query(M204File).filter(M204File.project_id == project_id)\
-            .options(selectinload(M204File.fields)).all()
+        # Removed selectinload(M204File.fields) as M204Field model and relationship are removed
+        m204_files = db.query(M204File).filter(M204File.project_id == project_id).all()
         project_data["m204_files"] = [M204FileResponseSchema.model_validate(f).model_dump(exclude_none=True) for f in m204_files]
 
     # Global/Public M204 Variables
     if options.include_global_variables:
         global_vars = db.query(M204Variable).filter(
             M204Variable.project_id == project_id,
-            M204Variable.procedure_id.is_(None)
+            M204Variable.procedure_id.is_(None) # Identifies global/public variables
         ).all()
         project_data["global_variables"] = [M204VariableResponseSchema.model_validate(v).model_dump(exclude_none=True) for v in global_vars]
 
@@ -99,11 +117,9 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
             .filter(InputSource.project_id == project_id).all()
         project_data["dd_statements"] = [DDStatementResponseSchema.model_validate(dd).model_dump(exclude_none=True) for dd in dd_statements]
 
-    # Image Statements
-    if options.include_image_statements:
-        image_statements = db.query(ImageStatement).join(InputSource, ImageStatement.input_source_id == InputSource.input_source_id)\
-            .filter(InputSource.project_id == project_id).all()
-        project_data["image_statements"] = [ImageStatementResponseSchema.model_validate(img).model_dump(exclude_none=True) for img in image_statements]
+    # Image Statements - REMOVED
+    # if options.include_image_statements: # This option no longer exists
+    #     pass # Logic removed
 
     # Procedure Calls
     if options.include_procedure_calls:
@@ -111,6 +127,7 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
         project_data["procedure_calls"] = [M204ProcedureCallResponseSchema.model_validate(pc).model_dump(exclude_none=True) for pc in procedure_calls]
 
     return project_data
+
 
 def _construct_llm_prompt_content(project_data: Dict[str, Any], options: RequirementGenerationOptionsSchema) -> str:
     """
@@ -123,6 +140,18 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
         pi = project_data["project_info"]
         content_parts.append(f"Project Information:\n- Name: {pi.get('project_name', 'N/A')}\n- Description: {pi.get('description', 'N/A')}\n- Created: {pi.get('created_at', 'N/A')}\n")
 
+    if "source_file_llm_summaries" in project_data and project_data["source_file_llm_summaries"]:
+        content_parts.append("Source File LLM-Generated Summaries:")
+        for summary_info in project_data["source_file_llm_summaries"]:
+            filename = summary_info.get('original_filename', 'N/A')
+            src_type = summary_info.get('source_type', 'N/A')
+            content_parts.append(f"  - File: {filename} (Type: {src_type})")
+            if summary_info.get('jcl_detailed_description'):
+                content_parts.append(f"    JCL Summary: {summary_info['jcl_detailed_description']}")
+            if summary_info.get('m204_detailed_description'):
+                content_parts.append(f"    M204 Summary: {summary_info['m204_detailed_description']}")
+        content_parts.append("\n")
+
     if options.include_procedures and "procedures" in project_data and project_data["procedures"]:
         content_parts.append("M204 Procedures Data:")
         for proc in project_data["procedures"]:
@@ -130,7 +159,7 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                 f"  - Procedure Name: {proc.get('m204_proc_name', 'N/A')}",
                 f"    Type: {proc.get('m204_proc_type', 'N/A')}",
                 f"    Parameters String: {proc.get('m204_parameters_string', 'None')}",
-                f"    Target COBOL Program: {proc.get('target_cobol_program_name', 'N/A')}",
+                f"    Target COBOL Program: {proc.get('target_cobol_function_name', 'N/A')}", # MODIFIED HERE
             ]
             if options.include_procedure_summaries and proc.get('summary'):
                  proc_details.append(f"    Summary: {proc.get('summary', 'No summary available.')}")
@@ -155,10 +184,79 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                 f"    Target VSAM Dataset Name: {f_data.get('target_vsam_dataset_name', 'N/A')}",
                 f"    Target VSAM Type: {f_data.get('target_vsam_type', 'N/A')}"
             ]
-            if f_data.get("fields"):
-                file_details.append("    Fields:")
-                for field in f_data["fields"]:
-                    file_details.append(f"      - Field Name: {field.get('field_name')}, Attributes Text: {field.get('attributes_text', 'N/A')}")
+            
+            file_def_json = f_data.get("file_definition_json")
+            has_printed_fields_for_this_file = False # Flag to track if any field section has been added for this file
+
+            if file_def_json and isinstance(file_def_json, dict):
+                file_type = file_def_json.get("file_type")
+
+                # 1. Handle DB File fields or DB part of Mixed files
+                db_fields_data = None
+                db_header_text = ""
+                if file_type == "db_file":
+                    db_fields_data = file_def_json.get("fields")
+                    db_header_text = "    Fields (from DB definition):"
+                elif file_type == "mixed":
+                    db_part = file_def_json.get("db_file_definition")
+                    if isinstance(db_part, dict):
+                        db_fields_data = db_part.get("fields")
+                        db_header_text = "    Fields (from DB part of mixed definition):"
+                
+                if isinstance(db_fields_data, dict) and db_fields_data:
+                    file_details.append(db_header_text)
+                    has_printed_fields_for_this_file = True
+                    for field_name, field_attributes in db_fields_data.items():
+                        attrs_str = str(field_attributes) if not isinstance(field_attributes, str) else field_attributes
+                        file_details.append(f"      - Field Name: {field_name}, Attributes: {attrs_str}")
+
+                # 2. Handle Flat File fields (IMAGE statements) or Flat File part of Mixed files
+                image_definitions_list = None
+                image_header_prefix_text = ""
+                if file_type == "flat_file":
+                    image_definitions_list = file_def_json.get("image_definitions")
+                    image_header_prefix_text = "    Fields (from flat file IMAGE"
+                elif file_type == "mixed":
+                    flat_part = file_def_json.get("flat_file_definition")
+                    if isinstance(flat_part, dict):
+                        image_definitions_list = flat_part.get("image_definitions")
+                    image_header_prefix_text = "    Fields (from flat file part of mixed IMAGE"
+
+                if isinstance(image_definitions_list, list):
+                    for image_def in image_definitions_list:
+                        if isinstance(image_def, dict):
+                            image_name = image_def.get('image_name', 'Unnamed')
+                            fields_in_image = image_def.get("fields")
+                            if isinstance(fields_in_image, list) and fields_in_image:
+                                file_details.append(f"{image_header_prefix_text} '{image_name}'):")
+                                has_printed_fields_for_this_file = True
+                                for field_item in fields_in_image:
+                                    if isinstance(field_item, dict):
+                                        file_details.append(f"      - Field Name: {field_item.get('name', 'N/A')}, Attributes: {field_item.get('attributes', 'N/A')}") # Adjusted to match typical IMAGE field structure
+                                    else:
+                                        log.warning(f"Item in IMAGE fields list is not a dict for file {f_data.get('m204_file_name')}, image '{image_name}': {type(field_item)}. Data: {str(field_item)[:100]}")
+                                        file_details.append(f"      - Field Data (raw): {str(field_item)}")
+                
+                # 3. Fallback for a generic top-level "fields" key if not handled by specific file_type logic.
+                if not has_printed_fields_for_this_file and "fields" in file_def_json:
+                    generic_fields = file_def_json.get("fields")
+                    if isinstance(generic_fields, list) and generic_fields: 
+                        file_details.append("    Fields (from JSON definition - list):")
+                        for field_item in generic_fields:
+                            if isinstance(field_item, dict):
+                                file_details.append(f"      - Field Name: {field_item.get('name', 'N/A')}, Attributes: {field_item.get('attributes', 'N/A')}")
+                            else:
+                                log.warning(f"Item in generic 'fields' list is not a dict for file {f_data.get('m204_file_name')}: {type(field_item)}. Data: {str(field_item)[:100]}")
+                                file_details.append(f"      - Field Data (raw): {str(field_item)}")
+                    elif isinstance(generic_fields, dict) and generic_fields: 
+                        file_details.append("    Fields (from JSON definition - dictionary):")
+                        for field_name, field_attributes in generic_fields.items():
+                            attrs_str = str(field_attributes) if not isinstance(field_attributes, str) else field_attributes
+                            file_details.append(f"      - Field Name: {field_name}, Attributes: {attrs_str}")
+                    elif generic_fields: 
+                        log.warning(f"Generic 'fields' in file_definition_json is of unexpected type {type(generic_fields)} for file {f_data.get('m204_file_name')}: {str(generic_fields)[:100]}")
+                        file_details.append(f"    Fields Data (raw, unexpected type): {str(generic_fields)}")
+
             content_parts.extend(file_details)
         content_parts.append("\n")
 
@@ -175,11 +273,9 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
             content_parts.append(f"  - DD Name: {dd.get('dd_name')}, DSN: {dd.get('dsn', 'N/A')}, Disposition: {dd.get('disposition', 'N/A')}, Job Name: {dd.get('job_name', 'N/A')}, Step Name: {dd.get('step_name', 'N/A')}")
         content_parts.append("\n")
 
-    if options.include_image_statements and "image_statements" in project_data and project_data["image_statements"]:
-        content_parts.append("IMAGE Statements Data:")
-        for img in project_data["image_statements"]:
-            content_parts.append(f"  - Line Number: {img.get('line_number')}, Referenced M204 Logical Name: {img.get('referenced_m204_logical_name', 'N/A')}, Image Content Snippet (first 100 chars): `{img.get('image_content', '')[:100]}...`")
-        content_parts.append("\n")
+    # IMAGE Statements Data - REMOVED
+    # if options.include_image_statements and "image_statements" in project_data and project_data["image_statements"]: # This option no longer exists
+    #     pass # Logic removed
 
     if options.include_procedure_calls and "procedure_calls" in project_data and project_data["procedure_calls"]:
         content_parts.append("Procedure Call Relationships Data:")
@@ -187,14 +283,17 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
             calling_proc_id = call.get('calling_procedure_id')
             calling_proc_name = "N/A"
             if calling_proc_id and "procedures" in project_data and project_data["procedures"]:
-                caller = next((p for p in project_data["procedures"] if p.get("proc_id") == calling_proc_id), None)
+                # Assuming proc_id is the primary key for procedures in the serialized data
+                caller = next((p for p in project_data["procedures"] if p.get("proc_id") == calling_proc_id or p.get("m204_proc_id") == calling_proc_id), None) # m204_proc_id might be a typo, proc_id is standard
                 if caller: 
                     calling_proc_name = caller.get("m204_proc_name", "N/A")
-
+                else:
+                    log.debug(f"Calling procedure ID {calling_proc_id} not found in pre-loaded procedure data for call ID {call.get('procedure_call_id')}") # procedure_call_id might be a typo, call_id is standard
             content_parts.append(f"  - Calling Procedure Name: {calling_proc_name} (ID: {calling_proc_id}), Called Procedure Name: {call.get('called_procedure_name')}, Line Number: {call.get('line_number')}, Is External: {call.get('is_external')}")
         content_parts.append("\n")
 
     return "\n".join(content_parts)
+
 
 
 async def generate_and_save_project_requirements_document(
@@ -203,6 +302,33 @@ async def generate_and_save_project_requirements_document(
     options: RequirementGenerationOptionsSchema,
     custom_prompt_section: Optional[str] = None
 ) -> RequirementDocumentResponseSchema:
+    """
+    Generates a comprehensive Software Requirements Specification (SRS) document
+    in Markdown format for a given project using an LLM.
+
+    The function fetches project data, constructs a detailed prompt for the LLM,
+    invokes the LLM to generate the Markdown content, and then saves the
+    resulting document to the database.
+
+    Args:
+        db: The SQLAlchemy database session.
+        project_id: The ID of the project for which to generate the document.
+        options: An instance of RequirementGenerationOptionsSchema specifying
+                 which data components to include in the generation process.
+        custom_prompt_section: An optional string containing custom instructions
+                               or context to be added to the LLM prompt.
+
+    Returns:
+        A RequirementDocumentResponseSchema object representing the created
+        document, including its content and metadata.
+
+    Raises:
+        HTTPException:
+            - 404 (Not Found): If the specified project_id does not exist.
+            - 503 (Service Unavailable): If the LLM service is not configured or fails.
+            - 500 (Internal Server Error): If there's an LLM error during generation
+              or a database error during saving.
+    """
     log.info(f"Starting requirements document generation for project ID: {project_id} with options: {options.model_dump_json()}")
 
     if not llm_config._llm:
@@ -220,6 +346,7 @@ You are a senior technical analyst and writer. Your task is to generate a compre
 The document content should be based *solely* on the structured data provided below. Do not invent information not present in the provided data.
 Generate a single, well-formatted Markdown document. Your analysis should be insightful, going beyond simple listing of data where appropriate.
 Emphasize the use of **paragraphs for description and bullet points for lists of attributes or related items**, rather than relying solely on tables for all data presentation. Tables can be used sparingly for very dense, tabular data if it aids clarity significantly.
+**When generating Mermaid diagrams, ensure the syntax is correct and the diagram is enclosed in a ```mermaid ... ``` fenced code block. If data is insufficient for a meaningful and correct diagram, state this clearly instead of outputting malformed code.**
 
 **Input Data (Summary of system components and relationships):**
 --- BEGIN SYSTEM DATA ---
@@ -230,37 +357,90 @@ Emphasize the use of **paragraphs for description and bullet points for lists of
 
 Please structure the Markdown document with the following sections and headings.
 If data for a specific section is not available or not applicable based on the input (e.g., if the corresponding '--- BEGIN SYSTEM DATA ---' section is empty or missing), include the heading and a brief note like "Not applicable based on provided data." or "No data available for this section."
+**When discussing JCL, M204 Procedures, or M204 Files, refer to any relevant 'Source File LLM-Generated Summaries' provided in the input data to give broader context to your descriptions.**
 
 The document should start with a main title: "# Requirements Document: {project_name}"
 
 Then, include the following sections:
 
 ## 1. Project Overview
-   (Provide a narrative overview in a paragraph or two based on the 'Project Information' from the input data. Include project name, description, and creation date.)
+   (Provide a narrative overview in a paragraph or two based on the 'Project Information' from the input data. Include project name, description, and creation date.
+    **Also, list any COBOL programs identified as targets of M204 procedures (from 'M204 Procedures Data' - `target_cobol_function_name`) and briefly describe their potential role in the system based on the procedures that call them and any relevant 'Source File LLM-Generated Summaries'.**
+    You can also incorporate high-level insights from the 'Source File LLM-Generated Summaries' if they provide a good overview of the system's nature.)
+
+   ### 1.1. Conceptual Data Model Diagram
+      (Based on the 'M204 File Definitions Data' (providing `m204_file_name`) and primarily the 'Source File LLM-Generated Summaries' (specifically the `m204_detailed_description` for relevant M204 source files), generate a Mermaid Entity-Relationship (ER) diagram using `erDiagram` syntax.
+       Each M204 file listed in 'M204 File Definitions Data' (e.g., `CUSTFILE`) should be considered as a potential entity.
+       Use the `m204_detailed_description` associated with the M204 source file (found in 'Source File LLM-Generated Summaries' by correlating the M204 file with its defining source file's `original_filename`) that likely defines or describes these M204 data files to understand their purpose, key data elements, and relationships.
+       Represent each significant M204 data file as an entity in the diagram.
+       Infer attributes for these entities from the `m204_detailed_description`. If the description mentions specific fields or data points, list them. You can use the `file_definition_json` from 'M204 File Definitions Data' as a secondary source to list specific field names and types if the textual description is not detailed enough for attributes, or to confirm attributes. Indicate primary keys (PK) or key fields if identifiable from either the description or the JSON (e.g., attributes containing "KEY").
+       Infer relationships between entities (M204 files) based on how the `m204_detailed_description` explains their interactions or shared data. Depict these relationships using standard ERD notation (e.g., `||--o{{`, `||--|{{`, `}}o--||`, `}}|--||`).
+       **Enclose the syntactically correct Mermaid code for an `erDiagram` within a fenced code block like this:**
+       ```mermaid
+       erDiagram
+           CUSTOMER ||--o{{ ORDER : places
+           CUSTOMER {{
+               string cust_id PK "Customer ID"
+               string name "Customer Name"
+               string email "Email Address"
+           }}
+           ORDER ||--|{{ LINE_ITEM : "contains"
+           ORDER {{
+               string order_id PK "Order ID"
+               string cust_id FK "References CUSTOMER"
+               date order_date "Order Date"
+           }}
+           LINE_ITEM {{
+               string item_id PK "Line Item ID"
+               string order_id FK "References ORDER"
+               string product_name "Product Name"
+               int quantity "Quantity"
+           }}
+       ```
+       Focus on the main data files and their core attributes as described. If the `m204_detailed_description` is sparse or relationships are not clear, generate a simpler diagram showing entities and their primary attributes based on the available information, and state that detailed relationships could not be fully mapped.
+       **If data from 'M204 File Definitions Data' and 'Source File LLM-Generated Summaries' (specifically `m204_detailed_description`) is insufficient to generate a meaningful and syntactically correct diagram, include the heading and state "Data insufficient to generate a conceptual data model diagram." instead of providing malformed Mermaid code.**)
 
 ## 2. M204 Procedures
-   (Based on 'M204 Procedures Data':
-    - For each procedure, write a descriptive paragraph. This paragraph should cover its name, type, and target COBOL program.
+   (Based on 'M204 Procedures Data' and relevant 'Source File LLM-Generated Summaries' for M204 files:
+    - For each procedure, write a descriptive paragraph. This paragraph should cover its name and type. (Information about target COBOL programs is now covered in the Project Overview section).
     - If a procedure summary is available in the input, incorporate it into the descriptive paragraph.
     - Detail parameters and any variables defined within the procedure using bullet points *underneath* the main descriptive paragraph for that procedure.
     - For example:
-      "The procedure **SAMPLE_PROC** is an **ONLINE** type procedure. It is designed to handle user interactions for updating customer records and interfaces with the COBOL program **CUSTUPDTE**. The primary function of this procedure appears to be real-time data modification based on user input.
+      "The procedure **SAMPLE_PROC** is an **ONLINE** type procedure, found in the M204 source file `SOURCEA.M204` (refer to the summary for `SOURCEA.M204` for its overall purpose). The primary function of this procedure appears to be real-time data modification based on user input.
       * Parameters: `ACCOUNT_NUMBER, UPDATE_DATA`
       * Variables defined in procedure:
         * `%OLD_VALUE` (Type: `STRING`, Scope: `LOCAL`, COBOL Mapped Name: `WS-OLD-VAL`)
         * `%NEW_VALUE` (Type: `STRING`, Scope: `LOCAL`, COBOL Mapped Name: `WS-NEW-VAL`)"
-    - Conclude this section with a brief summary paragraph discussing any observed overall purpose or common themes across the procedures.)
+    - Conclude this section with a brief summary paragraph discussing any observed overall purpose or common themes across the procedures, informed by individual procedure details and the broader M204 source file summaries.)
 
 ## 3. M204 File Definitions
-   (Based on 'M204 File Definitions Data':
-    - For each M204 file, write a descriptive paragraph. This paragraph should cover its name, M204 attributes, whether it's a database file, and its target VSAM dataset name and type.
-    - Within the description of each file, list its fields using bullet points. Each bullet point should detail the field's name and its M204 attributes. For example:
-      "The M204 file **CUSTFILE** is defined with attributes `(attribute_list)`. It is flagged as a database file and maps to the target VSAM dataset **PROD.CUSTOMER.MASTER** of type `KSDS`. This file appears to store core customer master data.
-      * Fields:
+   (Based on 'M204 File Definitions Data' and relevant 'Source File LLM-Generated Summaries' for M204 files:
+    - For each M204 file, write a descriptive paragraph. This paragraph should cover its name, M204 attributes, whether it's a database file, and its target VSAM dataset name and type. Use the LLM-generated summary for the M204 source file where this file definition might be elaborated if available.
+    - If field information is available within the `file_definition_json` attribute of a file, list those fields using bullet points. Each bullet point should detail the field's name and its M204 attributes. For example:
+      "The M204 file **CUSTFILE** is defined with attributes `(attribute_list)`. It is flagged as a database file and maps to the target VSAM dataset **PROD.CUSTOMER.MASTER** of type `KSDS`. The M204 source summary for `MAINCUST.M204` indicates this file is central to customer data management. This file appears to store core customer master data.
+      * Fields (from JSON definition, if available):
         * `CUST_ID` (Attributes: `KEY, NUMERIC, ...`)
-        * `CUST_NAME` (Attributes: `TEXT, ...`)
-        * `CUST_ADDRESS` (Attributes: `TEXT, OCCURS 10, ...`)"
-    - Conclude with a summary paragraph about the general categories or types of data managed by these files.)
+        * `CUST_NAME` (Attributes: `TEXT, ...`)"
+    - If no detailed field information is available in `file_definition_json`, state that "Detailed field structure not available in the provided data for this file."
+    - Conclude with a summary paragraph about the general categories or types of data managed by these files based on their names, attributes, and the overall M204 source file summaries.)
+
+   ### 3.1. M204 File and Associated VSAM/JCL Diagram
+      (Based on 'M204 File Definitions Data' (`m204_file_name`, `target_vsam_dataset_name`) and 'JCL DD Statements Data' (`dd_name`, `dsn`), generate a Mermaid flowchart diagram.
+       The diagram should show each M204 file and its target VSAM dataset name.
+       If a JCL DD Statement's `dsn` matches an M204 file's `target_vsam_dataset_name`, create a link from the JCL DD statement node to the M204 file node.
+       Represent M204 files as `M204: <m204_file_name> (VSAM: <target_vsam_dataset_name>)`.
+       Represent JCL DD statements as `JCL DD: <dd_name> (DSN: <dsn>)`.
+       **Enclose the syntactically correct Mermaid code within a fenced code block like this:**
+       ```mermaid
+       graph TD;
+           M204_CUST["M204: CUSTFILE (VSAM: PROD.DATA.CUST)"];
+           M204_ACCT["M204: ACCTFILE (VSAM: PROD.DATA.ACCT)"];
+           DD_INPCUST["JCL DD: INPCUST (DSN: PROD.DATA.CUST)"];
+           DD_OTACCT["JCL DD: OTACCT (DSN: PROD.DATA.ACCT)"];
+           DD_INPCUST --> M204_CUST;
+           DD_OTACCT --> M204_ACCT;
+       ```
+       **If no such relationships are found or data is insufficient to generate a meaningful and syntactically correct diagram, include the heading and state "No clear M204 file to JCL DD statement links found or data is insufficient to generate a diagram." instead of providing malformed Mermaid code.**)
 
 ## 4. Global/Public M204 Variables
    (Based on 'Global/Public M204 Variables Data':
@@ -269,39 +449,69 @@ Then, include the following sections:
     - Follow the list with a paragraph further explaining the potential collective purpose or usage patterns of these global variables based on their characteristics.)
 
 ## 5. JCL DD Statements
-   (Based on 'JCL DD Statements Data':
-    - Start with a paragraph describing the role of JCL DD statements in interfacing the M204 application with datasets.
+   (Based on 'JCL DD Statements Data' and relevant 'Source File LLM-Generated Summaries' for JCL files:
+    - Start with a paragraph describing the role of JCL DD statements in interfacing the M204 application with datasets. Refer to the LLM-generated summaries for the JCL files to provide context on the overall purpose of the JCLs containing these DD statements.
     - List the relevant DD statements. You can use bullet points for each DD statement, detailing its DD Name, DSN, Disposition, and the Job and Step context. A compact table could also be appropriate here if there are many with similar structures.
-    - Conclude with a paragraph highlighting any DD statements that seem particularly critical (e.g., for primary input/output files, connections to other systems).)
+    - Conclude with a paragraph highlighting any DD statements that seem particularly critical (e.g., for primary input/output files, connections to other systems), considering their role within the summarized JCL job flow.)
 
-## 6. IMAGE Statements
-   (Based on 'IMAGE Statements Data':
-    - Describe any IMAGE statements found in a narrative form. For each statement, explain its context (line number, referenced M204 logical name if any) and provide a snippet of its content.
-    - Use bullet points if listing multiple IMAGE statements, with a brief description for each.
-    - Discuss the likely purpose of these IMAGE statements (e.g., dynamic screen element generation, report formatting cues) in a concluding paragraph for this section.)
+   ### 5.1. JCL Job/Step Flow Diagram
+      (Based on 'JCL DD Statements Data' (`job_name`, `step_name`, `dd_name`, `dsn`), generate a Mermaid flowchart diagram illustrating the JCL job and step flow.
+       Group DD statements under their respective steps, and steps under their respective jobs.
+       Represent jobs as `Job: <job_name>`, steps as `Step: <step_name>`. DD statements can be represented by their `dd_name` and `dsn`.
+       **Enclose the syntactically correct Mermaid code within a fenced code block like this:**
+       **A better example for JCL Job/Step Flow using subgraphs:**
+       ```mermaid
+       graph TD;
+           subgraph "Job: JOB01"
+               direction LR;
+               J1_STEP01["Step: STEP01"];
+               J1_STEP01 --> J1_DDIN["DD: DDIN (DSN: INPUT.FILE)"];
+               J1_STEP01 --> J1_DDOUT["DD: DDOUT (DSN: OUTPUT.FILE)"];
+           end
+           subgraph "Job: JOB02"
+               direction LR;
+               J2_STEPX["Step: STEPX"];
+               J2_STEPX --> J2_DDSYS["DD: SYSIN (DSN: *.STEPX.SYSIN)"];
+           end
+       ```
+       **If no JCL DD statement data is available to generate a meaningful and syntactically correct diagram, include the heading and state "No JCL data available to generate a job/step flow diagram." instead of providing malformed Mermaid code.**)
 
-## 7. Procedure Call Flow
+## 6. Procedure Call Flow
    (Based on 'Procedure Call Relationships Data':
     - Describe the procedure call flow using narrative paragraphs to explain major sequences or interactions.
     - Supplement with bullet points to list specific call relationships, indicating the calling procedure, the called procedure, the line number of the call, and whether it's an external call.
-    - Focus on making the control flow and dependencies clear. Try to identify and describe any main processing sequences, critical execution paths, or highly interconnected modules.)
+    - Focus on making the control flow and dependencies clear. Try to identify and describe any main processing sequences, critical execution paths, or highly interconnected modules.
 
-## 8. Data Dictionary / Key Data Elements
-   (Synthesize information from 'M204 File Definitions Data' (fields), 'Global/Public M204 Variables Data', and 'M204 Procedures Data' (variables_in_procedure).
+   ### 6.1. Procedure Call Diagram 
+      (Based on the 'Procedure Call Relationships Data', generate a Mermaid flowchart diagram (e.g., `graph TD;` for Top-Down or `graph LR;` for Left-to-Right) illustrating the direct call relationships between procedures.
+       The diagram should clearly show which procedure calls which other procedure(s). Use the actual procedure names found in the data.
+       **Enclose the syntactically correct Mermaid code within a fenced code block like this:**
+       ```mermaid
+       graph TD;
+           PROC_A["Procedure A"] --> PROC_B["Procedure B"];
+           PROC_A["Procedure A"] --> PROC_C["Procedure C"];
+           PROC_B["Procedure B"] --> PROC_D["Procedure D"];
+           PROC_E["Procedure E"]; // A procedure that is called but doesn't call, or isn't called but exists
+       ```
+       Ensure all unique procedure names involved in any call (callers and callees) are represented as nodes in the diagram.
+       **If no procedure calls exist in the 'Procedure Call Relationships Data' or data is insufficient to generate a meaningful and syntactically correct diagram, include the heading and state "No procedure call relationships found or data is insufficient to generate a diagram." instead of providing malformed Mermaid code.**)
+
+## 7. Data Dictionary / Key Data Elements
+   (Synthesize information from 'M204 File Definitions Data' (primarily `file_definition_json` if available for field details), 'Global/Public M204 Variables Data', and 'M204 Procedures Data' (variables_in_procedure).
     - Describe key data elements in paragraphs. For each element or group of related elements, discuss its apparent meaning and use.
-    - Use bullet points to list specific attributes like M204 data type/attributes and where it's primarily used (e.g., in which files or procedure types).
-    - If a comprehensive dictionary isn't directly inferable, provide a narrative summary of the main types of data the system processes and their significance.)
+    - Use bullet points to list specific attributes like M204 data type/attributes (from `file_definition_json` or variable definitions) and where it's primarily used (e.g., in which files or procedure types).
+    - If a comprehensive dictionary isn't directly inferable due to lack of detailed field definitions, provide a narrative summary of the main types of data the system processes based on file names, variable names, and their significance.)
 
-## 9. External Interfaces
+## 8. External Interfaces
    (Infer from 'JCL DD Statements Data' (DSNs) and 'M204 File Definitions Data' (attributes suggesting external links).
     - Describe in paragraph form any identified external systems, datasets, or interfaces that the M204 application interacts with. Explain the nature of these interactions if discernible.)
 
-## 10. Non-Functional Requirements
+## 9. Non-Functional Requirements
    (Review all provided data for hints towards non-functional requirements.
     - Describe any identified NFRs (e.g., performance considerations from file attributes, security aspects from field encryption, operational constraints) in paragraph form.
     - If none are directly inferable, state that "No specific non-functional requirements were directly inferable from the provided system data.")
 
-## 11. Other Observations / Summary
+## 10. Other Observations / Summary
    (Provide a concluding summary of the system in narrative paragraphs. Highlight any overarching patterns, complexities, or notable observations that don't fit neatly into other sections. Address points from the 'Additional Instructions/Custom Section from User' here if not covered elsewhere.)
 
 After the detailed sections above, include the following major section:
@@ -309,31 +519,31 @@ After the detailed sections above, include the following major section:
 # Technical Requirements
    (This section is intended for a high-level technical audience like Project Management and CTO.
     It should provide a structured, detailed overview of the system's technical aspects based on the provided data.
-    Synthesize and abstract information from the preceding detailed sections, focusing on technical architecture, data flow, and key components.)
+    Synthesize and abstract information from the preceding detailed sections, focusing on technical architecture, data flow, and key components. **Refer to the 'Source File LLM-Generated Summaries' to enrich the descriptions of JCL and M204 components.**)
 
 ### A. System Architecture Overview
    (Describe the high-level components of the M204-based system and their primary roles.
-    Illustrate how M204 procedures (distinguishing between `m204_proc_type` like ONLINE, BATCH, INCLUDE, SUBROUTINE), COBOL programs (as indicated by `target_cobol_program_name` in procedures), JCL (from `DDStatement` data providing `job_name`, `step_name`, `dd_name`, `dsn`, and `disposition`), and M204 files/VSAM datasets (from `M204File` data, including `m204_file_name`, `target_vsam_dataset_name`, `target_vsam_type`) interact to form the overall system architecture.
-    Mention the role of `IMAGE Statements` (from `ImageStatement` data) if they contribute significantly to user interface or report generation architecture.
-    Identify any distinct subsystems or processing layers if they can be inferred from procedure groupings, naming conventions, or data flow patterns observed in the input data.)
+    Illustrate how M204 procedures (distinguishing between `m204_proc_type` like ONLINE, BATCH, INCLUDE, SUBROUTINE), COBOL programs (as indicated by `target_cobol_function_name` in procedures, detailed in Project Overview), JCL (from `DDStatement` data providing `job_name`, `step_name`, `dd_name`, `dsn`, and `disposition`), and M204 files/VSAM datasets (from `M204File` data, including `m204_file_name`, `target_vsam_dataset_name`, `target_vsam_type`) interact to form the overall system architecture. **Use the 'Source File LLM-Generated Summaries' to provide context on the purpose of specific JCL files or M204 source modules.**
+    Identify any distinct subsystems or processing layers if they can be inferred from procedure groupings, naming conventions, or data flow patterns observed in the input data and file summaries.)
 
 ### B. Data Model and Management
-   (Detail the key data entities managed by the system, as identified from `M204 File Definitions Data` (specifically `m204_file_name` and its associated `fields`). For each M204 file, describe its purpose (e.g., master data, transactional data, index files, work files) based on its name, attributes, and fields.
+   (Detail the key data entities managed by the system, as identified from `M204 File Definitions Data` (specifically `m204_file_name` and its associated `file_definition_json` if present). For each M204 file, describe its purpose (e.g., master data, transactional data, index files, work files) based on its name, attributes, and any field information available in `file_definition_json`. **Corroborate with 'Source File LLM-Generated Summaries' for M204 files.**
     Explain how data is stored, referencing `M204File.is_db_file`, `M204File.target_vsam_dataset_name`, and `M204File.target_vsam_type` (e.g., KSDS, ESDS).
-    Describe significant characteristics of the data model by analyzing `M204Field` data:
-    - Key fields (e.g., those with `KEY` in `attributes_text`).
-    - Data types and lengths (e.g., NUMERIC, TEXT, specific lengths from `attributes_text`).
-    - Occurrences (e.g., `OCCURS` clauses in `attributes_text`).
+    Describe significant characteristics of the data model by analyzing field data if available in `file_definition_json`:
+    - Key fields (e.g., those with `KEY` in JSON attributes).
+    - Data types and lengths (e.g., NUMERIC, TEXT, specific lengths from JSON attributes).
+    - Occurrences (e.g., `OCCURS` clauses in JSON attributes).
     - Relationships implied by field names or usage across different files or procedures.
+    If detailed field information is not available, describe the data model at a higher level based on file names and their general attributes.
     Summarize the overall data flow:
     - Data Ingress: How data enters the system (e.g., through JCL DD statements with `disposition` SHR or OLD, or via ONLINE procedures).
     - Data Processing: How data is transformed or used internally (e.g., by M204 procedures, manipulated using variables, stored/retrieved from M204 files).
-    - Data Egress: How data leaves the system (e.g., through JCL DD statements with `disposition` NEW or MOD, or reports generated via IMAGE statements or procedures).)
+    - Data Egress: How data leaves the system (e.g., through JCL DD statements with `disposition` NEW or MOD, or reports generated via procedures).)
 
 ### C. Core Processing Logic and Control Flow
-   (Explain the main processing sequences and business logic implemented within the M204 procedures, referencing their `m204_proc_type` and interactions with `target_cobol_program_name`s.
+   (Explain the main processing sequences and business logic implemented within the M204 procedures, referencing their `m204_proc_type` and interactions with COBOL programs (whose roles are discussed in Project Overview). **Contextualize with 'Source File LLM-Generated Summaries' for the M204 files containing these procedures.**
     Highlight critical procedures or call chains by analyzing `Procedure Call Relationships Data` (using `calling_procedure_name`, `called_procedure_name`, `line_number` of call, and `is_external` flag). Discuss the significance of frequently called procedures or key external calls.
-    Describe how user interactions (for `ONLINE` procedures, potentially involving `IMAGE Statements`) or batch processes (inferred from `BATCH` procedure types and associated JCL `job_name`/`step_name` context) are handled.
+    Describe how user interactions (for `ONLINE` procedures) or batch processes (inferred from `BATCH` procedure types and associated JCL `job_name`/`step_name` context) are handled.
     Discuss the role of `M204Variable`s:
     - Global/Public variables (`scope` is GLOBAL or PUBLIC): Their purpose in system-wide state management, data sharing between modules, or configuration. Refer to their `variable_name`, `variable_type`, and `cobol_mapped_variable_name`.
     - Procedure-local variables (`scope` is LOCAL): Their use within specific procedures, including `m204_parameters_string` for input/output to procedures.
@@ -342,30 +552,30 @@ After the detailed sections above, include the following major section:
 ### D. External Interfaces and Dependencies
    (List and describe all identified external systems, datasets, or services that the M204 application interacts with.
     Base this on:
-    - `JCL DD Statements Data`: Analyze `dsn`s that point to external (non-system specific) files or GDGs. Note the `disposition` (e.g., NEW, MOD for outputs; OLD, SHR for inputs) to understand data direction.
+    - `JCL DD Statements Data`: Analyze `dsn`s that point to external (non-system specific) files or GDGs. Note the `disposition` (e.g., NEW, MOD for outputs; OLD, SHR for inputs) to understand data direction. **The 'Source File LLM-Generated Summaries' for JCLs might clarify the purpose of these external datasets.**
     - `M204 File Definitions Data`: Check if `m204_attributes` or `target_vsam_dataset_name` suggest links to shared datasets with other applications or standard interface files.
     - `Procedure Call Relationships Data`: `is_external` calls might indicate interfaces to other systems or shared utilities if `called_procedure_name` implies this.
     Specify the nature of these interfaces (e.g., file-based batch data exchange, shared VSAM datasets, triggers to/from other systems if inferable). Discuss their importance to the system's overall functionality and data integrity.)
 
 ### E. Technology Stack and Environment
    (Summarize the core technologies used, based on available data:
-    - **Model 204:** Note its role (e.g., primary application logic, database). Mention specific features used if inferable from `Procedure.m204_proc_type` (ONLINE, BATCH, INCLUDE, SUBROUTINE indicating User Language/SOUL usage), `M204File.m204_attributes`, or `M204Field.attributes_text`.
-    - **COBOL:** Its role (e.g., complex business logic, batch processing) as indicated by `Procedure.target_cobol_program_name`.
-    - **JCL:** Its function in orchestrating batch jobs, file management, and program execution, detailed by `DDStatement` data (`job_name`, `step_name`, `dsn`, `disposition`).
+    - **Model 204:** Note its role (e.g., primary application logic, database). Mention specific features used if inferable from `Procedure.m204_proc_type` (ONLINE, BATCH, INCLUDE, SUBROUTINE indicating User Language/SOUL usage), `M204File.m204_attributes`, or field attributes. **Refer to 'Source File LLM-Generated Summaries' for M204 files for broader context on how M204 is utilized.**
+    - **COBOL:** Its role (e.g., complex business logic, batch processing) as indicated by `target_cobol_function_name` in procedure data (detailed in Project Overview).
+    - **JCL:** Its function in orchestrating batch jobs, file management, and program execution, detailed by `DDStatement` data (`job_name`, `step_name`, `dsn`, `disposition`). **The 'Source File LLM-Generated Summaries' for JCLs will provide an overview of the job functionalities.**
     - **VSAM:** The types of datasets used (e.g., KSDS, ESDS from `M204File.target_vsam_type`) and their purpose.
     Discuss any technical constraints or environmental considerations inferred from the system data:
     - Dataset Naming Conventions: Patterns observed in `dsn` or `target_vsam_dataset_name`.
     - Batch Windows/Scheduling: Implied by JCL structure or batch procedure design.
     - Security Mechanisms: Any hints from file attributes, variable naming, or procedure structure (though likely limited from this data).
-    - Character Sets/Encoding: If any hints in `attributes_text` or `image_content`.)
+    - Character Sets/Encoding: If any hints in field attributes.)
 
 ### F. Key Non-Functional Aspects (Inferred)
-   (Based on the detailed analysis in section 10 and the overall system data, reiterate and detail any significant non-functional requirements or characteristics critical from a technical perspective. Be specific by referencing the data points that lead to these inferences.
+   (Based on the detailed analysis in section 9 and the overall system data, reiterate and detail any significant non-functional requirements or characteristics critical from a technical perspective. Be specific by referencing the data points that lead to these inferences.
     - **Performance:**
-      - Identify potential bottlenecks or performance-critical areas (e.g., frequently accessed files indicated by `KEY` fields in `M204Field.attributes_text`, complex `ONLINE` procedures, large data volumes suggested by `OCCURS` clauses or file structures).
-      - Discuss indexing strategies (`KEY` fields) and their impact.
+      - Identify potential bottlenecks or performance-critical areas (e.g., frequently accessed files indicated by `KEY` fields in `file_definition_json`, complex `ONLINE` procedures, large data volumes suggested by `OCCURS` clauses in `file_definition_json` or file structures).
+      - Discuss indexing strategies (`KEY` fields from `file_definition_json`) and their impact.
     - **Data Integrity and Consistency:**
-      - Mechanisms implied by field data types and attributes (e.g., `NUMERIC` validation, length constraints).
+      - Mechanisms implied by field data types and attributes (e.g., `NUMERIC` validation, length constraints from `file_definition_json`).
       - Potential for referential integrity issues or consistency challenges if not explicitly managed.
       - Transactional characteristics, if inferable from procedure logic or COBOL interactions.
     - **Security:**
@@ -385,7 +595,7 @@ After the detailed sections above, include the following major section:
 Ensure the entire output is a single Markdown text block, ready to be saved.
 Do not add any preamble or explanation before the first line of the Markdown document (which should be the title: "# Requirements Document: {project_name}").
 """
-    log.debug(f"LLM prompt for requirements document generation (Project ID: {project_id}):\n{prompt_template[:4000]}...")
+    log.debug(f"LLM prompt for requirements document generation (Project ID: {project_id}):\n{prompt_template[:5000]}...") # Increased log snippet size
 
     markdown_content = ""
     try:
@@ -394,6 +604,7 @@ Do not add any preamble or explanation before the first line of the Markdown doc
         if completion_response and completion_response.text:
             markdown_content = completion_response.text
             expected_title = f"# Requirements Document: {project_name}"
+            # Normalize line endings for comparison and for the final content
             normalized_content_start = markdown_content.lstrip().replace('\r\n', '\n').replace('\r', '\n')
             normalized_expected_title = expected_title.replace('\r\n', '\n').replace('\r', '\n')
 
@@ -403,16 +614,19 @@ Do not add any preamble or explanation before the first line of the Markdown doc
             log.info(f"LLM successfully generated markdown content for project {project_id}. Total length: {len(markdown_content)}")
         else:
             log.warning(f"LLM returned empty or no text content for project {project_id}.")
+            # Provide a basic structure if LLM fails to generate anything
             markdown_content = f"# Requirements Document: {project_name}\n\n## 1. Project Overview\nNo data available or LLM failed to generate content.\n\n(Further sections would follow based on template)"
 
 
-        if not markdown_content.strip() or len(markdown_content.strip()) < len(f"# Requirements Document: {project_name}") + 50: # Basic check for meaningful content
+        # Additional check for truly empty or minimal content
+        if not markdown_content.strip() or len(markdown_content.strip()) < len(f"# Requirements Document: {project_name}") + 50: # Arbitrary small number for basic content
             log.warning(f"LLM generated empty or minimal content for project {project_id}. Content: '{markdown_content[:200]}'")
             # Ensure at least the title and a note if content is truly empty
             if not markdown_content.strip():
                  markdown_content = f"# Requirements Document: {project_name}\n\nNo content was generated by the LLM."
-            elif "# Technical Requirements (for PMO/CTO)" not in markdown_content: # If the new section is missing, add a placeholder
-                 markdown_content += "\n\n# Technical Requirements (for PMO/CTO)\n\nNo specific technical requirements could be generated based on LLM output for this section."
+            # If the Technical Requirements section is missing, it's a sign of incomplete generation
+            elif "# Technical Requirements" not in markdown_content:
+                 markdown_content += "\n\n# Technical Requirements\n\nNo specific technical requirements could be generated based on LLM output for this section."
 
 
     except HTTPException as he: # Re-raise HTTPExceptions directly
@@ -441,9 +655,23 @@ Do not add any preamble or explanation before the first line of the Markdown doc
 
     # Prepare response, including the options used for generation
     response_data = RequirementDocumentResponseSchema.model_validate(db_document)
-    response_data.generation_options_used = options # Attach the Pydantic model directly
+    if db_document.generation_options_json:
+        try:
+            # Ensure options are loaded into the correct schema
+            parsed_options = RequirementGenerationOptionsSchema(**db_document.generation_options_json)
+            response_data.generation_options_used = parsed_options
+        except Exception as e_parse_resp:
+            log.warning(f"Could not parse generation_options_json for response for doc ID {db_document.requirement_document_id}: {e_parse_resp}")
+            try:
+                response_data.generation_options_used = RequirementGenerationOptionsSchema.model_validate(db_document.generation_options_json)
+            except Exception as e_fallback_parse:
+                 log.error(f"Fallback parsing of generation_options_json also failed for doc ID {db_document.requirement_document_id}: {e_fallback_parse}")
+                 response_data.generation_options_used = None
+
 
     return response_data
+
+
 
 # --- CRUD functions for RequirementDocument ---
 
@@ -452,17 +680,15 @@ async def get_requirement_document_by_id(db: Session, requirement_document_id: i
     db_document = db.execute(stmt).scalar_one_or_none()
     if db_document:
         response = RequirementDocumentResponseSchema.model_validate(db_document)
-        if db_document.generation_options_json: # This is Dict[str, Any] or None
+        if db_document.generation_options_json: 
             try:
-                # The model_validate should handle dict directly if it's already parsed
-                # If it's a string from older storage, it needs parsing.
                 options_data = db_document.generation_options_json
-                if isinstance(options_data, str):
-                    options_data = json.loads(options_data) # pragma: no cover
+                if isinstance(options_data, str): 
+                    options_data = json.loads(options_data) 
                 response.generation_options_used = RequirementGenerationOptionsSchema(**options_data)
             except Exception as e_parse:
                 log.warning(f"Could not parse generation_options_json for doc ID {requirement_document_id}: {e_parse}. Data: {db_document.generation_options_json}")
-                response.generation_options_used = None # Or some default/empty schema
+                response.generation_options_used = None
         return response
     return None
 
@@ -479,7 +705,7 @@ async def get_latest_requirement_document_by_project_id(db: Session, project_id:
             try:
                 options_data = db_document.generation_options_json
                 if isinstance(options_data, str):
-                    options_data = json.loads(options_data) # pragma: no cover
+                    options_data = json.loads(options_data)
                 response.generation_options_used = RequirementGenerationOptionsSchema(**options_data)
             except Exception as e_parse:
                 log.warning(f"Could not parse generation_options_json for latest doc of project ID {project_id}: {e_parse}. Data: {db_document.generation_options_json}")
@@ -500,7 +726,7 @@ async def get_all_requirement_documents_by_project_id(db: Session, project_id: i
             try:
                 options_data = doc.generation_options_json
                 if isinstance(options_data, str):
-                    options_data = json.loads(options_data) # pragma: no cover
+                    options_data = json.loads(options_data)
                 response_item.generation_options_used = RequirementGenerationOptionsSchema(**options_data)
             except Exception as e_parse:
                 log.warning(f"Could not parse generation_options_json for doc ID {doc.requirement_document_id} in list for project ID {project_id}: {e_parse}. Data: {doc.generation_options_json}")
@@ -512,22 +738,10 @@ async def create_requirement_document(db: Session, doc_data: RequirementDocument
     """
     Directly creates a requirement document. Useful if generation happens elsewhere or for manual entries.
     """
-    # Ensure generation_options_json is a dict before model_dump if it's passed as string
-    # However, RequirementDocumentCreateSchema expects it as Dict[str, Any] or None
-    # If it's coming in as a string, it should be parsed by the caller or the route handler.
-    # For robustness, we can check here too.
-    if isinstance(doc_data.generation_options_json, str):
-        try:
-            doc_data.generation_options_json = json.loads(doc_data.generation_options_json) # pragma: no cover
-        except json.JSONDecodeError as e:
-            log.error(f"Error decoding generation_options_json string in create_requirement_document: {e}") # pragma: no cover
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON format for generation_options_json.") # pragma: no cover
-
     db_model_data = doc_data.model_dump()
-    # Ensure generation_options_json is stored as JSON (it should be a dict from model_dump)
-    # The model RequirementDocument has generation_options_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
-    # So, SQLAlchemy handles the dict to JSON conversion.
-
+    if 'generation_options_json' in db_model_data and isinstance(db_model_data['generation_options_json'], RequirementGenerationOptionsSchema):
+        db_model_data['generation_options_json'] = db_model_data['generation_options_json'].model_dump()
+    
     db_document = RequirementDocument(**db_model_data)
     db.add(db_document)
     try:
@@ -539,11 +753,10 @@ async def create_requirement_document(db: Session, doc_data: RequirementDocument
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Could not create document: {str(e)}")
 
     response = RequirementDocumentResponseSchema.model_validate(db_document)
-    if db_document.generation_options_json: # This will be a dict
+    if db_document.generation_options_json: 
         try:
-            # generation_options_json from db_document is already a dict
             response.generation_options_used = RequirementGenerationOptionsSchema(**db_document.generation_options_json)
-        except Exception as e_parse: # Should not happen if data is valid
-            log.warning(f"Could not parse generation_options_json from created document for response: {e_parse}. Data: {db_document.generation_options_json}") # pragma: no cover
-            response.generation_options_used = None # pragma: no cover
+        except Exception as e_parse: 
+            log.warning(f"Could not parse generation_options_json from created document for response: {e_parse}. Data: {db_document.generation_options_json}") 
+            response.generation_options_used = None
     return response

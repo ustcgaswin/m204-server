@@ -8,8 +8,8 @@ from app.schemas.requirement_document_schema import (
     GenerateRequirementsRequestSchema
     # RequirementGenerationOptionsSchema is part of GenerateRequirementsRequestSchema
 )
-from app.schemas.response_schema import Response 
-from app.services import requirement_document_service 
+from app.schemas.response_schema import Response
+from app.services import requirement_document_service
 from app.services import project_service # To check if project exists
 from app.utils.logger import log
 
@@ -34,7 +34,7 @@ async def generate_and_save_requirements_document_for_project(
     db: Session = Depends(get_db)
 ):
     log.info(f"Received request to generate requirements document for project ID: {project_id} with options: {request_body.options.model_dump_json()}")
-    
+
     # Ensure project exists
     db_project = await project_service.get_project_by_id(db, project_id=project_id)
     if not db_project:
@@ -52,11 +52,11 @@ async def generate_and_save_requirements_document_for_project(
         # The generated_doc_data from the service now includes 'generation_options_used' populated with the input 'options'
         return Response[RequirementDocumentResponseSchema](
             message="Requirements document generated and saved successfully.",
-            data=generated_doc_data 
+            data=generated_doc_data
         )
     except HTTPException as he:
         log.error(f"HTTPException during requirements document generation for project {project_id}: {he.detail}", exc_info=True)
-        raise he 
+        raise he
     except Exception as e:
         log.error(f"Unexpected error during requirements document generation for project {project_id}: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -66,7 +66,7 @@ async def generate_and_save_requirements_document_for_project(
 
 @router.get(
     "/projects/{project_id}/latest-document",
-    response_model=Response[Optional[RequirementDocumentResponseSchema]], 
+    response_model=Response[Optional[RequirementDocumentResponseSchema]],
     summary="Get the Latest Generated Requirements Document for a Project"
 )
 async def get_latest_requirements_document_for_project(
@@ -84,7 +84,7 @@ async def get_latest_requirements_document_for_project(
             message="No requirements document found for this project.",
             data=None
         )
-    
+
     return Response[Optional[RequirementDocumentResponseSchema]](
         message="Latest requirements document retrieved successfully.",
         data=document # This will include 'generation_options_used' if populated by the service
@@ -95,7 +95,7 @@ async def get_latest_requirements_document_for_project(
     response_model=Response[RequirementDocumentResponseSchema],
     summary="Get a Specific Generated Requirements Document by ID"
 )
-async def get_requirements_document_by_id_route( 
+async def get_requirements_document_by_id_route(
     requirement_document_id: int,
     db: Session = Depends(get_db)
 ):
@@ -103,7 +103,7 @@ async def get_requirements_document_by_id_route(
     document = await requirement_document_service.get_requirement_document_by_id(db, requirement_document_id)
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Requirements document with ID {requirement_document_id} not found.")
-    
+
     return Response[RequirementDocumentResponseSchema](
         message="Requirements document retrieved successfully.",
         data=document # This will include 'generation_options_used' if populated by the service
@@ -124,7 +124,7 @@ async def list_all_requirements_documents_for_project(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project with ID {project_id} not found.")
 
     documents = await requirement_document_service.get_all_requirement_documents_by_project_id(db, project_id)
-    
+
     return Response[List[RequirementDocumentResponseSchema]](
         message=f"Retrieved {len(documents)} requirements documents for project ID {project_id}.",
         data=documents # Each item will include 'generation_options_used' if populated by the service

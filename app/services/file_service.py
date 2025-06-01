@@ -14,7 +14,8 @@ async def save_uploaded_file_and_create_db_entry(
     db: Session,
     project_id: int,
     file: UploadFile,
-    user_defined_path_segment_for_file: str # Changed parameter name for clarity
+    user_defined_path_segment_for_file: str, # Changed parameter name for clarity
+    source_type: str  # Added source_type parameter
 ) -> InputSource:
     db_project = await project_service.get_project_by_id(db, project_id=project_id)
     if not db_project:
@@ -50,15 +51,12 @@ async def save_uploaded_file_and_create_db_entry(
         )
 
     original_file_name = file.filename
-    file_extension = None
-    if original_file_name:
-        _, ext = os.path.splitext(original_file_name)
-        file_extension = ext.lstrip('.').lower() if ext else "unknown" 
+    # Removed file extension extraction, source_type is now provided
 
     db_input_source = InputSource(
         project_id=project_id,
         original_filename=original_file_name,
-        source_type=file_extension, 
+        source_type=source_type.lower() if source_type else "unknown", # Use provided source_type
         file_path_or_identifier=actual_saved_path,
         analysis_status="uploaded" 
     )
@@ -67,12 +65,11 @@ async def save_uploaded_file_and_create_db_entry(
         db.add(db_input_source)
         db.commit()
         db.refresh(db_input_source)
-        log.info(f"Database entry created for InputSource ID {db_input_source.input_source_id} (original name: '{original_file_name}', type: '{file_extension}', file: '{actual_saved_path}')")
+        log.info(f"Database entry created for InputSource ID {db_input_source.input_source_id} (original name: '{original_file_name}', type: '{db_input_source.source_type}', file: '{actual_saved_path}')")
     except Exception as e:
-        log.error(f"Database error creating entry for file '{file.filename}' (path: '{actual_saved_path}', project {project_id}): {e}", exc_info=True)
+        log.error(f"Database error creating entry for file '{file.filename}' (path: '{actual_saved_path}', project {project_id}, type: '{source_type}'): {e}", exc_info=True)
         if actual_saved_path:
             try:
-                # Ensure file_utils.remove_file is available and correct
                 await file_utils.remove_file(actual_saved_path) 
                 log.info(f"Cleaned up file '{actual_saved_path}' after DB error.")
             except FileRemoveError as remove_e:
@@ -102,7 +99,6 @@ async def delete_source_file_and_entry(db: Session, input_source_id: int) -> Inp
     project_id_for_log = db_input_source.project_id
     original_filename_for_log = db_input_source.original_filename
 
-    # It's good practice to capture the state for the response *before* deletion.
     deleted_object_data = InputSourceResponseSchema.model_validate(db_input_source)
 
     try:
@@ -116,12 +112,9 @@ async def delete_source_file_and_entry(db: Session, input_source_id: int) -> Inp
 
     if file_path_to_delete:
         try:
-            await file_utils.remove_file(file_path_to_delete) # Assuming remove_file can be async or is sync
+            await file_utils.remove_file(file_path_to_delete) 
             log.info(f"Successfully deleted file from filesystem: '{file_path_to_delete}' for InputSource ID {input_source_id}.")
         except FileRemoveError as e:
-            # Log this, but don't raise an HTTP exception if DB entry was deleted, 
-            # as the primary operation (DB delete) succeeded.
-            # The client might need to be informed differently or a cleanup task scheduled.
             log.error(f"FileRemoveError for InputSource ID {input_source_id}: Failed to delete file '{file_path_to_delete}'. DB record was already deleted. Error: {e.args[0]} - Original: {e.original_exception}")
         except Exception as e:
             log.error(f"Unexpected error deleting file '{file_path_to_delete}' for InputSource ID {input_source_id} after DB record deletion: {e}", exc_info=True)
@@ -150,10 +143,8 @@ async def get_source_file_path_and_name(db: Session, input_source_id: int) -> tu
     if not db_input_source or not db_input_source.file_path_or_identifier:
         return None, None
     
-    # Check if file exists on the server before returning path
     if not os.path.exists(db_input_source.file_path_or_identifier):
         log.error(f"File path '{db_input_source.file_path_or_identifier}' for input_source_id {input_source_id} does not exist on server.")
-        # Optionally, update DB status here to reflect missing file if desired
         return None, None 
 
     return db_input_source.file_path_or_identifier, db_input_source.original_filename

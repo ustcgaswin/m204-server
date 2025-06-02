@@ -17,6 +17,8 @@ from app.schemas.m204_analysis_schema import (
 from app.utils.logger import log
 from app.config.llm_config import llm_config
 
+LLM_API_CALL_BATCH_SIZE = 5
+
 
 class M204FieldVsamSuggestion(BaseModel):
     """Structured output for VSAM suggestions for a single M204 field."""
@@ -87,7 +89,7 @@ async def _populate_vsam_suggestions_for_all_fields_parallel(
     all_parsed_file_contexts: List[Dict[str, Any]]
 ):
     """
-    Populates VSAM suggestions for all fields across multiple file contexts using parallel LLM calls.
+    Populates VSAM suggestions for all fields across multiple file contexts using parallel LLM calls with batching.
     Modifies the `all_parsed_file_contexts` list in place.
     """
     if not llm_config._llm:
@@ -99,31 +101,55 @@ async def _populate_vsam_suggestions_for_all_fields_parallel(
                     field_info_dict["vsam_suggestions"] = {"m204_field_name": field_name} # Add field name for consistency
         return
 
-    llm_tasks = []
-    # Stores tuples of (field_info_dict_ref, original_field_name_str) to map results back
-    field_references_for_update: List[Tuple[Dict[str, Any], str]] = [] 
+    # Stores tuples of (task_coroutine, field_info_dict_ref, original_field_name_str)
+    # This helps in associating results back to the correct field_info_dict after batch processing.
+    llm_tasks_with_references: List[Tuple[Any, Dict[str, Any], str]] = [] 
 
     for file_data in all_parsed_file_contexts:
         current_file_name = file_data.get("file_name", "UNKNOWN_FILE")
         for field_name, field_info_dict in file_data.get("fields", {}).items():
             attributes = field_info_dict.get("attributes", [])
-            llm_tasks.append(
-                _get_llm_vsam_suggestions_for_field(field_name, attributes, current_file_name)
-            )
-            field_references_for_update.append((field_info_dict, field_name))
+            # Create the coroutine for the LLM call
+            task_coro = _get_llm_vsam_suggestions_for_field(field_name, attributes, current_file_name)
+            # Store the coroutine along with the dictionary to update and the original field name
+            llm_tasks_with_references.append((task_coro, field_info_dict, field_name))
 
-    if not llm_tasks:
+    if not llm_tasks_with_references:
         log.info("PARMLIB_LLM_BATCH: No fields found requiring LLM VSAM suggestions.")
         return
 
-    log.info(f"PARMLIB_LLM_BATCH: Starting {len(llm_tasks)} parallel LLM calls for VSAM field suggestions.")
+    log.info(f"PARMLIB_LLM_BATCH: Preparing {len(llm_tasks_with_references)} LLM calls for VSAM field suggestions to be processed in batches of {LLM_API_CALL_BATCH_SIZE}.")
     
-    llm_results = await asyncio.gather(*llm_tasks, return_exceptions=True)
-    
-    log.info(f"PARMLIB_LLM_BATCH: Finished {len(llm_tasks)} LLM calls.")
+    all_llm_results_ordered = [] # To store results in the original order of tasks
 
-    for idx, result_or_exc in enumerate(llm_results):
-        field_info_to_update, original_field_name = field_references_for_update[idx]
+    for i in range(0, len(llm_tasks_with_references), LLM_API_CALL_BATCH_SIZE):
+        # Get the current batch of tasks with their references
+        current_batch_with_refs = llm_tasks_with_references[i:i + LLM_API_CALL_BATCH_SIZE]
+        # Extract just the coroutines for asyncio.gather
+        batch_coroutines = [item[0] for item in current_batch_with_refs]
+        
+        batch_number = (i // LLM_API_CALL_BATCH_SIZE) + 1
+        log.info(f"PARMLIB_LLM_BATCH: Processing batch {batch_number} with {len(batch_coroutines)} tasks.")
+        
+        try:
+            batch_results = await asyncio.gather(*batch_coroutines, return_exceptions=True)
+            all_llm_results_ordered.extend(batch_results)
+            log.info(f"PARMLIB_LLM_BATCH: Finished batch {batch_number}.")
+        except Exception as e_batch_gather:
+            # This catch is a safeguard, as return_exceptions=True should prevent gather from raising directly.
+            # Individual exceptions will be in batch_results.
+            log.error(f"PARMLIB_LLM_BATCH: Unexpected error during asyncio.gather for batch {batch_number}: {e_batch_gather}", exc_info=True)
+            # Fill results for this batch with error objects to maintain order and length
+            error_result = {"error": f"Batch gather error: {e_batch_gather}", "m204_field_name": "BATCH_ERROR"}
+            all_llm_results_ordered.extend([error_result] * len(batch_coroutines))
+
+
+    log.info(f"PARMLIB_LLM_BATCH: Finished all {len(llm_tasks_with_references)} LLM calls across all batches.")
+
+    # Now, iterate through the ordered results and update the original field_info_dicts
+    for idx, result_or_exc in enumerate(all_llm_results_ordered):
+        # Get the original field_info_dict and field_name using the index from llm_tasks_with_references
+        _task_coro, field_info_to_update, original_field_name = llm_tasks_with_references[idx] 
         
         if isinstance(result_or_exc, Exception):
             log.error(f"PARMLIB_LLM_BATCH: Error processing field '{original_field_name}': {result_or_exc}", exc_info=result_or_exc)
@@ -131,6 +157,8 @@ async def _populate_vsam_suggestions_for_all_fields_parallel(
         elif isinstance(result_or_exc, dict):
             # Ensure m204_field_name is present in the result, even if it's an error dict from _get_llm_vsam_suggestions_for_field
             if "m204_field_name" not in result_or_exc:
+                # This case might happen if the error occurred before m204_field_name was added,
+                # or if the result is from the batch_gather safeguard.
                 result_or_exc["m204_field_name"] = original_field_name
             field_info_to_update["vsam_suggestions"] = result_or_exc 
             log.debug(f"PARMLIB_LLM_BATCH: Successfully updated VSAM suggestions for field '{original_field_name}'.")

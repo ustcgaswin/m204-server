@@ -117,9 +117,7 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
             .filter(InputSource.project_id == project_id).all()
         project_data["dd_statements"] = [DDStatementResponseSchema.model_validate(dd).model_dump(exclude_none=True) for dd in dd_statements]
 
-    # Image Statements - REMOVED
-    # if options.include_image_statements: # This option no longer exists
-    #     pass # Logic removed
+   
 
     # Procedure Calls
     if options.include_procedure_calls:
@@ -336,7 +334,9 @@ async def generate_and_save_project_requirements_document(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="LLM service is not configured or available.")
 
     project_data_for_llm = await _fetch_project_data_for_llm(db, project_id, options)
+    log.info(f"Fetched project data for LLM prompt: {project_data_for_llm}")
     formatted_data_for_prompt = _construct_llm_prompt_content(project_data_for_llm, options)
+    log.info(f"Formatted data for LLM prompt:\n{formatted_data_for_prompt[:1000]}...")  # Log first 500 chars for brevity
 
     project_name = project_data_for_llm.get("project_info", {}).get("project_name", f"Project {project_id}")
     document_title = f"Requirements Document for {project_name}"

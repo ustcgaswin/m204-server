@@ -85,7 +85,7 @@ class M204IterativeDescriptionOutput(BaseModel):
     reasoning_for_update: Optional[str] = Field(description="Brief reasoning for how the current chunk updated the description.", default=None)
     key_elements_in_chunk: List[str] = Field(default_factory=list, description="List of key M204 statements or elements identified in the current chunk (e.g., PROCEDURE, SUBROUTINE, IMAGE, DEFINE DATASET, FIND, FOR EACH VALUE, %variables).")
 
-
+LLM_API_CALL_BATCH_SIZE = 5
 
 # --- Helper Functions ---
 def _parse_m204_parameters(params_str: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -361,13 +361,13 @@ async def _task_generate_and_store_m204_description(
         
         if description:
             # IMPORTANT: Assumes InputSource model has a field 'generated_m204_description'
-            if hasattr(input_s, 'generated_m204_description'):
-                input_s.generated_m204_description = description
+            if hasattr(input_s, 'm204_detailed_description'):
+                input_s.m204_detailed_description = description
                 db.add(input_s)
                 db.commit()
-                log.info(f"M204_DESC_TASK: Description generated and stored for {original_filename} (ID: {input_source_id}). Length: {len(description)}")
+                log.info(f"M204_DESC_TASK: Description generated and stored for {original_filename} (ID: {input_source_id}) in field 'm204_detailed_description'. Length: {len(description)}")
             else:
-                log.error(f"M204_DESC_TASK: InputSource model does not have 'generated_m204_description' field for {original_filename} (ID: {input_source_id}). Description not saved.")
+                log.error(f"M204_DESC_TASK: InputSource model does not have 'm204_detailed_description' field for {original_filename} (ID: {input_source_id}). Description not saved.")
         else:
             log.warning(f"M204_DESC_TASK: Description generation returned empty for {original_filename} (ID: {input_source_id}).")
             
@@ -603,9 +603,14 @@ async def _extract_and_store_m204_procedures(
 
     llm_results_list = []
     if llm_processing_tasks:
-        log.info(f"M204_SERVICE: Executing {len(llm_processing_tasks)} LLM analysis tasks in parallel for file {input_source.original_filename}.")
-        llm_results_list = await asyncio.gather(*llm_processing_tasks, return_exceptions=True)
-        log.info(f"M204_SERVICE: Finished {len(llm_processing_tasks)} LLM analysis tasks for file {input_source.original_filename}.")
+        log.info(f"M204_SERVICE: Executing {len(llm_processing_tasks)} LLM analysis tasks in batches for file {input_source.original_filename}.")
+        for i in range(0, len(llm_processing_tasks), LLM_API_CALL_BATCH_SIZE):
+            batch_tasks = llm_processing_tasks[i:i + LLM_API_CALL_BATCH_SIZE]
+            log.info(f"M204_SERVICE: Processing batch {i // LLM_API_CALL_BATCH_SIZE + 1} with {len(batch_tasks)} tasks for file {input_source.original_filename}.")
+            batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+            llm_results_list.extend(batch_results)
+            log.info(f"M204_SERVICE: Finished batch {i // LLM_API_CALL_BATCH_SIZE + 1} for file {input_source.original_filename}.")
+        log.info(f"M204_SERVICE: Finished all {len(llm_processing_tasks)} LLM analysis tasks in batches for file {input_source.original_filename}.")
 
     all_proc_data_for_db_ops = []
     for i, llm_result_or_exc in enumerate(llm_results_list):
@@ -911,6 +916,9 @@ def _parse_m204_variable_declaration_attributes(attr_declaration_string: Optiona
     return parsed_attrs
 
 
+
+
+
 async def _extract_and_store_m204_variables(
     db: Session, input_source: InputSource, file_content: str, procedures_in_file: List[Procedure], rag_service: Optional[RagService]
 ) -> List[M204Variable]:
@@ -999,12 +1007,18 @@ Consider the M204 declared type and attributes for a more meaningful COBOL name.
 """
             llm_tasks.append(var_namer_llm.acomplete(prompt=var_prompt_fstr))
         
+        llm_raw_results_list = []
         if llm_tasks:
-            log.info(f"M204_SERVICE_VAR_LLM: Starting {len(llm_tasks)} parallel LLM calls for variable names.")
-            llm_raw_results = await asyncio.gather(*llm_tasks, return_exceptions=True)
-            log.info(f"M204_SERVICE_VAR_LLM: Finished {len(llm_tasks)} parallel LLM calls.")
+            log.info(f"M204_SERVICE_VAR_LLM: Starting {len(llm_tasks)} LLM calls in batches for variable names in file {input_source.original_filename}.")
+            for i in range(0, len(llm_tasks), LLM_API_CALL_BATCH_SIZE):
+                batch_tasks = llm_tasks[i:i + LLM_API_CALL_BATCH_SIZE]
+                log.info(f"M204_SERVICE_VAR_LLM: Processing batch {i // LLM_API_CALL_BATCH_SIZE + 1} with {len(batch_tasks)} tasks for variable names in {input_source.original_filename}.")
+                batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+                llm_raw_results_list.extend(batch_results)
+                log.info(f"M204_SERVICE_VAR_LLM: Finished batch {i // LLM_API_CALL_BATCH_SIZE + 1} for variable names in {input_source.original_filename}.")
+            log.info(f"M204_SERVICE_VAR_LLM: Finished all {len(llm_tasks)} LLM calls for variable names in {input_source.original_filename}.")
 
-            for idx, result_or_exc in enumerate(llm_raw_results):
+            for idx, result_or_exc in enumerate(llm_raw_results_list):
                 target_var_data = parsed_variables_data[idx] # Assumes order is preserved
                 variable_name_for_llm = target_var_data["var_name"]
                 suggested_name = None
@@ -1082,6 +1096,7 @@ Consider the M204 declared type and attributes for a more meaningful COBOL name.
             
     log.info(f"M204_SERVICE: Finished extracting and processing {len(variables_processed_for_db)} explicitly defined M204 variables for file ID: {input_source.input_source_id}.")
     return variables_processed_for_db
+
 
 async def _extract_and_store_m204_procedure_calls(
     db: Session, input_source: InputSource, file_content: str, defined_procedures_in_file: List[Procedure]

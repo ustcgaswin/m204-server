@@ -32,6 +32,9 @@ from app.utils.logger import log
 from app.config.llm_config import llm_config
 from pydantic import BaseModel, Field as PydanticField # Added PydanticField
 
+LLM_API_CALL_BATCH_SIZE = 5
+
+
 class TestCase(BaseModel):
     test_case_id: str = PydanticField(description="A unique identifier for the test case (e.g., TC_001, TC_VALID_INPUT).")
     description: str = PydanticField(description="A brief description of what this test case covers.")
@@ -60,6 +63,7 @@ class VsamJclGenerationOutput(BaseModel):
 class ArtifactsService:
     def __init__(self, db: Session):
         self.db = db
+        self.llm_semaphore = asyncio.Semaphore(LLM_API_CALL_BATCH_SIZE)
 
     def _sanitize_filename_base(self, name: str, default_prefix="PROG") -> str:
         if not name:
@@ -143,9 +147,12 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
 """
         json_text_output: Optional[str] = None
         try:
-            llm_call = llm_config._llm.as_structured_llm(M204ProcedureToCobolOutput)
-            response = await llm_call.acomplete(prompt=prompt_fstr)
-            json_text_output = response.text
+            async with self.llm_semaphore:
+                log.debug(f"Attempting LLM call for M204 procedure to COBOL: {proc.m204_proc_name} (semaphore acquired)")
+                llm_call = llm_config._llm.as_structured_llm(M204ProcedureToCobolOutput)
+                response = await llm_call.acomplete(prompt=prompt_fstr)
+                json_text_output = response.text
+            log.debug(f"LLM call for M204 procedure to COBOL: {proc.m204_proc_name} completed (semaphore released)")
             return M204ProcedureToCobolOutput(**json.loads(json_text_output))
         except Exception as e:
             log.error(f"LLM error converting M204 procedure {proc.m204_proc_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
@@ -156,6 +163,7 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
                                  f"      * --- See logs for details ---",
                 comments=f"LLM conversion failed: {str(e)}"
             )
+
 
     async def _llm_convert_file_definition_to_fd(self, m204_file: M204File) -> FileDefinitionToCobolFDOutput:
         """Convert M204 file definition JSON to COBOL FD using LLM"""
@@ -273,9 +281,12 @@ Ensure the FD record layout (01 and 05 levels) is complete and uses the 'Suggest
 
         json_text_output: Optional[str] = None
         try:
-            llm_call = llm_config._llm.as_structured_llm(FileDefinitionToCobolFDOutput)
-            response = await llm_call.acomplete(prompt=prompt_fstr)
-            json_text_output = response.text
+            async with self.llm_semaphore:
+                log.debug(f"Attempting LLM call for FD conversion: {m204_file.m204_file_name} (semaphore acquired)")
+                llm_call = llm_config._llm.as_structured_llm(FileDefinitionToCobolFDOutput)
+                response = await llm_call.acomplete(prompt=prompt_fstr)
+                json_text_output = response.text
+            log.debug(f"LLM call for FD conversion: {m204_file.m204_file_name} completed (semaphore released)")
             return FileDefinitionToCobolFDOutput(**json.loads(json_text_output))
         except Exception as e:
             log.error(f"LLM error converting file definition for {m204_file.m204_file_name} to FD: {e}. Raw output: {json_text_output}", exc_info=True)
@@ -287,7 +298,7 @@ Ensure the FD record layout (01 and 05 levels) is complete and uses the 'Suggest
                                      f"   01  {select_name}-RECORD PIC X(80). *> Placeholder due to error\n",
                 comments=f"LLM FD conversion failed: {str(e)}"
             )
-        
+
     def _clear_existing_artifacts_for_input_source(self, input_source_id: int):
         self.db.query(GeneratedCobolArtifact).filter(GeneratedCobolArtifact.input_source_id == input_source_id).delete(synchronize_session=False)
         self.db.query(GeneratedJclArtifact).filter(GeneratedJclArtifact.input_source_id == input_source_id).delete(synchronize_session=False)
@@ -295,6 +306,7 @@ Ensure the FD record layout (01 and 05 levels) is complete and uses the 'Suggest
         log.info(f"Cleared existing artifacts for input_source_id: {input_source_id}")
 
     
+
     async def _llm_generate_vsam_jcl(self, m204_file_obj: M204File, cobol_program_id_base: str, vsam_ds_name: str, vsam_type: str, input_source_name_for_comments: str) -> VsamJclGenerationOutput:
         if not llm_config._llm:
             log.warning(f"LLM not available for VSAM JCL generation for M204 File: {m204_file_obj.m204_file_name}. Returning placeholder JCL structure.")
@@ -397,15 +409,17 @@ The `jcl_content` should be the complete JCL.
 """
         json_text_output: Optional[str] = None
         try:
-            log.info("Generating VSAM JCL using LLM for M204 file: %s", m204_file_obj.m204_file_name)
-            llm_call = llm_config._llm.as_structured_llm(VsamJclGenerationOutput)
-            response = await llm_call.acomplete(prompt=prompt_fstr)
-            json_text_output = response.text
-            log.info("LLM response for VSAM JCL generation: %s", json_text_output)
+            async with self.llm_semaphore:
+                log.info(f"Attempting LLM call for VSAM JCL generation: {m204_file_obj.m204_file_name} (semaphore acquired)")
+                llm_call = llm_config._llm.as_structured_llm(VsamJclGenerationOutput)
+                response = await llm_call.acomplete(prompt=prompt_fstr)
+                json_text_output = response.text
+            log.info(f"LLM call for VSAM JCL generation: {m204_file_obj.m204_file_name} completed (semaphore released). Raw output: {json_text_output}")
             return VsamJclGenerationOutput(**json.loads(json_text_output))
         except Exception as e:
             log.error(f"LLM error generating VSAM JCL for {m204_file_obj.m204_file_name}: {e}. Raw output: {json_text_output}", exc_info=True)
             raise
+    
 
     def _generate_fallback_vsam_jcl(self, m204_file_obj: M204File, cobol_program_id_base: str, vsam_ds_name: str, vsam_type: str, input_source_name_for_comments: str) -> str:
         log.info(f"Generating fallback VSAM JCL for {vsam_ds_name}")
@@ -707,13 +721,13 @@ MAIN-PARAGRAPH.
                     
                     if not isinstance(test_cases_data, list): 
                         log.warning(f"suggested_test_cases_json for procedure {proc.m204_proc_name} is not a list: {type(test_cases_data)}. Skipping.")
-                        unit_test_content_parts.append(f"  Invalid format for pre-defined test cases (expected a list).\n")
+                        unit_test_content_parts.append("  Invalid format for pre-defined test cases (expected a list).\n")
                         continue
 
                     for tc_data in test_cases_data: 
                         if not isinstance(tc_data, dict): 
                             log.warning(f"Test case item for procedure {proc.m204_proc_name} is not a dictionary: {type(tc_data)}. Skipping.")
-                            unit_test_content_parts.append(f"  Skipping invalid test case item (not a dictionary).\n")
+                            unit_test_content_parts.append("  Skipping invalid test case item (not a dictionary).\n")
                             continue
                         try:
                             tc = TestCase(**tc_data) 
@@ -841,8 +855,10 @@ MAIN-PARAGRAPH.
                 vsam_jcls_generated_count += 1
                 m204_name_part_raw = m204_file_obj.m204_file_name or f"DBF{m204_file_obj.m204_file_id}"
                 m204_name_part = re.sub(r'[^A-Z0-9]', '', m204_name_part_raw.upper())[:8]
-                if not m204_name_part: m204_name_part = f"DBF{m204_file_obj.m204_file_id}" 
-                if not m204_name_part[0].isalpha(): m204_name_part = "V" + m204_name_part[:7]
+                if not m204_name_part:
+                    m204_name_part = f"DBF{m204_file_obj.m204_file_id}" 
+                if not m204_name_part[0].isalpha():
+                    m204_name_part = "V" + m204_name_part[:7]
 
 
                 vsam_jcl_name = f"{cobol_program_id_base}_{m204_name_part}_vsam.jcl"

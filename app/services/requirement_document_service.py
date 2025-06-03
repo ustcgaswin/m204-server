@@ -117,8 +117,6 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
             .filter(InputSource.project_id == project_id).all()
         project_data["dd_statements"] = [DDStatementResponseSchema.model_validate(dd).model_dump(exclude_none=True) for dd in dd_statements]
 
-   
-
     # Procedure Calls
     if options.include_procedure_calls:
         procedure_calls = db.query(ProcedureCall).filter(ProcedureCall.project_id == project_id).all()
@@ -157,7 +155,7 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                 f"  - Procedure Name: {proc.get('m204_proc_name', 'N/A')}",
                 f"    Type: {proc.get('m204_proc_type', 'N/A')}",
                 f"    Parameters String: {proc.get('m204_parameters_string', 'None')}",
-                f"    Target COBOL Program: {proc.get('target_cobol_function_name', 'N/A')}", # MODIFIED HERE
+                f"    Target COBOL Program: {proc.get('target_cobol_function_name', 'N/A')}",
             ]
             if options.include_procedure_summaries and proc.get('summary'):
                  proc_details.append(f"    Summary: {proc.get('summary', 'No summary available.')}")
@@ -184,12 +182,11 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
             ]
             
             file_def_json = f_data.get("file_definition_json")
-            has_printed_fields_for_this_file = False # Flag to track if any field section has been added for this file
+            has_printed_fields_for_this_file = False 
 
             if file_def_json and isinstance(file_def_json, dict):
                 file_type = file_def_json.get("file_type")
 
-                # 1. Handle DB File fields or DB part of Mixed files
                 db_fields_data = None
                 db_header_text = ""
                 if file_type == "db_file":
@@ -208,7 +205,6 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                         attrs_str = str(field_attributes) if not isinstance(field_attributes, str) else field_attributes
                         file_details.append(f"      - Field Name: {field_name}, Attributes: {attrs_str}")
 
-                # 2. Handle Flat File fields (IMAGE statements) or Flat File part of Mixed files
                 image_definitions_list = None
                 image_header_prefix_text = ""
                 if file_type == "flat_file":
@@ -230,12 +226,11 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                                 has_printed_fields_for_this_file = True
                                 for field_item in fields_in_image:
                                     if isinstance(field_item, dict):
-                                        file_details.append(f"      - Field Name: {field_item.get('name', 'N/A')}, Attributes: {field_item.get('attributes', 'N/A')}") # Adjusted to match typical IMAGE field structure
+                                        file_details.append(f"      - Field Name: {field_item.get('name', 'N/A')}, Attributes: {field_item.get('attributes', 'N/A')}")
                                     else:
                                         log.warning(f"Item in IMAGE fields list is not a dict for file {f_data.get('m204_file_name')}, image '{image_name}': {type(field_item)}. Data: {str(field_item)[:100]}")
                                         file_details.append(f"      - Field Data (raw): {str(field_item)}")
                 
-                # 3. Fallback for a generic top-level "fields" key if not handled by specific file_type logic.
                 if not has_printed_fields_for_this_file and "fields" in file_def_json:
                     generic_fields = file_def_json.get("fields")
                     if isinstance(generic_fields, list) and generic_fields: 
@@ -271,104 +266,40 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
             content_parts.append(f"  - DD Name: {dd.get('dd_name')}, DSN: {dd.get('dsn', 'N/A')}, Disposition: {dd.get('disposition', 'N/A')}, Job Name: {dd.get('job_name', 'N/A')}, Step Name: {dd.get('step_name', 'N/A')}")
         content_parts.append("\n")
 
-    # IMAGE Statements Data - REMOVED
-    # if options.include_image_statements and "image_statements" in project_data and project_data["image_statements"]: # This option no longer exists
-    #     pass # Logic removed
-
     if options.include_procedure_calls and "procedure_calls" in project_data and project_data["procedure_calls"]:
         content_parts.append("Procedure Call Relationships Data:")
         for call in project_data["procedure_calls"]:
             calling_proc_id = call.get('calling_procedure_id')
             calling_proc_name = "N/A"
             if calling_proc_id and "procedures" in project_data and project_data["procedures"]:
-                # Assuming proc_id is the primary key for procedures in the serialized data
-                caller = next((p for p in project_data["procedures"] if p.get("proc_id") == calling_proc_id or p.get("m204_proc_id") == calling_proc_id), None) # m204_proc_id might be a typo, proc_id is standard
+                caller = next((p for p in project_data["procedures"] if p.get("proc_id") == calling_proc_id or p.get("m204_proc_id") == calling_proc_id), None)
                 if caller: 
                     calling_proc_name = caller.get("m204_proc_name", "N/A")
                 else:
-                    log.debug(f"Calling procedure ID {calling_proc_id} not found in pre-loaded procedure data for call ID {call.get('procedure_call_id')}") # procedure_call_id might be a typo, call_id is standard
+                    log.debug(f"Calling procedure ID {calling_proc_id} not found in pre-loaded procedure data for call ID {call.get('procedure_call_id')}")
             content_parts.append(f"  - Calling Procedure Name: {calling_proc_name} (ID: {calling_proc_id}), Called Procedure Name: {call.get('called_procedure_name')}, Line Number: {call.get('line_number')}, Is External: {call.get('is_external')}")
         content_parts.append("\n")
 
     return "\n".join(content_parts)
 
-
-
-async def generate_and_save_project_requirements_document(
-    db: Session,
-    project_id: int,
-    options: RequirementGenerationOptionsSchema,
-    custom_prompt_section: Optional[str] = None
-) -> RequirementDocumentResponseSchema:
+def _get_sections_config() -> List[Dict[str, str]]:
     """
-    Generates a comprehensive Software Requirements Specification (SRS) document
-    in Markdown format for a given project using an LLM.
-
-    The function fetches project data, constructs a detailed prompt for the LLM,
-    invokes the LLM to generate the Markdown content, and then saves the
-    resulting document to the database.
-
-    Args:
-        db: The SQLAlchemy database session.
-        project_id: The ID of the project for which to generate the document.
-        options: An instance of RequirementGenerationOptionsSchema specifying
-                 which data components to include in the generation process.
-        custom_prompt_section: An optional string containing custom instructions
-                               or context to be added to the LLM prompt.
-
-    Returns:
-        A RequirementDocumentResponseSchema object representing the created
-        document, including its content and metadata.
-
-    Raises:
-        HTTPException:
-            - 404 (Not Found): If the specified project_id does not exist.
-            - 503 (Service Unavailable): If the LLM service is not configured or fails.
-            - 500 (Internal Server Error): If there's an LLM error during generation
-              or a database error during saving.
+    Defines the structure and instructions for each section of the requirements document.
     """
-    log.info(f"Starting requirements document generation for project ID: {project_id} with options: {options.model_dump_json()}")
-
-    if not llm_config._llm:
-        log.error("LLM is not configured. Cannot generate requirements document.")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="LLM service is not configured or available.")
-
-    project_data_for_llm = await _fetch_project_data_for_llm(db, project_id, options)
-    log.info(f"Fetched project data for LLM prompt: {project_data_for_llm}")
-    formatted_data_for_prompt = _construct_llm_prompt_content(project_data_for_llm, options)
-    log.info(f"Formatted data for LLM prompt:\n{formatted_data_for_prompt[:1000]}...")  # Log first 500 chars for brevity
-
-    project_name = project_data_for_llm.get("project_info", {}).get("project_name", f"Project {project_id}")
-    document_title = f"Requirements Document for {project_name}"
-
-    prompt_template = f"""
-You are a senior technical analyst and writer. Your task is to generate a comprehensive Software Requirements Specification (SRS) document in Markdown format for an existing M204-based system.
-The document content should be based *solely* on the structured data provided below. Do not invent information not present in the provided data.
-Generate a single, well-formatted Markdown document. Your analysis should be insightful, going beyond simple listing of data where appropriate.
-Emphasize the use of **paragraphs for description and bullet points for lists of attributes or related items**, rather than relying solely on tables for all data presentation. Tables can be used sparingly for very dense, tabular data if it aids clarity significantly.
-**When generating Mermaid diagrams, ensure the syntax is correct and the diagram is enclosed in a ```mermaid ... ``` fenced code block. If data is insufficient for a meaningful and correct diagram, state this clearly instead of outputting malformed code.**
-
-**Input Data (Summary of system components and relationships):**
---- BEGIN SYSTEM DATA ---
-{formatted_data_for_prompt}
---- END SYSTEM DATA ---
-
-{f"**Additional Instructions/Custom Section from User (consider these when generating content for relevant sections):**\n{custom_prompt_section}\n" if custom_prompt_section else ""}
-
-Please structure the Markdown document with the following sections and headings.
-If data for a specific section is not available or not applicable based on the input (e.g., if the corresponding '--- BEGIN SYSTEM DATA ---' section is empty or missing), include the heading and a brief note like "Not applicable based on provided data." or "No data available for this section."
-**When discussing JCL, M204 Procedures, or M204 Files, refer to any relevant 'Source File LLM-Generated Summaries' provided in the input data to give broader context to your descriptions.**
-
-The document should start with a main title: "# Requirements Document: {project_name}"
-
-Then, include the following sections:
-
-## 1. Project Overview
+    return [
+        {
+            "id": "project_overview",
+            "title": "## 1. Project Overview",
+            "instructions": """
    (Provide a narrative overview in a paragraph or two based on the 'Project Information' from the input data. Include project name, description, and creation date.
     **Also, list any COBOL programs identified as targets of M204 procedures (from 'M204 Procedures Data' - `target_cobol_function_name`) and briefly describe their potential role in the system based on the procedures that call them and any relevant 'Source File LLM-Generated Summaries'.**
     You can also incorporate high-level insights from the 'Source File LLM-Generated Summaries' if they provide a good overview of the system's nature.)
-
-   ### 1.1. Conceptual Data Model Diagram
+"""
+        },
+        {
+            "id": "conceptual_data_model",
+            "title": "### 1.1. Conceptual Data Model Diagram",
+            "instructions": """
       (Based on the 'M204 File Definitions Data' (providing `m204_file_name`) and primarily the 'Source File LLM-Generated Summaries' (specifically the `m204_detailed_description` for relevant M204 source files), generate a Mermaid Entity-Relationship (ER) diagram using `erDiagram` syntax.
        Each M204 file listed in 'M204 File Definitions Data' (e.g., `CUSTFILE`) should be considered as a potential entity.
        Use the `m204_detailed_description` associated with the M204 source file (found in 'Source File LLM-Generated Summaries' by correlating the M204 file with its defining source file's `original_filename`) that likely defines or describes these M204 data files to understand their purpose, key data elements, and relationships.
@@ -399,8 +330,12 @@ Then, include the following sections:
        ```
        Focus on the main data files and their core attributes as described. If the `m204_detailed_description` is sparse or relationships are not clear, generate a simpler diagram showing entities and their primary attributes based on the available information, and state that detailed relationships could not be fully mapped.
        **If data from 'M204 File Definitions Data' and 'Source File LLM-Generated Summaries' (specifically `m204_detailed_description`) is insufficient to generate a meaningful and syntactically correct diagram, include the heading and state "Data insufficient to generate a conceptual data model diagram." instead of providing malformed Mermaid code.**)
-
-## 2. M204 Procedures
+"""
+        },
+        {
+            "id": "m204_procedures",
+            "title": "## 2. M204 Procedures",
+            "instructions": """
    (Based on 'M204 Procedures Data' and relevant 'Source File LLM-Generated Summaries' for M204 files:
     - For each procedure, write a descriptive paragraph. This paragraph should cover its name and type. (Information about target COBOL programs is now covered in the Project Overview section).
     - If a procedure summary is available in the input, incorporate it into the descriptive paragraph.
@@ -412,8 +347,12 @@ Then, include the following sections:
         * `%OLD_VALUE` (Type: `STRING`, Scope: `LOCAL`, COBOL Mapped Name: `WS-OLD-VAL`)
         * `%NEW_VALUE` (Type: `STRING`, Scope: `LOCAL`, COBOL Mapped Name: `WS-NEW-VAL`)"
     - Conclude this section with a brief summary paragraph discussing any observed overall purpose or common themes across the procedures, informed by individual procedure details and the broader M204 source file summaries.)
-
-## 3. M204 File Definitions
+"""
+        },
+        {
+            "id": "m204_file_definitions",
+            "title": "## 3. M204 File Definitions",
+            "instructions": """
    (Based on 'M204 File Definitions Data' and relevant 'Source File LLM-Generated Summaries' for M204 files:
     - For each M204 file, write a descriptive paragraph. This paragraph should cover its name, M204 attributes, whether it's a database file, and its target VSAM dataset name and type. Use the LLM-generated summary for the M204 source file where this file definition might be elaborated if available.
     - If field information is available within the `file_definition_json` attribute of a file, list those fields using bullet points. Each bullet point should detail the field's name and its M204 attributes. For example:
@@ -423,8 +362,12 @@ Then, include the following sections:
         * `CUST_NAME` (Attributes: `TEXT, ...`)"
     - If no detailed field information is available in `file_definition_json`, state that "Detailed field structure not available in the provided data for this file."
     - Conclude with a summary paragraph about the general categories or types of data managed by these files based on their names, attributes, and the overall M204 source file summaries.)
-
-   ### 3.1. M204 File and Associated VSAM/JCL Diagram
+"""
+        },
+        {
+            "id": "m204_file_vsam_jcl_diagram",
+            "title": "### 3.1. M204 File and Associated VSAM/JCL Diagram",
+            "instructions": """
       (Based on 'M204 File Definitions Data' (`m204_file_name`, `target_vsam_dataset_name`) and 'JCL DD Statements Data' (`dd_name`, `dsn`), generate a Mermaid flowchart diagram.
        The diagram should show each M204 file and its target VSAM dataset name.
        If a JCL DD Statement's `dsn` matches an M204 file's `target_vsam_dataset_name`, create a link from the JCL DD statement node to the M204 file node.
@@ -441,20 +384,32 @@ Then, include the following sections:
            DD_OTACCT --> M204_ACCT;
        ```
        **If no such relationships are found or data is insufficient to generate a meaningful and syntactically correct diagram, include the heading and state "No clear M204 file to JCL DD statement links found or data is insufficient to generate a diagram." instead of providing malformed Mermaid code.**)
-
-## 4. Global/Public M204 Variables
+"""
+        },
+        {
+            "id": "global_variables",
+            "title": "## 4. Global/Public M204 Variables",
+            "instructions": """
    (Based on 'Global/Public M204 Variables Data':
     - Begin with an introductory paragraph about the role of global/public variables in the system.
     - List each global or public variable using bullet points. Each bullet point should include its name, type, scope, suggested COBOL mapped name, and any defined attributes.
     - Follow the list with a paragraph further explaining the potential collective purpose or usage patterns of these global variables based on their characteristics.)
-
-## 5. JCL DD Statements
+"""
+        },
+        {
+            "id": "jcl_dd_statements",
+            "title": "## 5. JCL DD Statements",
+            "instructions": """
    (Based on 'JCL DD Statements Data' and relevant 'Source File LLM-Generated Summaries' for JCL files:
     - Start with a paragraph describing the role of JCL DD statements in interfacing the M204 application with datasets. Refer to the LLM-generated summaries for the JCL files to provide context on the overall purpose of the JCLs containing these DD statements.
     - List the relevant DD statements. You can use bullet points for each DD statement, detailing its DD Name, DSN, Disposition, and the Job and Step context. A compact table could also be appropriate here if there are many with similar structures.
     - Conclude with a paragraph highlighting any DD statements that seem particularly critical (e.g., for primary input/output files, connections to other systems), considering their role within the summarized JCL job flow.)
-
-   ### 5.1. JCL Job/Step Flow Diagram
+"""
+        },
+        {
+            "id": "jcl_job_step_flow_diagram",
+            "title": "### 5.1. JCL Job/Step Flow Diagram",
+            "instructions": """
       (Based on 'JCL DD Statements Data' (`job_name`, `step_name`, `dd_name`, `dsn`), generate a Mermaid flowchart diagram illustrating the JCL job and step flow.
        Group DD statements under their respective steps, and steps under their respective jobs.
        Represent jobs as `Job: <job_name>`, steps as `Step: <step_name>`. DD statements can be represented by their `dd_name` and `dsn`.
@@ -475,14 +430,22 @@ Then, include the following sections:
            end
        ```
        **If no JCL DD statement data is available to generate a meaningful and syntactically correct diagram, include the heading and state "No JCL data available to generate a job/step flow diagram." instead of providing malformed Mermaid code.**)
-
-## 6. Procedure Call Flow
+"""
+        },
+        {
+            "id": "procedure_call_flow",
+            "title": "## 6. Procedure Call Flow",
+            "instructions": """
    (Based on 'Procedure Call Relationships Data':
     - Describe the procedure call flow using narrative paragraphs to explain major sequences or interactions.
     - Supplement with bullet points to list specific call relationships, indicating the calling procedure, the called procedure, the line number of the call, and whether it's an external call.
     - Focus on making the control flow and dependencies clear. Try to identify and describe any main processing sequences, critical execution paths, or highly interconnected modules.
-
-   ### 6.1. Procedure Call Diagram 
+"""
+        },
+        {
+            "id": "procedure_call_diagram",
+            "title": "### 6.1. Procedure Call Diagram",
+            "instructions": """
       (Based on the 'Procedure Call Relationships Data', generate a Mermaid flowchart diagram (e.g., `graph TD;` for Top-Down or `graph LR;` for Left-to-Right) illustrating the direct call relationships between procedures.
        The diagram should clearly show which procedure calls which other procedure(s). Use the actual procedure names found in the data.
        **Enclose the syntactically correct Mermaid code within a fenced code block like this:**
@@ -495,38 +458,64 @@ Then, include the following sections:
        ```
        Ensure all unique procedure names involved in any call (callers and callees) are represented as nodes in the diagram.
        **If no procedure calls exist in the 'Procedure Call Relationships Data' or data is insufficient to generate a meaningful and syntactically correct diagram, include the heading and state "No procedure call relationships found or data is insufficient to generate a diagram." instead of providing malformed Mermaid code.**)
-
-## 7. Data Dictionary / Key Data Elements
+"""
+        },
+        {
+            "id": "data_dictionary",
+            "title": "## 7. Data Dictionary / Key Data Elements",
+            "instructions": """
    (Synthesize information from 'M204 File Definitions Data' (primarily `file_definition_json` if available for field details), 'Global/Public M204 Variables Data', and 'M204 Procedures Data' (variables_in_procedure).
     - Describe key data elements in paragraphs. For each element or group of related elements, discuss its apparent meaning and use.
     - Use bullet points to list specific attributes like M204 data type/attributes (from `file_definition_json` or variable definitions) and where it's primarily used (e.g., in which files or procedure types).
     - If a comprehensive dictionary isn't directly inferable due to lack of detailed field definitions, provide a narrative summary of the main types of data the system processes based on file names, variable names, and their significance.)
-
-## 8. External Interfaces
+"""
+        },
+        {
+            "id": "external_interfaces",
+            "title": "## 8. External Interfaces",
+            "instructions": """
    (Infer from 'JCL DD Statements Data' (DSNs) and 'M204 File Definitions Data' (attributes suggesting external links).
     - Describe in paragraph form any identified external systems, datasets, or interfaces that the M204 application interacts with. Explain the nature of these interactions if discernible.)
-
-## 9. Non-Functional Requirements
+"""
+        },
+        {
+            "id": "non_functional_requirements",
+            "title": "## 9. Non-Functional Requirements",
+            "instructions": """
    (Review all provided data for hints towards non-functional requirements.
     - Describe any identified NFRs (e.g., performance considerations from file attributes, security aspects from field encryption, operational constraints) in paragraph form.
     - If none are directly inferable, state that "No specific non-functional requirements were directly inferable from the provided system data.")
-
-## 10. Other Observations / Summary
+"""
+        },
+        {
+            "id": "other_observations",
+            "title": "## 10. Other Observations / Summary",
+            "instructions": """
    (Provide a concluding summary of the system in narrative paragraphs. Highlight any overarching patterns, complexities, or notable observations that don't fit neatly into other sections. Address points from the 'Additional Instructions/Custom Section from User' here if not covered elsewhere.)
-
-After the detailed sections above, include the following major section:
-
-# Technical Requirements
+"""
+        },
+        {
+            "id": "technical_requirements_main",
+            "title": "# Technical Requirements",
+            "instructions": """
    (This section is intended for a high-level technical audience like Project Management and CTO.
     It should provide a structured, detailed overview of the system's technical aspects based on the provided data.
     Synthesize and abstract information from the preceding detailed sections, focusing on technical architecture, data flow, and key components. **Refer to the 'Source File LLM-Generated Summaries' to enrich the descriptions of JCL and M204 components.**)
-
-### A. System Architecture Overview
+"""
+        },
+        {
+            "id": "tech_req_architecture",
+            "title": "### A. System Architecture Overview",
+            "instructions": """
    (Describe the high-level components of the M204-based system and their primary roles.
     Illustrate how M204 procedures (distinguishing between `m204_proc_type` like ONLINE, BATCH, INCLUDE, SUBROUTINE), COBOL programs (as indicated by `target_cobol_function_name` in procedures, detailed in Project Overview), JCL (from `DDStatement` data providing `job_name`, `step_name`, `dd_name`, `dsn`, and `disposition`), and M204 files/VSAM datasets (from `M204File` data, including `m204_file_name`, `target_vsam_dataset_name`, `target_vsam_type`) interact to form the overall system architecture. **Use the 'Source File LLM-Generated Summaries' to provide context on the purpose of specific JCL files or M204 source modules.**
     Identify any distinct subsystems or processing layers if they can be inferred from procedure groupings, naming conventions, or data flow patterns observed in the input data and file summaries.)
-
-### B. Data Model and Management
+"""
+        },
+        {
+            "id": "tech_req_data_model",
+            "title": "### B. Data Model and Management",
+            "instructions": """
    (Detail the key data entities managed by the system, as identified from `M204 File Definitions Data` (specifically `m204_file_name` and its associated `file_definition_json` if present). For each M204 file, describe its purpose (e.g., master data, transactional data, index files, work files) based on its name, attributes, and any field information available in `file_definition_json`. **Corroborate with 'Source File LLM-Generated Summaries' for M204 files.**
     Explain how data is stored, referencing `M204File.is_db_file`, `M204File.target_vsam_dataset_name`, and `M204File.target_vsam_type` (e.g., KSDS, ESDS).
     Describe significant characteristics of the data model by analyzing field data if available in `file_definition_json`:
@@ -539,8 +528,12 @@ After the detailed sections above, include the following major section:
     - Data Ingress: How data enters the system (e.g., through JCL DD statements with `disposition` SHR or OLD, or via ONLINE procedures).
     - Data Processing: How data is transformed or used internally (e.g., by M204 procedures, manipulated using variables, stored/retrieved from M204 files).
     - Data Egress: How data leaves the system (e.g., through JCL DD statements with `disposition` NEW or MOD, or reports generated via procedures).)
-
-### C. Core Processing Logic and Control Flow
+"""
+        },
+        {
+            "id": "tech_req_core_processing",
+            "title": "### C. Core Processing Logic and Control Flow",
+            "instructions": """
    (Explain the main processing sequences and business logic implemented within the M204 procedures, referencing their `m204_proc_type` and interactions with COBOL programs (whose roles are discussed in Project Overview). **Contextualize with 'Source File LLM-Generated Summaries' for the M204 files containing these procedures.**
     Highlight critical procedures or call chains by analyzing `Procedure Call Relationships Data` (using `calling_procedure_name`, `called_procedure_name`, `line_number` of call, and `is_external` flag). Discuss the significance of frequently called procedures or key external calls.
     Describe how user interactions (for `ONLINE` procedures) or batch processes (inferred from `BATCH` procedure types and associated JCL `job_name`/`step_name` context) are handled.
@@ -548,16 +541,24 @@ After the detailed sections above, include the following major section:
     - Global/Public variables (`scope` is GLOBAL or PUBLIC): Their purpose in system-wide state management, data sharing between modules, or configuration. Refer to their `variable_name`, `variable_type`, and `cobol_mapped_variable_name`.
     - Procedure-local variables (`scope` is LOCAL): Their use within specific procedures, including `m204_parameters_string` for input/output to procedures.
     Analyze patterns in variable usage if discernible.)
-
-### D. External Interfaces and Dependencies
+"""
+        },
+        {
+            "id": "tech_req_external_interfaces",
+            "title": "### D. External Interfaces and Dependencies",
+            "instructions": """
    (List and describe all identified external systems, datasets, or services that the M204 application interacts with.
     Base this on:
     - `JCL DD Statements Data`: Analyze `dsn`s that point to external (non-system specific) files or GDGs. Note the `disposition` (e.g., NEW, MOD for outputs; OLD, SHR for inputs) to understand data direction. **The 'Source File LLM-Generated Summaries' for JCLs might clarify the purpose of these external datasets.**
     - `M204 File Definitions Data`: Check if `m204_attributes` or `target_vsam_dataset_name` suggest links to shared datasets with other applications or standard interface files.
     - `Procedure Call Relationships Data`: `is_external` calls might indicate interfaces to other systems or shared utilities if `called_procedure_name` implies this.
     Specify the nature of these interfaces (e.g., file-based batch data exchange, shared VSAM datasets, triggers to/from other systems if inferable). Discuss their importance to the system's overall functionality and data integrity.)
-
-### E. Technology Stack and Environment
+"""
+        },
+        {
+            "id": "tech_req_tech_stack",
+            "title": "### E. Technology Stack and Environment",
+            "instructions": """
    (Summarize the core technologies used, based on available data:
     - **Model 204:** Note its role (e.g., primary application logic, database). Mention specific features used if inferable from `Procedure.m204_proc_type` (ONLINE, BATCH, INCLUDE, SUBROUTINE indicating User Language/SOUL usage), `M204File.m204_attributes`, or field attributes. **Refer to 'Source File LLM-Generated Summaries' for M204 files for broader context on how M204 is utilized.**
     - **COBOL:** Its role (e.g., complex business logic, batch processing) as indicated by `target_cobol_function_name` in procedure data (detailed in Project Overview).
@@ -568,8 +569,12 @@ After the detailed sections above, include the following major section:
     - Batch Windows/Scheduling: Implied by JCL structure or batch procedure design.
     - Security Mechanisms: Any hints from file attributes, variable naming, or procedure structure (though likely limited from this data).
     - Character Sets/Encoding: If any hints in field attributes.)
-
-### F. Key Non-Functional Aspects (Inferred)
+"""
+        },
+        {
+            "id": "tech_req_nfr_inferred",
+            "title": "### F. Key Non-Functional Aspects (Inferred)",
+            "instructions": """
    (Based on the detailed analysis in section 9 and the overall system data, reiterate and detail any significant non-functional requirements or characteristics critical from a technical perspective. Be specific by referencing the data points that lead to these inferences.
     - **Performance:**
       - Identify potential bottlenecks or performance-critical areas (e.g., frequently accessed files indicated by `KEY` fields in `file_definition_json`, complex `ONLINE` procedures, large data volumes suggested by `OCCURS` clauses in `file_definition_json` or file structures).
@@ -591,55 +596,150 @@ After the detailed sections above, include the following major section:
       - Dependencies on external files/systems outlined in JCL (points of failure).
       - Recovery considerations for VSAM datasets based on `target_vsam_type` and usage patterns.
     If specific NFRs are not directly inferable for an aspect, clearly state "No specific insights for [Aspect] could be directly inferred from the provided system data.")
-
-Ensure the entire output is a single Markdown text block, ready to be saved.
-Do not add any preamble or explanation before the first line of the Markdown document (which should be the title: "# Requirements Document: {project_name}").
 """
-    log.debug(f"LLM prompt for requirements document generation (Project ID: {project_id}):\n{prompt_template[:5000]}...") # Increased log snippet size
+        }
+    ]
 
-    markdown_content = ""
+async def _generate_llm_section(
+    section_id: str,
+    section_title: str,
+    section_instructions: str,
+    formatted_data_for_prompt: str,
+    custom_prompt_section: Optional[str]
+) -> str:
+    """
+    Generates content for a single section of the requirements document using the LLM.
+    """
+    prompt_for_section = f"""
+You are a senior technical analyst and writer. Your task is to generate the content for *only* the following section of a Software Requirements Specification (SRS) document in Markdown format for an existing M204-based system.
+The section content should be based *solely* on the structured data provided below. Do not invent information not present in the provided data.
+Output *only* the Markdown for this specific section, starting with its heading.
+Emphasize the use of **paragraphs for description and bullet points for lists of attributes or related items**. Tables can be used sparingly.
+**When generating Mermaid diagrams, ensure the syntax is correct and the diagram is enclosed in a ```mermaid ... ``` fenced code block. If data is insufficient for a meaningful diagram, state this clearly instead of outputting malformed code.**
+
+**Input Data (Summary of system components and relationships):**
+--- BEGIN SYSTEM DATA ---
+{formatted_data_for_prompt}
+--- END SYSTEM DATA ---
+
+{f"**Additional Instructions/Custom Section from User (consider these when generating content for this section):**\n{custom_prompt_section}\n" if custom_prompt_section else ""}
+
+**Instructions for the section to generate:**
+Your output must start *exactly* with the following heading line:
+{section_title}
+
+And then provide the content as described below:
+{section_instructions}
+
+If data for this specific section is not available or not applicable based on the input, include the heading and a brief note like "Not applicable based on provided data." or "No data available for this section."
+When discussing JCL, M204 Procedures, or M204 Files (if relevant to this section), refer to any 'Source File LLM-Generated Summaries' provided in the input data to give broader context.
+Do not add any preamble or explanation before the section's heading.
+Ensure the entire output for this section is valid Markdown.
+"""
+    log.info(f"Generating section: '{section_title}' (ID: {section_id})")
+    # log.debug(f"LLM prompt for section '{section_id}':\n{prompt_for_section[:1000]}...") 
+
     try:
-        completion_response = await llm_config._llm.acomplete(prompt=prompt_template)
-
+        completion_response = await llm_config._llm.acomplete(prompt=prompt_for_section)
         if completion_response and completion_response.text:
-            markdown_content = completion_response.text
-            expected_title = f"# Requirements Document: {project_name}"
-            # Normalize line endings for comparison and for the final content
-            normalized_content_start = markdown_content.lstrip().replace('\r\n', '\n').replace('\r', '\n')
-            normalized_expected_title = expected_title.replace('\r\n', '\n').replace('\r', '\n')
+            section_content = completion_response.text
+            normalized_content_start = section_content.lstrip().replace('\r\n', '\n').replace('\r', '\n')
+            normalized_expected_title = section_title.replace('\r\n', '\n').replace('\r', '\n')
 
             if not normalized_content_start.startswith(normalized_expected_title):
-                log.warning(f"LLM output did not start with the expected title. Expected: '{expected_title}'. Got: '{markdown_content[:200]}'. Prepending title.")
-                markdown_content = f"{expected_title}\n\n{markdown_content.lstrip()}"
-            log.info(f"LLM successfully generated markdown content for project {project_id}. Total length: {len(markdown_content)}")
+                log.warning(f"LLM output for section '{section_id}' did not start with the expected title. Expected: '{section_title}'. Got: '{section_content[:200]}'. Prepending title.")
+                section_content = f"{section_title}\n\n{section_content.lstrip()}"
+            else:
+                lines = section_content.splitlines()
+                if len(lines) > 0 and lines[0].strip() == section_title.strip(): # Title is on its own line
+                    # If there's content on the next line and it's not a list/code block, ensure double newline
+                    if len(lines) > 1 and lines[1].strip() != "" and \
+                       not section_content.startswith(f"{section_title}\n\n") and \
+                       not (lines[1].strip().startswith("*") or lines[1].strip().startswith("-") or lines[1].strip().startswith("```")):
+                        section_content = f"{section_title}\n\n{section_content[len(lines[0]):].lstrip()}"
+                # If title and content are on the same line (less likely with current prompt but possible)
+                elif section_content.startswith(section_title) and not section_content.startswith(f"{section_title}\n"):
+                     section_content = f"{section_title}\n\n{section_content[len(section_title):].lstrip()}"
+
+
+            log.info(f"Successfully generated content for section '{section_id}'. Length: {len(section_content)}")
+            return section_content
         else:
-            log.warning(f"LLM returned empty or no text content for project {project_id}.")
-            # Provide a basic structure if LLM fails to generate anything
-            markdown_content = f"# Requirements Document: {project_name}\n\n## 1. Project Overview\nNo data available or LLM failed to generate content.\n\n(Further sections would follow based on template)"
+            log.warning(f"LLM returned empty or no text content for section '{section_id}'.")
+            return f"{section_title}\n\nNo content was generated by the LLM for this section."
+    except Exception as e_llm_section:
+        log.error(f"LLM completion error for section '{section_id}': {e_llm_section}", exc_info=True)
+        return f"{section_title}\n\nError generating content for this section: {str(e_llm_section)}"
 
 
-        # Additional check for truly empty or minimal content
-        if not markdown_content.strip() or len(markdown_content.strip()) < len(f"# Requirements Document: {project_name}") + 50: # Arbitrary small number for basic content
-            log.warning(f"LLM generated empty or minimal content for project {project_id}. Content: '{markdown_content[:200]}'")
-            # Ensure at least the title and a note if content is truly empty
-            if not markdown_content.strip():
-                 markdown_content = f"# Requirements Document: {project_name}\n\nNo content was generated by the LLM."
-            # If the Technical Requirements section is missing, it's a sign of incomplete generation
-            elif "# Technical Requirements" not in markdown_content:
-                 markdown_content += "\n\n# Technical Requirements\n\nNo specific technical requirements could be generated based on LLM output for this section."
+async def generate_and_save_project_requirements_document(
+    db: Session,
+    project_id: int,
+    options: RequirementGenerationOptionsSchema,
+    custom_prompt_section: Optional[str] = None
+) -> RequirementDocumentResponseSchema:
+    """
+    Generates a comprehensive Software Requirements Specification (SRS) document
+    in Markdown format for a given project using an LLM.
+    Each major section is generated via a separate LLM call.
+    """
+    log.info(f"Starting requirements document generation for project ID: {project_id} with options: {options.model_dump_json(exclude_none=True)}")
+
+    if not llm_config._llm:
+        log.error("LLM is not configured. Cannot generate requirements document.")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="LLM service is not configured or available.")
+
+    try:
+        project_data_for_llm = await _fetch_project_data_for_llm(db, project_id, options)
+        log.info(f"Fetched project data for LLM. Keys: {list(project_data_for_llm.keys())}")
+    except HTTPException as he:
+        raise he 
+    except Exception as e_fetch:
+        log.error(f"Failed to fetch project data for LLM (Project ID: {project_id}): {e_fetch}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch project data: {str(e_fetch)}")
+
+    formatted_data_for_prompt = _construct_llm_prompt_content(project_data_for_llm, options)
+    log.info(f"Formatted data for LLM prompt constructed. Length: {len(formatted_data_for_prompt)}")
+
+    project_name = project_data_for_llm.get("project_info", {}).get("project_name", f"Project {project_id}")
+    document_title = f"Requirements Document for {project_name}"
+    
+    sections_config = _get_sections_config()
+    markdown_parts = [f"# {document_title}\n"] 
+
+    for section_conf in sections_config:
+        section_id = section_conf["id"]
+        section_title = section_conf["title"] 
+        section_instructions = section_conf["instructions"]
+
+        log.info(f"Requesting LLM generation for section: {section_id} - '{section_title}'")
+        try:
+            section_content = await _generate_llm_section(
+                section_id=section_id,
+                section_title=section_title,
+                section_instructions=section_instructions,
+                formatted_data_for_prompt=formatted_data_for_prompt,
+                custom_prompt_section=custom_prompt_section
+            )
+            markdown_parts.append(section_content)
+        except Exception as e_section_gen:
+            log.error(f"Error generating section '{section_id}': {e_section_gen}", exc_info=True)
+            markdown_parts.append(f"{section_title}\n\nGeneration of this section failed due to an unexpected error: {str(e_section_gen)}")
 
 
-    except HTTPException as he: # Re-raise HTTPExceptions directly
-        raise he
-    except Exception as e_llm:
-        log.error(f"LLM completion error for project {project_id}: {e_llm}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"LLM failed to generate document: {str(e_llm)}")
+    markdown_content = "\n\n".join(markdown_parts)
+    log.info(f"All sections generated. Total Markdown content length: {len(markdown_content)}")
+
+    if not markdown_content.strip() or len(markdown_content.strip()) < len(f"# {document_title}") + 50:
+        log.warning(f"Generated document content is very minimal or empty for project {project_id}. Content: '{markdown_content[:200]}'")
+        if not markdown_content.strip():
+             markdown_content = f"# {document_title}\n\nNo content was generated by the LLM."
 
     doc_create_data = RequirementDocumentCreateSchema(
         project_id=project_id,
         document_title=document_title,
         markdown_content=markdown_content,
-        generation_options_json=options.model_dump() # Store options used
+        generation_options_json=options.model_dump() 
     )
 
     db_document = RequirementDocument(**doc_create_data.model_dump())
@@ -653,24 +753,14 @@ Do not add any preamble or explanation before the first line of the Markdown doc
         log.error(f"Database error saving requirements document for project {project_id}: {e_db}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to save generated document: {str(e_db)}")
 
-    # Prepare response, including the options used for generation
     response_data = RequirementDocumentResponseSchema.model_validate(db_document)
-    if db_document.generation_options_json:
+    if db_document.generation_options_json and isinstance(db_document.generation_options_json, dict):
         try:
-            # Ensure options are loaded into the correct schema
-            parsed_options = RequirementGenerationOptionsSchema(**db_document.generation_options_json)
-            response_data.generation_options_used = parsed_options
+            response_data.generation_options_used = RequirementGenerationOptionsSchema(**db_document.generation_options_json)
         except Exception as e_parse_resp:
             log.warning(f"Could not parse generation_options_json for response for doc ID {db_document.requirement_document_id}: {e_parse_resp}")
-            try:
-                response_data.generation_options_used = RequirementGenerationOptionsSchema.model_validate(db_document.generation_options_json)
-            except Exception as e_fallback_parse:
-                 log.error(f"Fallback parsing of generation_options_json also failed for doc ID {db_document.requirement_document_id}: {e_fallback_parse}")
-                 response_data.generation_options_used = None
-
-
+            response_data.generation_options_used = None # Or attempt RequirementGenerationOptionsSchema.model_validate
     return response_data
-
 
 
 # --- CRUD functions for RequirementDocument ---
@@ -683,7 +773,7 @@ async def get_requirement_document_by_id(db: Session, requirement_document_id: i
         if db_document.generation_options_json: 
             try:
                 options_data = db_document.generation_options_json
-                if isinstance(options_data, str): 
+                if isinstance(options_data, str): # Should ideally be dict from DB
                     options_data = json.loads(options_data) 
                 response.generation_options_used = RequirementGenerationOptionsSchema(**options_data)
             except Exception as e_parse:
@@ -739,8 +829,7 @@ async def create_requirement_document(db: Session, doc_data: RequirementDocument
     Directly creates a requirement document. Useful if generation happens elsewhere or for manual entries.
     """
     db_model_data = doc_data.model_dump()
-    if 'generation_options_json' in db_model_data and isinstance(db_model_data['generation_options_json'], RequirementGenerationOptionsSchema):
-        db_model_data['generation_options_json'] = db_model_data['generation_options_json'].model_dump()
+    # generation_options_json should already be a dict or None from doc_data.model_dump()
     
     db_document = RequirementDocument(**db_model_data)
     db.add(db_document)
@@ -753,10 +842,13 @@ async def create_requirement_document(db: Session, doc_data: RequirementDocument
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Could not create document: {str(e)}")
 
     response = RequirementDocumentResponseSchema.model_validate(db_document)
-    if db_document.generation_options_json: 
+    if db_document.generation_options_json and isinstance(db_document.generation_options_json, dict):
         try:
             response.generation_options_used = RequirementGenerationOptionsSchema(**db_document.generation_options_json)
         except Exception as e_parse: 
             log.warning(f"Could not parse generation_options_json from created document for response: {e_parse}. Data: {db_document.generation_options_json}") 
             response.generation_options_used = None
+    elif db_document.generation_options_json:
+        log.warning(f"generation_options_json is not a dict after creation. Type: {type(db_document.generation_options_json)}. Data: {db_document.generation_options_json}")
+        response.generation_options_used = None
     return response

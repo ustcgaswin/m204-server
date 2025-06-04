@@ -85,7 +85,7 @@ class M204IterativeDescriptionOutput(BaseModel):
     reasoning_for_update: Optional[str] = Field(description="Brief reasoning for how the current chunk updated the description.", default=None)
     key_elements_in_chunk: List[str] = Field(default_factory=list, description="List of key M204 statements or elements identified in the current chunk (e.g., PROCEDURE, SUBROUTINE, IMAGE, DEFINE DATASET, FIND, FOR EACH VALUE, %variables).")
 
-LLM_API_CALL_BATCH_SIZE = 5
+LLM_API_CALL_BATCH_SIZE = 20
 
 # --- Helper Functions ---
 def _parse_m204_parameters(params_str: Optional[str]) -> Optional[Dict[str, Any]]:

@@ -4,12 +4,11 @@ import pandas as pd
 import re
 import html
 from collections import defaultdict
-import time
 from st_keyup import st_keyup
 
 # Page configuration
 st.set_page_config(
-    layout="wide", 
+    layout="wide",
     page_title="Log Analytics Dashboard",
     page_icon="📊",
     initial_sidebar_state="expanded"
@@ -25,7 +24,7 @@ st.markdown("""
     
     /* Global styles */
     .main {
-        padding: 1rem 2rem;
+        padding: 1rem 2rem; /* Default padding for the main area */
     }
     
     html, body, [class*="css"] {
@@ -34,112 +33,50 @@ st.markdown("""
     
     /* Block container styling */
     .block-container {
-        padding-top: 1rem;
+        padding-top: 5rem; /* Reduced as sticky header will manage its own top space */
         padding-bottom: 0rem;
-        padding-left: 5rem;
-        padding-right: 5rem;
+        padding-left: 2rem; 
+        padding-right: 2rem; 
+    }
+
+    .sticky-header-controls-wrapper {
+        position: -webkit-sticky; /* Safari */
+        position: sticky;
+        top: 0; /* Stick to the top of the viewport */
+        background-color: #FFFFFF; /* Ensure it has a background */
+        z-index: 100; /* Above content, below Streamlit's own fixed elements if any */
+        margin-left: -2rem; /* Counteract block-container's padding-left to be full-width */
+        margin-right: -2rem; /* Counteract block-container's padding-right to be full-width */
+        padding-left: 2rem; /* Restore padding for the content (columns) inside */
+        padding-right: 2rem; /* Restore padding for the content (columns) inside */
+        padding-top: 0.75rem; /* Internal padding for the sticky bar content */
+        padding-bottom: 0.75rem; /* Internal padding for the sticky bar content */
+        border-bottom: 1px solid #e2e8f0; /* Optional: visual separator */
     }
     
-    /* Header styling */
-    .main-header {
-        padding: 1rem 0;
-        margin-bottom: 1.5rem;
-        border-bottom: 2px solid #e2e8f0;
-    }
-    
-    .main-header h1 {
+    /* Header styling - adjusted for inline elements */
+    .main-header-title {
         font-size: 1.75rem;
         font-weight: 600;
-        margin: 0;
         color: #1f2937;
+        margin-top: 1rem; /* Add space below the sticky header */
+        margin-bottom: 0;
+        line-height: 2.5rem; /* Align with selectbox/button */
     }
     
-    /* Stats cards */
-    .stats-container {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 1rem;
-        margin-bottom: 2rem;
-    }
-    
-    .stat-card {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 12px;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-        border: 1px solid #f0f2f6;
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-    
-    .stat-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 25px rgba(0,0,0,0.12);
-    }
-    
-    .stat-value {
-        font-size: 2rem;
-        font-weight: 700;
-        margin: 0;
-        line-height: 1;
-    }
-    
-    .stat-label {
-        color: #64748b;
-        font-size: 0.875rem;
-        font-weight: 500;
-        margin: 0.25rem 0 0 0;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-    }
-    
-    /* File selection styling */
-    .file-selector {
-        background: white;
-        padding: 1rem;
+    /* Sidebar search input improvements (now general, might apply to header search too) */
+    .stTextInput > div > div > input { /* General input styling */
         border-radius: 8px;
-        border: 1px solid #e2e8f0;
-        margin-bottom: 1rem;
+        border: 2px solid #e2e8f0;
+        padding: 0.75rem 1rem;
+        font-size: 0.9rem; 
+        background: #fafafa;
     }
-    
-    .selected-file-info {
-        background: #f0f9ff;
-        padding: 0.75rem;
-        border-radius: 6px;
-        border: 1px solid #0ea5e9;
-        margin-top: 0.5rem;
-    }
-    
-    .file-name {
-        font-weight: 600;
-        color: #0f172a;
-        font-size: 0.875rem;
-    }
-    
-    .file-meta {
-        font-size: 0.75rem;
-        color: #64748b;
-        margin-top: 0.25rem;
-    }
-    
-    /* Search styling with live indicator */
-    .search-container {
-        position: relative;
-        margin-bottom: 1rem;
-    }
-    
-    .search-indicator {
-        position: absolute;
-        right: 8px;
-        top: 50%;
-        transform: translateY(-50%);
-        font-size: 0.75rem;
-        color: #6b7280;
+
+    .stTextInput > div > div > input:focus {
+        border-color: #6366f1 !important;
+        box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1) !important;
         background: white;
-        padding: 0 4px;
-    }
-    
-    .search-indicator.searching {
-        color: #3b82f6;
     }
     
     /* Log entry cards */
@@ -172,6 +109,14 @@ st.markdown("""
         font-weight: 600;
         color: #374151;
         font-family: 'Monaco', 'Consolas', monospace;
+    }
+
+    .log-timediff {
+        font-size: 0.75rem;
+        color: #718096; /* Slightly muted color */
+        margin-left: 0.75em;
+        font-family: 'Monaco', 'Consolas', monospace;
+        font-weight: 400;
     }
     
     .log-level-badge {
@@ -213,83 +158,17 @@ st.markdown("""
     }
     
     /* Level-specific styling */
-    .level-DEBUG .log-level-badge {
-        background: #dcfce7;
-        color: #166534;
-    }
-    
-    .level-INFO .log-level-badge {
-        background: #dbeafe;
-        color: #1e40af;
-    }
-    
-    .level-INFO .log-message {
-        border-left-color: #3b82f6;
-    }
-    
-    .level-WARNING .log-level-badge {
-        background: #fef3c7;
-        color: #92400e;
-    }
-    
-    .level-WARNING .log-message {
-        border-left-color: #f59e0b;
-    }
-    
-    .level-ERROR .log-level-badge {
-        background: #fee2e2;
-        color: #b91c1c;
-    }
-    
-    .level-ERROR .log-message {
-        border-left-color: #ef4444;
-    }
-    
-    .level-CRITICAL .log-level-badge {
-        background: #fecaca;
-        color: #7f1d1d;
-        animation: pulse 2s infinite;
-    }
-    
-    .level-CRITICAL .log-message {
-        border-left-color: #dc2626;
-        background: #fef2f2;
-    }
-    
-    .level-UNKNOWN .log-level-badge {
-        background: #f3f4f6;
-        color: #4b5563;
-    }
+    .level-DEBUG .log-level-badge { background: #dcfce7; color: #166534; }
+    .level-INFO .log-level-badge { background: #dbeafe; color: #1e40af; }
+    .level-INFO .log-message { border-left-color: #3b82f6; }
+    .level-WARNING .log-level-badge { background: #fef3c7; color: #92400e; }
+    .level-WARNING .log-message { border-left-color: #f59e0b; }
+    .level-ERROR .log-level-badge { background: #fee2e2; color: #b91c1c; }
+    .level-ERROR .log-message { border-left-color: #ef4444; }
+    .level-CRITICAL .log-level-badge { background: #fecaca; color: #7f1d1d; animation: pulse 2s infinite; }
+    .level-CRITICAL .log-message { border-left-color: #dc2626; background: #fef2f2; }
+    .level-UNKNOWN .log-level-badge { background: #f3f4f6; color: #4b5563; }
             
-    .main-search {
-    background: white;
-    padding: 1.5rem;
-    border-radius: 12px;
-    margin-bottom: 2rem;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-    border: 2px solid #e2e8f0;
-}
-
-.main-search:focus-within {
-    border-color: #6366f1;
-    box-shadow: 0 4px 20px rgba(99, 102, 241, 0.2);
-}
-
-/* Search input improvements */
-.stTextInput > div > div > input {
-    border-radius: 8px;
-    border: 2px solid #e2e8f0;
-    padding: 0.75rem 1rem;
-    font-size: 1rem;
-    background: #fafafa;
-}
-
-.stTextInput > div > div > input:focus {
-    border-color: #6366f1 !important;
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1) !important;
-    background: white;
-}
-    
     /* Highlight styling */
     mark {
         background: linear-gradient(120deg, #fbbf24 0%, #f59e0b 100%);
@@ -300,30 +179,45 @@ st.markdown("""
     }
     
     /* Sidebar styling */
-    .css-1d391kg {
-        background-color: #f8fafc;
+    section[data-testid="stSidebar"] > div:first-child {
+        padding-top: 0.5rem !important; /* Reduce top padding of sidebar content area */
     }
-    
-    /* Filter section styling */
-    .filter-section {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 8px;
+    section[data-testid="stSidebar"] h2:first-of-type { /* Target the 'Controls' heading */
+        margin-top: -0.75rem; 
+    }
+
+    /* Adjust spacing for sidebar components */
+    section[data-testid="stSidebar"] .stMarkdown,
+    section[data-testid="stSidebar"] .stButton,
+    section[data-testid="stSidebar"] .stTextInput,
+    section[data-testid="stSidebar"] .stSelectbox,
+    section[data-testid="stSidebar"] .stRadio,
+    section[data-testid="stSidebar"] .stMultiselect,
+    section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
+        margin-bottom: 0.75rem; 
+    }
+    section[data-testid="stSidebar"] h3 { 
+        margin-bottom: 0.3rem; 
+        margin-top: 0.5rem; 
+    }
+    section[data-testid="stSidebar"] hr { 
+        margin-top: 0.5rem;
         margin-bottom: 1rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
-    
-    /* Search box styling */
-    .stTextInput > div > div > input {
-        border-radius: 8px;
-        border: 2px solid #e2e8f0;
-        padding: 0.75rem;
-        font-size: 0.875rem;
+    section[data-testid="stSidebar"] .stButton button {
+         margin-bottom: 0;
     }
-    
-    .stTextInput > div > div > input:focus {
-        border-color: #6366f1;
-        box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+    section[data-testid="stSidebar"] h3 + div[data-testid="stVerticalBlock"],
+    section[data-testid="stSidebar"] h3 + div.stTextInput,
+    section[data-testid="stSidebar"] h3 + div[data-testid="stButton"] {
+        margin-top: -0.25rem; 
+    }
+    section[data-testid="stSidebar"] hr + h3 {
+        margin-top: 0.25rem;
+    }
+
+    .stButton>button { 
+        border-radius: 6px;
     }
     
     /* Pagination styling */
@@ -331,11 +225,12 @@ st.markdown("""
         display: flex;
         justify-content: center;
         align-items: center;
-        padding: 2rem 0;
+        padding: 0.75rem 0;
         background: white;
         border-radius: 8px;
-        margin-top: 2rem;
+        margin-top: 1.5rem;
         box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        font-size: 0.9rem;
     }
     
     /* Empty state styling */
@@ -352,62 +247,24 @@ st.markdown("""
     
     /* Animation for critical logs */
     @keyframes pulse {
-        0%, 100% {
-            opacity: 1;
-        }
-        50% {
-            opacity: 0.7;
-        }
-    }
-    
-    /* Quick action buttons */
-    .quick-actions {
-        display: flex;
-        gap: 0.5rem;
-        margin-bottom: 1rem;
-        flex-wrap: wrap;
-    }
-    
-    .quick-action-btn {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border: none;
-        border-radius: 6px;
-        padding: 0.5rem 1rem;
-        font-size: 0.75rem;
-        font-weight: 500;
-        cursor: pointer;
-        transition: all 0.2s ease;
-    }
-    
-    .quick-action-btn:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.7; }
     }
     
     /* Responsive design */
     @media (max-width: 768px) {
-        .main {
-            padding: 0.5rem 1rem;
+        .main { padding: 0.5rem 1rem; }
+        .block-container { padding-left: 1rem; padding-right: 1rem; }
+        .sticky-header-controls-wrapper {
+            margin-left: -1rem; margin-right: -1rem;
+            padding-left: 1rem; padding-right: 1rem;
         }
-        
-        .block-container {
-            padding-left: 1rem;
-            padding-right: 1rem;
-        }
-        
-        .log-header {
-            flex-direction: column;
-            align-items: flex-start;
-            gap: 0.5rem;
-        }
-        
-        .stats-container {
-            grid-template-columns: repeat(2, 1fr);
-        }
+        .log-header { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
+        .main-header-title { font-size: 1.5rem; line-height: normal; margin-top: 0.5rem;}
     }
 </style>
 """, unsafe_allow_html=True)
+
 
 @st.cache_data
 def get_log_files():
@@ -435,17 +292,12 @@ def get_log_files():
                 }
                 files_by_folder[folder_name].append(file_info)
     
-    # Sort files by modification time within each folder
     for folder in files_by_folder:
         files_by_folder[folder].sort(key=lambda x: x['modified'], reverse=True)
     
     return dict(files_by_folder)
 
 def parse_log_line(line):
-    """
-    Parses a single log line.
-    Format: %(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(name)s - %(message)s
-    """
     match = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - (\w+) - \[(.*?):(\d+)\] - (.*?) - (.*)", line)
     if match:
         return {
@@ -459,17 +311,19 @@ def parse_log_line(line):
     return None
 
 @st.cache_data
-def load_log_data(selected_file):
-    """Loads and parses log data from a single selected file."""
+def load_log_data(selected_file_path):
+    """Loads and parses log data from a single selected file path (relative to LOGS_DIR)."""
     all_log_entries = []
-    
-    full_path = os.path.join(LOGS_DIR, selected_file)
+    if not selected_file_path:
+        return pd.DataFrame()
+
+    full_path = os.path.join(LOGS_DIR, selected_file_path)
     try:
         with open(full_path, "r", encoding="utf-8") as f:
             for line_num, line in enumerate(f, 1):
                 parsed_line = parse_log_line(line)
                 if parsed_line:
-                    parsed_line["SourceFile"] = selected_file
+                    parsed_line["SourceFile"] = os.path.basename(selected_file_path) 
                     parsed_line["OriginalLineNum"] = line_num
                     all_log_entries.append(parsed_line)
                 else:
@@ -481,10 +335,10 @@ def load_log_data(selected_file):
                     all_log_entries.append({
                         "Timestamp": timestamp, "Level": "UNKNOWN", "File": "N/A",
                         "Line": 0, "LoggerName": "N/A", "Message": line.strip(),
-                        "SourceFile": selected_file, "OriginalLineNum": line_num
+                        "SourceFile": os.path.basename(selected_file_path), "OriginalLineNum": line_num
                     })
     except Exception as e:
-        st.error(f"Error reading {selected_file}: {e}")
+        st.error(f"Error reading {selected_file_path}: {e}")
         return pd.DataFrame()
     
     if not all_log_entries:
@@ -495,138 +349,137 @@ def load_log_data(selected_file):
     return df
 
 def highlight_term(text, term):
-    """Highlights the search term in the text using <mark> tags."""
-    if not term:
-        return html.escape(text)
+    if not term or not text:
+        return html.escape(str(text))
     
-    escaped_text = html.escape(text)
+    escaped_text = html.escape(str(text))
     try:
         highlighted_text = re.sub(f"({re.escape(term)})", r"<mark>\1</mark>", escaped_text, flags=re.IGNORECASE)
     except re.error:
         return escaped_text
     return highlighted_text
 
-def create_stats_dashboard(df):
-    """Creates a statistics dashboard for the logs."""
+def create_compact_stats_display(df):
     if df.empty:
+        st.markdown("""
+        <div style="font-size: 0.85rem; color: #4A5568; margin-top: 0.5rem; margin-bottom: 1rem; text-align: left; padding-left: 0.2rem; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.75rem;">
+            No data for current filters.
+        </div>
+        """, unsafe_allow_html=True)
         return
     
-    # Level distribution
     level_counts = df['Level'].value_counts()
     total_logs = len(df)
+    error_count = level_counts.get('ERROR', 0) + level_counts.get('CRITICAL', 0)
+    warning_count = level_counts.get('WARNING', 0)
+    info_count = level_counts.get('INFO', 0)
     
-    # Create stats cards
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown(f"""
-        <div class="stat-card">
-            <div class="stat-value" style="color: #3b82f6;">{total_logs:,}</div>
-            <div class="stat-label">Total Entries</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        error_count = level_counts.get('ERROR', 0) + level_counts.get('CRITICAL', 0)
-        st.markdown(f"""
-        <div class="stat-card">
-            <div class="stat-value" style="color: #ef4444;">{error_count:,}</div>
-            <div class="stat-label">Errors & Critical</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        warning_count = level_counts.get('WARNING', 0)
-        st.markdown(f"""
-        <div class="stat-card">
-            <div class="stat-value" style="color: #f59e0b;">{warning_count:,}</div>
-            <div class="stat-label">Warnings</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col4:
-        info_count = level_counts.get('INFO', 0)
-        st.markdown(f"""
-        <div class="stat-card">
-            <div class="stat-value" style="color: #10b981;">{info_count:,}</div>
-            <div class="stat-label">Info Messages</div>
-        </div>
-        """, unsafe_allow_html=True)
+    stats_html = f"""
+    <div style="font-size: 0.85rem; color: #4A5568; margin-top: 0.5rem; margin-bottom: 1rem; text-align: left; padding-left: 0.2rem; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.75rem;">
+        Filtered: <strong style='color: #3b82f6;'>{total_logs:,}</strong> &nbsp;|&nbsp; 
+        Errors/Critical: <strong style='color: #ef4444;'>{error_count:,}</strong> &nbsp;|&nbsp; 
+        Warnings: <strong style='color: #f59e0b;'>{warning_count:,}</strong> &nbsp;|&nbsp; 
+        Info: <strong style='color: #10b981;'>{info_count:,}</strong>
+    </div>
+    """
+    st.markdown(stats_html, unsafe_allow_html=True)
 
-def render_file_selector(files_by_folder):
-    """Renders a single file selector with quick access options."""
-    st.markdown("### 📁 Select Log File")
-    
-    # Create a flat list of all files with folder context
-    all_files = []
-    file_options = []
+def render_file_selector_header_area(files_by_folder, selector_col, latest_btn_col):
+    all_files_info = []
+    file_options_display = []
     
     for folder_name, files in files_by_folder.items():
         for file_info in files:
-            all_files.append(file_info)
-            # Create display name - remove "Root /" prefix and clean up display
-            if folder_name == "Root":
-                display_name = f"📄 {file_info['name']} ({file_info['size']/1024:.1f} KB)"
+            all_files_info.append(file_info)
+            if folder_name != "Root":
+                 display_name = f"📂 {folder_name}/{file_info['name']} ({file_info['size']/1024:.1f} KB)"
             else:
-                display_name = f"📂 {folder_name} / 📄 {file_info['name']} ({file_info['size']/1024:.1f} KB)"
-            file_options.append(display_name)
+                display_name = f"📄 {file_info['name']} ({file_info['size']/1024:.1f} KB)"
+            file_options_display.append(display_name)
     
-    if not all_files:
-        st.warning("No log files found")
-        return None
+    current_selected_idx = 0
+    if not all_files_info:
+        pass 
+
+    if 'selected_file_path' not in st.session_state or \
+       (st.session_state.selected_file_path and st.session_state.selected_file_path not in [f['path'] for f in all_files_info if all_files_info]):
+        if all_files_info:
+            latest_idx = max(range(len(all_files_info)), key=lambda i: all_files_info[i]['modified'])
+            st.session_state.selected_file_path = all_files_info[latest_idx]['path']
+        else:
+            st.session_state.selected_file_path = None
+
+
+    if all_files_info and st.session_state.selected_file_path:
+        try:
+            current_selected_idx = [f['path'] for f in all_files_info].index(st.session_state.selected_file_path)
+        except ValueError:
+            if all_files_info:
+                latest_idx = max(range(len(all_files_info)), key=lambda i: all_files_info[i]['modified'])
+                st.session_state.selected_file_path = all_files_info[latest_idx]['path']
+                current_selected_idx = latest_idx
+            else: 
+                current_selected_idx = 0 
+    elif all_files_info: 
+        latest_idx = max(range(len(all_files_info)), key=lambda i: all_files_info[i]['modified'])
+        st.session_state.selected_file_path = all_files_info[latest_idx]['path']
+        current_selected_idx = latest_idx
+    else: 
+        current_selected_idx = 0
+
+
+    with latest_btn_col:
+        if st.button("🕒 Latest", help="Load the most recently modified log file", use_container_width=True, key="load_latest_header_btn"):
+            if all_files_info: 
+                latest_idx = max(range(len(all_files_info)), key=lambda i: all_files_info[i]['modified'])
+                if st.session_state.selected_file_path != all_files_info[latest_idx]['path']:
+                    st.session_state.selected_file_path = all_files_info[latest_idx]['path']
+                    for key_to_clear in ['log_levels_selection', 'source_files_selection', 'quick_filter_applied', 'search_term', 'dialog_previous_log_data']:
+                        if key_to_clear in st.session_state:
+                            if key_to_clear == 'search_term': 
+                                st.session_state.search_term = ""
+                            else:
+                                del st.session_state[key_to_clear]
+                    st.session_state.current_page_main_centered = 1
+                    st.rerun()
+
+    with selector_col:
+        if not file_options_display:
+            st.caption("No log files available for selection.") 
+            return st.session_state.get('selected_file_path', None) 
+
+        selected_idx = st.selectbox(
+            "Select Log File:",
+            options=range(len(file_options_display)),
+            format_func=lambda x: file_options_display[x],
+            index=current_selected_idx if current_selected_idx < len(file_options_display) else 0, 
+            key="file_selector_header_dropdown",
+            label_visibility="collapsed"
+        )
     
-    # Quick access button (only Latest now)
-    latest_file = st.button("🕒 Latest", help="Select most recent log file", use_container_width=True)
-    
-    # Initialize session state for selected file
-    if 'selected_file_index' not in st.session_state:
-        st.session_state.selected_file_index = 0
-    
-    # Handle quick access button
-    if latest_file:
-        # Find most recent file
-        latest_idx = max(range(len(all_files)), key=lambda i: all_files[i]['modified'])
-        st.session_state.selected_file_index = latest_idx
-        st.rerun()
-    
-    # File selector dropdown
-    selected_index = st.selectbox(
-        "Choose a log file:",
-        options=range(len(file_options)),
-        format_func=lambda x: file_options[x],
-        index=st.session_state.selected_file_index,
-        key="file_selector"
-    )
-    
-    # Update session state
-    st.session_state.selected_file_index = selected_index
-    
-    # Show selected file info
-    selected_file_info = all_files[selected_index]
-    st.markdown(f"""
-    <div class="selected-file-info">
-        <div class="file-name">✅ Selected: {selected_file_info['name']}</div>
-        <div class="file-meta">
-            📂 Path: {selected_file_info['path']}<br>
-            💾 Size: {selected_file_info['size']/1024:.1f} KB<br>
-            🕒 Modified: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(selected_file_info['modified']))}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    return selected_file_info['path']
+    if all_files_info: 
+        newly_selected_file_path = all_files_info[selected_idx]['path']
+        if st.session_state.selected_file_path != newly_selected_file_path:
+            st.session_state.selected_file_path = newly_selected_file_path
+            for key_to_clear in ['log_levels_selection', 'source_files_selection', 'quick_filter_applied', 'search_term', 'dialog_previous_log_data']:
+                if key_to_clear in st.session_state:
+                    if key_to_clear == 'search_term':
+                        st.session_state.search_term = ""
+                    else:
+                        del st.session_state[key_to_clear]
+            st.session_state.current_page_main_centered = 1
+            st.rerun()
+            
+    return st.session_state.get('selected_file_path', None)
 
 
 def filter_dataframe_live(df, search_term, selected_levels, selected_source_files):
-    """Filters dataframe with live search capabilities."""
     if df.empty:
         return df
     
     filtered_df = df.copy()
     
-    # Live search filter
     if search_term:
-        # Create a combined search field for faster searching
         search_columns = ['Message', 'LoggerName', 'File']
         search_mask = pd.Series([False] * len(filtered_df))
         
@@ -637,442 +490,531 @@ def filter_dataframe_live(df, search_term, selected_levels, selected_source_file
         
         filtered_df = filtered_df[search_mask]
     
-    # Level filter - FIXED: Handle empty list correctly
-    if selected_levels is not None:
-        if len(selected_levels) == 0:
-            # If no log levels are selected, return empty dataframe
-            return pd.DataFrame()
-        else:
-            # Filter by selected log levels
-            filtered_df = filtered_df[filtered_df["Level"].isin(selected_levels)]
-    
-    # Source file filter - FIXED: Handle empty list correctly
-    if selected_source_files is not None:
-        if len(selected_source_files) == 0:
-            # If no source files are selected, return empty dataframe
-            return pd.DataFrame()
-        else:
-            # Filter by selected source files
-            filtered_df = filtered_df[filtered_df["File"].isin(selected_source_files)]
-    
+    if selected_levels is not None and len(selected_levels) > 0:
+        filtered_df = filtered_df[filtered_df["Level"].isin(selected_levels)]
+    elif selected_levels is not None and len(selected_levels) == 0: 
+        return pd.DataFrame(columns=df.columns)
+
+    if selected_source_files is not None and len(selected_source_files) > 0:
+        filtered_df = filtered_df[filtered_df["File"].isin(selected_source_files)]
+    elif selected_source_files is not None and len(selected_source_files) == 0: 
+         return pd.DataFrame(columns=df.columns)
+            
     return filtered_df
 
-# Main application
+def format_time_delta(td):
+    if pd.isna(td) or not isinstance(td, pd.Timedelta):
+        return "" 
 
+    total_seconds = td.total_seconds()
+
+    if -0.0000005 < total_seconds < 0.0000005: 
+        return "(0ms)" 
+
+    prefix = "+" if total_seconds > 0 else "" # Will show + for positive, nothing for negative (as it has minus)
+    
+    # If we want to always show + for positive diffs from previous (oldest first sort)
+    # and rely on the sign for newest first sort, this is fine.
+    # format_time_delta is mostly for display, the sorting uses raw seconds.
+
+    abs_total_seconds = abs(total_seconds)
+
+    if abs_total_seconds < 0.001:  
+        val_us = total_seconds * 1_000_000 # Use original total_seconds to keep sign
+        return f"{prefix}{val_us:.0f}µs"
+    elif abs_total_seconds < 1.0:  
+        val_ms = total_seconds * 1_000 # Use original total_seconds
+        return f"{prefix}{val_ms:.0f}ms"
+    else:  
+        return f"{prefix}{total_seconds:.3f}s" # Use original total_seconds
 
 def main():
-    # Header
-    st.markdown("""
-    <div class="main-header">
-        <h1>📊 Log Viewer</h1>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Improved keyboard shortcut handler
-    st.html("""
-    <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        let searchInput = null;
-        
-        function findSearchInput() {
-            // Try multiple selectors to find the search input
-            const selectors = [
-                'input[placeholder*="Start typing to search"]',
-                'input[aria-label*="Search"]',
-                '.stTextInput input',
-                'input[key="live_search_main"]'
-            ];
-            
-            for (const selector of selectors) {
-                const input = document.querySelector(selector);
-                if (input) {
-                    searchInput = input;
-                    return input;
-                }
-            }
-            return null;
-        }
-        
-        function setupKeyboardShortcuts() {
-            document.addEventListener('keydown', function(event) {
-                // Ctrl+Enter for search focus
-                if (event.ctrlKey && event.key === 'Enter') {
-                    event.preventDefault();
-                    const input = findSearchInput();
-                    if (input) {
-                        input.focus();
-                        input.select();
-                    }
-                    return;
-                }
-                
-                // Escape to clear search (when search is focused)
-                if (event.key === 'Escape') {
-                    const input = findSearchInput();
-                    if (input && document.activeElement === input) {
-                        input.value = '';
-                        // Trigger change event for Streamlit
-                        input.dispatchEvent(new Event('input', { bubbles: true }));
-                        input.dispatchEvent(new Event('change', { bubbles: true }));
-                        input.blur();
-                    }
-                    return;
-                }
-            });
-        }
-        
-        // Setup shortcuts initially
-        setupKeyboardShortcuts();
-        
-        // Re-setup shortcuts after Streamlit updates
-        const observer = new MutationObserver(function(mutations) {
-            mutations.forEach(function(mutation) {
-                if (mutation.addedNodes.length > 0) {
-                    // Reset search input reference
-                    searchInput = null;
-                    setTimeout(setupKeyboardShortcuts, 100);
-                }
-            });
-        });
-        
-        observer.observe(document.body, {
-            childList: true,
-            subtree: true
-        });
-    });
-    </script>
-    """)
-
-    # Check if logs directory exists
     if not os.path.exists(LOGS_DIR):
-        st.error(f"📁 Logs directory not found: `{LOGS_DIR}`")
-        st.info("Please ensure the logs directory exists relative to the script.")
+        st.error(f"📁 Logs directory not found: `{LOGS_DIR}`. Please create it relative to the script.")
         return
 
     files_by_folder = get_log_files()
+    
+    if 'search_term' not in st.session_state:
+        st.session_state.search_term = ""
+    
+    all_files_flat = [fi for files in files_by_folder.values() for fi in files]
+    if 'selected_file_path' not in st.session_state or \
+       (st.session_state.selected_file_path and st.session_state.selected_file_path not in [f['path'] for f in all_files_flat if all_files_flat]):
+        if all_files_flat:
+            st.session_state.selected_file_path = max(all_files_flat, key=lambda x: x['modified'])['path']
+        else: 
+            st.session_state.selected_file_path = None
+    
+    if 'current_page_main_centered' not in st.session_state:
+        st.session_state.current_page_main_centered = 1
+    if 'sort_order_sidebar' not in st.session_state:
+        st.session_state.sort_order_sidebar = "Oldest First" # Default sort
+    if 'page_size_sidebar' not in st.session_state:
+        st.session_state.page_size_sidebar = 50
+    if 'quick_filter_applied' not in st.session_state:
+        st.session_state.quick_filter_applied = None
+    if 'log_levels_selection' not in st.session_state: 
+        st.session_state.log_levels_selection = []
+    if 'source_files_selection' not in st.session_state: 
+        st.session_state.source_files_selection = []
+    if 'dialog_previous_log_data' not in st.session_state:
+        st.session_state.dialog_previous_log_data = None
+
+
+    log_df_for_filters = pd.DataFrame() 
+    if st.session_state.selected_file_path:
+        log_df_for_filters = load_log_data(st.session_state.selected_file_path)
+
+    # --- STICKY HEADER ROW 1: Search and Quick Filters ---
+    st.markdown("<div class='sticky-header-controls-wrapper'>", unsafe_allow_html=True)
+    spacer_col, main_controls_col = st.columns([0.3, 0.7]) 
+    with main_controls_col:
+        search_input_col, qf1_col, qf2_col, clear_search_col = st.columns([0.5, 0.16, 0.19, 0.15])
+        
+        with search_input_col:
+            try:
+                search_input_value = st_keyup(
+                    "Search logs (Ctrl+Enter to focus)", value=st.session_state.search_term,
+                    placeholder="Type to search logs...", debounce=300, label_visibility="collapsed",
+                    help="Searches messages, loggers, and source files (case-insensitive).", key="live_search_header"
+                )
+                if search_input_value != st.session_state.search_term:
+                    st.session_state.search_term = search_input_value
+                    st.session_state.current_page_main_centered = 1
+                    st.session_state.dialog_previous_log_data = None # Clear dialog on new search
+                    st.rerun()
+            except Exception: # Fallback if st_keyup is not available or fails
+                search_input_value = st.text_input(
+                    "Search logs (Ctrl+Enter to focus)", value=st.session_state.search_term,
+                    placeholder="Type and press Enter...", label_visibility="collapsed",
+                    help="Searches messages, loggers, and source files (case-insensitive).", key="fallback_search_header"
+                )
+                if search_input_value != st.session_state.search_term:
+                    st.session_state.search_term = search_input_value
+                    st.session_state.current_page_main_centered = 1
+                    st.session_state.dialog_previous_log_data = None # Clear dialog
+                    st.rerun()
+            if st.session_state.search_term:
+                 st.caption(f"`{st.session_state.search_term}` (Esc to clear)")
+
+        available_levels_qf = sorted(log_df_for_filters["Level"].unique()) if not log_df_for_filters.empty else []
+        with qf1_col:
+            if st.button("🚨 Errors", help="Show only ERROR and CRITICAL logs", use_container_width=True, key="qf_errors_header"):
+                st.session_state.log_levels_selection = [lvl for lvl in available_levels_qf if lvl in ['ERROR', 'CRITICAL']]
+                st.session_state.quick_filter_applied = 'errors'
+                st.session_state.current_page_main_centered = 1
+                st.session_state.dialog_previous_log_data = None # Clear dialog
+                st.rerun()
+        with qf2_col:
+            if st.button("⚠️ Warn & Up", help="Show WARNING, ERROR, CRITICAL logs", use_container_width=True, key="qf_warn_header"):
+                st.session_state.log_levels_selection = [lvl for lvl in available_levels_qf if lvl in ['WARNING', 'ERROR', 'CRITICAL']]
+                st.session_state.quick_filter_applied = 'warnings'
+                st.session_state.current_page_main_centered = 1
+                st.session_state.dialog_previous_log_data = None # Clear dialog
+                st.rerun()
+        
+        with clear_search_col:
+            if st.button("🗑️ Clear", help="Clear search term and quick filter", use_container_width=True, key="clear_search_header_btn"):
+                changed = False
+                if st.session_state.search_term != "":
+                    st.session_state.search_term = ""
+                    changed = True
+                if st.session_state.quick_filter_applied is not None: 
+                    st.session_state.quick_filter_applied = None
+                    # If clearing quick filter, revert log_levels_selection to all available if it was set by QF
+                    # This might need more nuanced logic if user manually changed levels after QF
+                    # For now, let's assume clearing QF means user wants to see broader levels or set manually
+                    changed = True
+                if st.session_state.dialog_previous_log_data is not None:
+                    st.session_state.dialog_previous_log_data = None # Clear dialog
+                    # No rerun needed just for this, but will happen if other changes occur
+                
+                if changed:
+                    st.session_state.current_page_main_centered = 1
+                    st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True) # End of sticky-header-controls-wrapper
+    
+    # --- HEADER ROW 2: Title (Appears below sticky header) ---
+    st.markdown("<h1 class='main-header-title'>📊 Log Viewer</h1>", unsafe_allow_html=True)
+    
+    st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True) # Spacer after title
 
     if not files_by_folder:
         st.markdown("""
         <div class="empty-state">
             <div class="empty-state-icon">📄</div>
             <h3>No log files found</h3>
-            <p>No .log files found in the logs directory.</p>
+            <p>No .log files found in the <code>logs</code> directory. Please add some to proceed.</p>
         </div>
         """, unsafe_allow_html=True)
+        return 
+
+    selector_col, latest_btn_col = st.columns([0.85, 0.15]) 
+    selected_file_path = render_file_selector_header_area(files_by_folder, selector_col, latest_btn_col)
+
+    if not selected_file_path: 
+        st.error("No log file selected or available. Please check the logs directory.")
+        create_compact_stats_display(pd.DataFrame())
         return
 
-    # Live Search at the top of main content
-    st.markdown("""
-    <div class="main-search">
-    """, unsafe_allow_html=True)
-    
-    st.markdown("### 🔍 Live Search")
+    st.html("""
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        let searchInput = null;
+        function findSearchInput() {
+            const selectors = ['input[key="live_search_header"]', 'input[placeholder*="Type to search logs..."]', 'input[aria-label="Search logs"]', 'input[key="fallback_search_header"]'];
+            for (const selector of selectors) {
+                const input = document.querySelector(selector);
+                if (input) { searchInput = input; return input; }
+            }
+            const stKeyupDivs = document.querySelectorAll('div[data-testid="stVerticalBlock"] div[data-testid="stTextInput"]');
+            for (const stKeyupDiv of stKeyupDivs) {
+                 const potentialInput = stKeyupDiv.querySelector('input');
+                 if (potentialInput && potentialInput.placeholder && potentialInput.placeholder.includes("Type to search logs...")) {
+                     searchInput = potentialInput; return potentialInput;
+                 }
+            }
+            return null;
+        }
+        function setupKeyboardShortcuts() {
+            document.removeEventListener('keydown', handleKeyDown); document.addEventListener('keydown', handleKeyDown);
+        }
+        function handleKeyDown(event) {
+            if (event.ctrlKey && event.key === 'Enter') {
+                event.preventDefault(); const input = findSearchInput(); if (input) { input.focus(); input.select(); } return;
+            }
+            if (event.key === 'Escape') {
+                const input = findSearchInput();
+                if (input && document.activeElement === input) {
+                    input.value = ''; 
+                    input.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true })); 
+                    input.blur(); 
+                    const clearButton = document.querySelector('button[key="clear_search_header_btn"]');
+                    if (clearButton) {
+                        clearButton.click(); // This will trigger Streamlit rerun via Python
+                    }
+                } return;
+            }
+        }
+        function initializeAndObserve() {
+            findSearchInput(); 
+            setupKeyboardShortcuts();
+        }
+        setTimeout(initializeAndObserve, 700); 
+        const observer = new MutationObserver(function(mutations) {
+            searchInput = null; 
+            setTimeout(initializeAndObserve, 300); // Re-initialize after DOM changes
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+    });
+    </script>
+    """)
 
-    # Initialize search term in session state if not exists
-    if 'search_term' not in st.session_state:
-        st.session_state.search_term = ""
-
-    # Use columns for better layout - adjusted ratios for better clear button positioning
-    col1, col2 = st.columns([5, 1])
-
-    with col1:
-        # Live search that triggers on every keystroke
-        try:
-            search_term = st_keyup(
-                "Search across all log messages, loggers, and files",
-                value=st.session_state.search_term,
-                placeholder="Start typing to search instantly... (Ctrl+Enter to focus)",
-                help="Search is case-insensitive and searches across messages, loggers, and source files",
-                key="live_search_main",
-                debounce=300  # Add small delay to prevent excessive updates
-            )
-        except Exception:
-            # Fallback to regular text input if st_keyup fails
-            search_term = st.text_input(
-                "Search across all log messages, loggers, and files",
-                value=st.session_state.search_term,
-                placeholder="Type and press Enter to search... (Ctrl+Enter to focus)",
-                help="Search is case-insensitive and searches across messages, loggers, and source files",
-                key="fallback_search_main"
-            )
-        
-        # Update session state
-        if search_term != st.session_state.search_term:
-            st.session_state.search_term = search_term
-
-    with col2:
-        # Add some spacing to align the clear button with the input field
-        st.markdown("<br>", unsafe_allow_html=True)
-        # Clear search button
-        if st.button("🗑️ Clear", help="Clear search", use_container_width=True, key="clear_search_btn"):
-            st.session_state.search_term = ""
-            st.rerun()
-
-    # Search statistics
-    if search_term:
-        st.caption(f"🔍 **Active search:** `{search_term}` • Press **Escape** to clear")
-    else:
-        st.caption("💡 **Tip:** Use **Ctrl+Enter** to focus search bar • Search across messages, loggers, and files")
-
-    st.markdown("""
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Sidebar filters
     with st.sidebar:
         st.markdown("## 🎛️ Controls")
+        st.markdown("---") 
         
-        # Update keyboard shortcuts info
-        st.markdown("""
-        <div style="background: #f0f9ff; padding: 0.5rem; border-radius: 6px; margin-bottom: 1rem; border: 1px solid #0ea5e9;">
-            <div style="font-size: 0.75rem; color: #0f172a; font-weight: 500;">⌨️ Keyboard Shortcuts</div>
-            <div style="font-size: 0.7rem; color: #64748b; margin-top: 0.25rem;">
-                <code>Ctrl+Enter</code> → Focus search bar<br>
-                <code>Escape</code> → Clear search (when focused)
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Single file selection with improved UX
-        selected_file = render_file_selector(files_by_folder)
-        
-        if not selected_file:
-            st.warning("⚠️ Please select a log file.")
-            return
-        
-        st.markdown("---")
-        
-        # Load data first to get available options
-        log_df = load_log_data(selected_file) if selected_file else pd.DataFrame()
-        
-        # Quick filter buttons (moved to top)
-        st.markdown("### ⚡ Quick Filters")
-        col1, col2 = st.columns(2)
-        
-        # Initialize session state for quick filters
-        if 'quick_filter_applied' not in st.session_state:
-            st.session_state.quick_filter_applied = None
-        
-        show_errors_only = col1.button("🚨 Errors", help="Show only errors and critical", use_container_width=True)
-        show_warnings = col2.button("⚠️ Warnings", help="Show warnings and above", use_container_width=True)
-        
-        st.markdown("---")
-        
-        # Log Levels Filter
         st.markdown("### 📊 Log Levels")
-        if not log_df.empty:
-            available_levels = sorted(log_df["Level"].unique())
+        if not log_df_for_filters.empty:
+            available_levels = sorted(log_df_for_filters["Level"].unique())
+            if 'log_levels_selection' not in st.session_state or st.session_state.quick_filter_applied: # If QF applied, it dictates selection
+                if st.session_state.quick_filter_applied: 
+                    pass # log_levels_selection is already set by QF button
+                else: # No QF, initialize to all available if not already set
+                    if not st.session_state.log_levels_selection: # Only if empty
+                        st.session_state.log_levels_selection = available_levels
             
-            # Initialize log levels selection in session state
-            if 'log_levels_selection' not in st.session_state:
-                st.session_state.log_levels_selection = available_levels
+            c1_lvl, c2_lvl = st.columns(2)
+            if c1_lvl.button("✅ Select All Levels", use_container_width=True, key="select_all_levels_btn"):
+                if st.session_state.log_levels_selection != available_levels:
+                    st.session_state.log_levels_selection = available_levels
+                    st.session_state.quick_filter_applied = None
+                    st.session_state.current_page_main_centered = 1
+                    st.session_state.dialog_previous_log_data = None
+                    st.rerun()
+            if c2_lvl.button("❌ Clear Level Selections", use_container_width=True, key="clear_levels_btn"):
+                if st.session_state.log_levels_selection: 
+                    st.session_state.log_levels_selection = []
+                    st.session_state.quick_filter_applied = None
+                    st.session_state.current_page_main_centered = 1
+                    st.session_state.dialog_previous_log_data = None
+                    st.rerun()
             
-            # Quick selection buttons for log levels
-            col1, col2 = st.columns(2)
-            select_all_levels = col1.button("✅ All", help="Select all log levels", use_container_width=True, key="select_all_levels")
-            clear_levels = col2.button("❌ Clear", help="Clear log level selection", use_container_width=True, key="clear_levels")
-            
-            # Apply quick filters if buttons were pressed
-            if show_errors_only:
-                default_levels = [level for level in available_levels if level in ['ERROR', 'CRITICAL']]
-                st.session_state.quick_filter_applied = 'errors'
-                st.session_state.log_levels_selection = default_levels
-            elif show_warnings:
-                default_levels = [level for level in available_levels if level in ['WARNING', 'ERROR', 'CRITICAL']]
-                st.session_state.quick_filter_applied = 'warnings'
-                st.session_state.log_levels_selection = default_levels
-            elif select_all_levels:
-                st.session_state.log_levels_selection = available_levels
-                st.session_state.quick_filter_applied = None
+            selected_levels_sidebar = st.multiselect("Filter by log level:", options=available_levels, default=st.session_state.get('log_levels_selection', []), key="log_levels_multiselect_sidebar", label_visibility="collapsed")
+            if selected_levels_sidebar != st.session_state.get('log_levels_selection', []):
+                st.session_state.log_levels_selection = selected_levels_sidebar
+                st.session_state.quick_filter_applied = None # Manual selection overrides QF
+                st.session_state.current_page_main_centered = 1
+                st.session_state.dialog_previous_log_data = None
                 st.rerun()
-            elif clear_levels:
-                st.session_state.log_levels_selection = []
-                st.session_state.quick_filter_applied = None
-                st.rerun()
-            else:
-                # Check if we should maintain previous quick filter
-                if st.session_state.quick_filter_applied == 'errors':
-                    default_levels = [level for level in available_levels if level in ['ERROR', 'CRITICAL']]
-                    if st.session_state.log_levels_selection != default_levels:
-                        st.session_state.log_levels_selection = default_levels
-                elif st.session_state.quick_filter_applied == 'warnings':
-                    default_levels = [level for level in available_levels if level in ['WARNING', 'ERROR', 'CRITICAL']]
-                    if st.session_state.log_levels_selection != default_levels:
-                        st.session_state.log_levels_selection = default_levels
-            
-            selected_levels = st.multiselect(
-                "Filter by log level:",
-                options=available_levels,
-                default=st.session_state.log_levels_selection,
-                help="Filter by log severity level",
-                label_visibility="collapsed",
-                key="log_levels_filter"
-            )
-            
-            # Update session state with current selection
-            st.session_state.log_levels_selection = selected_levels
         else:
-            selected_levels = []
-        
+            st.caption("No log levels to filter (load a file).")
+            st.session_state.log_levels_selection = []
+
         st.markdown("---")
-        
-        # Source Code Files Filter with select all/clear options
         st.markdown("### 📄 Source Code Files")
-        if not log_df.empty:
-            available_source_files = sorted(log_df["File"].unique())
-            
-            # Initialize source files selection in session state
-            if 'source_files_selection' not in st.session_state:
+        if not log_df_for_filters.empty: 
+            available_source_files = sorted(log_df_for_filters["File"].unique()) 
+            if 'source_files_selection' not in st.session_state or not st.session_state.source_files_selection: # Initialize if not set or empty
                 st.session_state.source_files_selection = available_source_files
             
-            # Quick selection buttons for source files
-            col1, col2 = st.columns(2)
-            select_all_sources = col1.button("✅ All", help="Select all source files", use_container_width=True, key="select_all_sources")
-            clear_sources = col2.button("❌ Clear", help="Clear source file selection", use_container_width=True, key="clear_sources")
-            
-            # Handle quick selection buttons
-            if select_all_sources:
-                st.session_state.source_files_selection = available_source_files
+            c1_src, c2_src = st.columns(2)
+            if c1_src.button("✅ Select All Files", use_container_width=True, key="select_all_sources_btn"):
+                if st.session_state.source_files_selection != available_source_files:
+                    st.session_state.source_files_selection = available_source_files
+                    st.session_state.current_page_main_centered = 1
+                    st.session_state.dialog_previous_log_data = None
+                    st.rerun()
+            if c2_src.button("❌ Clear File Selections", use_container_width=True, key="clear_sources_btn"):
+                if st.session_state.source_files_selection: 
+                    st.session_state.source_files_selection = []
+                    st.session_state.current_page_main_centered = 1
+                    st.session_state.dialog_previous_log_data = None
+                    st.rerun()
+
+            selected_source_files_sidebar = st.multiselect("Filter by source code file:", options=available_source_files, default=st.session_state.get('source_files_selection', []), key="source_files_multiselect_sidebar", label_visibility="collapsed")
+            if selected_source_files_sidebar != st.session_state.get('source_files_selection', []):
+                st.session_state.source_files_selection = selected_source_files_sidebar
+                st.session_state.current_page_main_centered = 1
+                st.session_state.dialog_previous_log_data = None
                 st.rerun()
-            elif clear_sources:
-                st.session_state.source_files_selection = []
-                st.rerun()
-            
-            selected_source_files = st.multiselect(
-                "Filter by source file:",
-                options=available_source_files,
-                default=st.session_state.source_files_selection,
-                help="Filter by source code file that generated the log",
-                label_visibility="collapsed",
-                key="source_files_filter"
-            )
-            
-            # Update session state with current selection
-            st.session_state.source_files_selection = selected_source_files
         else:
-            selected_source_files = []
-        
+            st.caption("No source files to filter (load a file).")
+            st.session_state.source_files_selection = []
+
         st.markdown("---")
+        st.markdown("### ⚙️ Display Options")
+        sort_order_options = ["Newest First", "Oldest First", "Largest Time Diff First"]
+        current_sort_order_idx = sort_order_options.index(st.session_state.sort_order_sidebar) if st.session_state.sort_order_sidebar in sort_order_options else 1 # Default to Oldest First index
+        sort_order = st.radio("Sort Order:", options=sort_order_options, index=current_sort_order_idx, key="sort_order_radio_sidebar", horizontal=True)
+        if sort_order != st.session_state.sort_order_sidebar:
+            st.session_state.sort_order_sidebar = sort_order
+            st.session_state.dialog_previous_log_data = None # Clear dialog on sort change
+            st.rerun()
         
-        # Display options
-        st.markdown("### 📋 Display Options")
-        
-        sort_order = st.radio(
-            "🔄 Sort Order",
-            options=["Newest First", "Oldest First"],
-            index=0,
-            help="Choose timestamp sorting order"
-        )
-        
-        page_size = st.selectbox(
-            "📄 Items per Page",
-            options=[10, 25, 50, 100, 200],
-            index=2,
-            help="Number of log entries to show per page"
-        )
+        page_size_options = [10, 25, 50, 100, 200]
+        current_page_size_idx = page_size_options.index(st.session_state.page_size_sidebar) if st.session_state.page_size_sidebar in page_size_options else page_size_options.index(50)
+        page_size = st.selectbox("Items per Page:", options=page_size_options, index=current_page_size_idx, key="page_size_select_sidebar")
+        if page_size != st.session_state.page_size_sidebar:
+            st.session_state.page_size_sidebar = page_size
+            st.session_state.current_page_main_centered = 1
+            st.session_state.dialog_previous_log_data = None # Clear dialog
+            st.rerun()
 
-    # Load and process data
-    if not selected_file:
+    current_log_df = load_log_data(selected_file_path) 
+    if current_log_df.empty and selected_file_path:
+        create_compact_stats_display(current_log_df) 
+        st.info(f"Selected log file '{os.path.basename(selected_file_path)}' is empty or could not be parsed.")
         return
+    elif not selected_file_path: 
+        create_compact_stats_display(pd.DataFrame())
+        st.error("No log file is currently selected.") 
+        return
+
+    current_search_term = st.session_state.search_term
+    current_selected_levels = st.session_state.get('log_levels_selection', [])
+    current_selected_source_files = st.session_state.get('source_files_selection', [])
+    filtered_df = filter_dataframe_live(current_log_df, current_search_term, current_selected_levels, current_selected_source_files)
     
-    # Load data (we already loaded it above for filters)
-    if log_df.empty:
-        st.warning("📊 Selected log file is empty or could not be parsed.")
-        return
+    st.markdown("---") 
+    create_compact_stats_display(filtered_df)
 
-    # Apply filters with live search
-    filtered_df = filter_dataframe_live(log_df, search_term, selected_levels, selected_source_files)
+    # Sorting and TimeDiff calculation
+    if 'TimeDiff' not in filtered_df.columns:
+        filtered_df["TimeDiff"] = pd.Series([pd.NaT] * len(filtered_df), index=filtered_df.index, dtype='timedelta64[ns]')
 
-    # Apply sorting
     if "Timestamp" in filtered_df.columns and not filtered_df.empty:
-        filtered_df = filtered_df.sort_values(
-            by="Timestamp", 
-            ascending=(sort_order == "Oldest First"), 
-            na_position='last'
-        )
-
-    # Show statistics
-    create_stats_dashboard(filtered_df)
-
-    # Results section
-    st.markdown("---")
+        if st.session_state.sort_order_sidebar == "Largest Time Diff First":
+            # Calculate TimeDiff based on 'Oldest First' for consistent meaning of "gap"
+            temp_df = filtered_df.sort_values(by="Timestamp", ascending=True, na_position='last')
+            if not temp_df.index.is_unique:
+                temp_df = temp_df.reset_index(drop=True) # Reset index for clean diff
+            temp_df["TimeDiff"] = temp_df["Timestamp"].diff()
+            
+            # Sort by the absolute value of this consistently calculated TimeDiff
+            temp_df['TimeDiff_abs_seconds'] = temp_df['TimeDiff'].apply(lambda x: abs(x.total_seconds()) if pd.notna(x) else -1) # NaNs last
+            filtered_df = temp_df.sort_values(by="TimeDiff_abs_seconds", ascending=False, na_position='last').drop(columns=['TimeDiff_abs_seconds'])
+        else: # Sort by Timestamp (Newest or Oldest First)
+            timestamp_sort_ascending = (st.session_state.sort_order_sidebar == "Oldest First")
+            sorted_df_for_display = filtered_df.sort_values(by="Timestamp", ascending=timestamp_sort_ascending, na_position='last')
+            if not sorted_df_for_display.index.is_unique:
+                sorted_df_for_display = sorted_df_for_display.reset_index(drop=True) # Reset index for clean diff
+            sorted_df_for_display["TimeDiff"] = sorted_df_for_display["Timestamp"].diff()
+            filtered_df = sorted_df_for_display
     
-    if filtered_df.empty:
-        st.markdown("""
-        <div class="empty-state">
-            <div class="empty-state-icon">🔍</div>
-            <h3>No matching entries</h3>
-            <p>Try adjusting your search criteria or filters.</p>
-        </div>
-        """, unsafe_allow_html=True)
-        return
+    # Ensure TimeDiff column exists even if no timestamps or data
+    if "TimeDiff" not in filtered_df.columns:
+        filtered_df["TimeDiff"] = pd.Series([pd.NaT] * len(filtered_df), index=filtered_df.index, dtype='timedelta64[ns]')
 
-    # Results header with live count
+
     result_count = len(filtered_df)
-    total_count = len(log_df)
-    
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        if search_term:
-            st.subheader(f"🔍 Search Results: {result_count:,} of {total_count:,} entries")
-        else:
-            st.subheader(f"📋 Log Entries: {result_count:,} of {total_count:,}")
-    
-    with col2:
-        if search_term and result_count > 0:
-            st.metric("Match Rate", f"{(result_count/total_count)*100:.1f}%")
-    
-    # Pagination
-    total_pages = (result_count - 1) // page_size + 1 if result_count > 0 else 1
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        current_page = st.number_input(
-            "Page",
-            min_value=1,
-            max_value=total_pages,
-            value=1,
-            help=f"Navigate through {total_pages} pages"
-        )
+    total_count_in_file = len(current_log_df)
+    total_pages = (result_count - 1) // st.session_state.page_size_sidebar + 1 if result_count > 0 else 1
 
-    # Display paginated results
-    start_idx = (current_page - 1) * page_size
-    end_idx = start_idx + page_size
+    if st.session_state.current_page_main_centered > total_pages:
+        st.session_state.current_page_main_centered = total_pages
+    if st.session_state.current_page_main_centered < 1:
+        st.session_state.current_page_main_centered = 1
+        
+    if result_count > 0:
+        subhead_col, nav_col = st.columns([0.65, 0.35]) 
+        with subhead_col:
+            st.subheader(f"📖 Log Entries ({result_count:,} of {total_count_in_file:,} from '{os.path.basename(selected_file_path)}' shown)")
+
+        if total_pages > 1:
+            with nav_col:
+                pg_label_col, pg_input_col, pg_total_col = st.columns([0.3, 0.4, 0.3]) 
+                with pg_label_col:
+                    st.markdown("<div style='padding-top:0.7rem; text-align:right; margin-right:-0.5rem; font-size:0.9em;'>Page:</div>", unsafe_allow_html=True)
+                with pg_input_col:
+                    current_page_val = st.number_input(
+                        "PageInput", min_value=1, max_value=total_pages, 
+                        value=st.session_state.current_page_main_centered, 
+                        key="page_navigator_inline_input", label_visibility="collapsed"
+                    )
+                    if current_page_val != st.session_state.current_page_main_centered:
+                        st.session_state.current_page_main_centered = current_page_val
+                        st.session_state.dialog_previous_log_data = None # Clear dialog on page change
+                        st.rerun()
+                with pg_total_col:
+                    st.markdown(f"<div style='padding-top:0.7rem; margin-left:-0.5rem; font-size:0.9em;'>of {total_pages}</div>", unsafe_allow_html=True)
+        elif total_pages == 1 and result_count > 0:
+             with nav_col: 
+                st.write("") # Keep the space for alignment
+    else:
+        st.markdown("""
+        <div class="empty-state"> <div class="empty-state-icon">🔍</div>
+            <h3>No matching log entries</h3>
+            <p>Try adjusting your search or filter criteria.</p>
+        </div>""", unsafe_allow_html=True)
+        # Clear dialog if no results
+        if st.session_state.dialog_previous_log_data is not None:
+            st.session_state.dialog_previous_log_data = None
+        return 
+    
+    start_idx = (st.session_state.current_page_main_centered - 1) * st.session_state.page_size_sidebar
+    end_idx = start_idx + st.session_state.page_size_sidebar
     paginated_df = filtered_df.iloc[start_idx:end_idx]
 
-    for _, row in paginated_df.iterrows():
+    for _, row in paginated_df.iterrows(): # row.name is the index from filtered_df
         ts_str = row['Timestamp'].strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] if pd.notna(row['Timestamp']) else "No Timestamp"
         level = row['Level']
-        message_html = highlight_term(str(row['Message']), search_term)
-        logger_html = highlight_term(str(row['LoggerName']), search_term)
-        file_html = highlight_term(str(row['File']), search_term)
+        time_diff_str = format_time_delta(row.get('TimeDiff'))
+        
+        message_html = highlight_term(row['Message'], current_search_term)
+        logger_html = highlight_term(row['LoggerName'], current_search_term)
+        file_html = highlight_term(row['File'], current_search_term) 
+        source_file_display = html.escape(str(row.get('SourceFile', 'N/A')))
+        
+        current_row_index_in_filtered_df = row.name 
 
-        st.markdown(f"""
-        <div class="log-entry level-{level}">
-            <div class="log-header">
-                <div>
-                    <span class="log-timestamp">{ts_str}</span>
-                    <span class="log-level-badge">{level}</span>
+        # Use columns to place button beside the card
+        button_col, card_col = st.columns([0.05, 0.95]) # Adjust ratio as needed
+
+        with button_col:
+            # Get the integer position of the current row in the full filtered_df
+            try:
+                # filtered_df might have a non-integer index if not reset, or integer if reset.
+                # .get_loc() gives integer position.
+                loc_in_filtered_df = filtered_df.index.get_loc(current_row_index_in_filtered_df)
+                
+                # Disable button if it's the very first entry in the entire filtered list
+                is_first_entry_overall = (loc_in_filtered_df == 0)
+                
+                if st.button("⬅️", key=f"show_prev_btn_{current_row_index_in_filtered_df}", 
+                             help="Show previous log entry", use_container_width=True,
+                             disabled=is_first_entry_overall):
+                    if loc_in_filtered_df > 0:
+                        previous_log_series = filtered_df.iloc[loc_in_filtered_df - 1]
+                        st.session_state.dialog_previous_log_data = previous_log_series.to_dict()
+                    else: # Should be caught by disabled, but as a fallback
+                        st.session_state.dialog_previous_log_data = "NO_PREVIOUS"
+                    st.rerun()
+            except Exception: # Catch potential errors with index lookup
+                # st.error(f"Error finding previous log: {e}") # For debugging
+                pass # Silently don't show button or handle error
+
+        with card_col:
+            st.markdown(f"""
+            <div class="log-entry level-{level}">
+                <div class="log-header">
+                    <div>
+                        <span class="log-timestamp">{ts_str}</span><span class="log-timediff">{time_diff_str}</span>
+                        <span class="log-level-badge">{level}</span>
+                    </div>
+                    <div class="log-meta">
+                        Logged in: {file_html}:{row.get('Line', 'N/A')} &bull; From Log File: {source_file_display} (Original Line: {row.get('OriginalLineNum', 'N/A')})
+                    </div>
                 </div>
-                <div class="log-meta">
-                    {file_html}:{row['Line']} • {html.escape(row['SourceFile'])}
+                <div class="log-content">
+                    <div class="log-logger">Logger: {logger_html}</div>
+                    <div class="log-message">{message_html}</div>
                 </div>
             </div>
-            <div class="log-content">
-                <div class="log-logger">Logger: {logger_html}</div>
-                <div class="log-message">{message_html}</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
 
-    # Pagination info
     if total_pages > 1:
         st.markdown(f"""
         <div class="pagination-container">
-            <span>Page {current_page} of {total_pages} • Showing {len(paginated_df)} of {result_count:,} entries</span>
+            <span>Page {st.session_state.current_page_main_centered} of {total_pages} &bull; Displaying {len(paginated_df)} of {result_count:,} matching entries</span>
         </div>
         """, unsafe_allow_html=True)
 
+    # Dialog display logic
+    if st.session_state.get('dialog_previous_log_data') is not None:
+        dialog_data = st.session_state.dialog_previous_log_data
+
+        if dialog_data == "NO_PREVIOUS": # Should ideally be handled by button disable
+            @st.dialog("Information")
+            def no_previous_dialog():
+                st.info("This is the first log entry in the current view. No previous entry to show.")
+                if st.button("OK", key="close_no_prev_dialog"):
+                    st.session_state.dialog_previous_log_data = None
+                    st.rerun()
+            no_previous_dialog()
+        elif isinstance(dialog_data, dict): # Check if it's the log data dictionary
+            previous_log_dict = dialog_data
+            
+            @st.dialog("Previous Log Entry")
+            def show_previous_log_in_dialog():
+                prev_ts_str = pd.to_datetime(previous_log_dict['Timestamp']).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] if pd.notna(previous_log_dict.get('Timestamp')) else "No Timestamp"
+                prev_level = previous_log_dict.get('Level', 'UNKNOWN')
+                # TimeDiff for the dialog entry might not be directly available or meaningful in isolation,
+                # as it depends on its own previous entry. We can show its calculated TimeDiff if present.
+                prev_time_diff_str = format_time_delta(previous_log_dict.get('TimeDiff'))
+
+                prev_message_html = highlight_term(previous_log_dict.get('Message',''), st.session_state.search_term)
+                prev_logger_html = highlight_term(previous_log_dict.get('LoggerName',''), st.session_state.search_term)
+                prev_file_html = highlight_term(previous_log_dict.get('File',''), st.session_state.search_term)
+                prev_source_file_display = html.escape(str(previous_log_dict.get('SourceFile', 'N/A')))
+
+                st.markdown(f"""
+                <div class="log-entry level-{prev_level}" style="margin-bottom: 0;">
+                    <div class="log-header">
+                        <div>
+                            <span class="log-timestamp">{prev_ts_str}</span><span class="log-timediff">{prev_time_diff_str}</span>
+                            <span class="log-level-badge">{prev_level}</span>
+                        </div>
+                        <div class="log-meta">
+                            Logged in: {prev_file_html}:{previous_log_dict.get('Line', 'N/A')} &bull; From Log File: {prev_source_file_display} (Original Line: {previous_log_dict.get('OriginalLineNum', 'N/A')})
+                        </div>
+                    </div>
+                    <div class="log-content">
+                        <div class="log-logger">Logger: {prev_logger_html}</div>
+                        <div class="log-message">{prev_message_html}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                if st.button("Close", key="close_prev_log_dialog_main"):
+                    st.session_state.dialog_previous_log_data = None
+                    st.rerun()
+            show_previous_log_in_dialog()
+        else: # Clear if data is not in expected format
+            st.session_state.dialog_previous_log_data = None
+
+
 if __name__ == "__main__":
     main()
-

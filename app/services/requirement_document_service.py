@@ -1,3 +1,4 @@
+import asyncio
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import desc, select
 from typing import List, Optional, Dict, Any
@@ -300,36 +301,28 @@ def _get_sections_config() -> List[Dict[str, str]]:
             "id": "conceptual_data_model",
             "title": "### 1.1. Conceptual Data Model Diagram",
             "instructions": """
-      (Based on the 'M204 File Definitions Data' (providing `m204_file_name`) and primarily the 'Source File LLM-Generated Summaries' (specifically the `m204_detailed_description` for relevant M204 source files), generate a Mermaid Entity-Relationship (ER) diagram using `erDiagram` syntax.
-       Each M204 file listed in 'M204 File Definitions Data' (e.g., `CUSTFILE`) should be considered as a potential entity.
-       Use the `m204_detailed_description` associated with the M204 source file (found in 'Source File LLM-Generated Summaries' by correlating the M204 file with its defining source file's `original_filename`) that likely defines or describes these M204 data files to understand their purpose, key data elements, and relationships.
-       Represent each significant M204 data file as an entity in the diagram.
-       Infer attributes for these entities from the `m204_detailed_description`. If the description mentions specific fields or data points, list them. You can use the `file_definition_json` from 'M204 File Definitions Data' as a secondary source to list specific field names and types if the textual description is not detailed enough for attributes, or to confirm attributes. Indicate primary keys (PK) or key fields if identifiable from either the description or the JSON (e.g., attributes containing "KEY").
-       Infer relationships between entities (M204 files) based on how the `m204_detailed_description` explains their interactions or shared data. Depict these relationships using standard ERD notation (e.g., `||--o{{`, `||--|{{`, `}}o--||`, `}}|--||`).
-       **Enclose the syntactically correct Mermaid code for an `erDiagram` within a fenced code block like this:**
+      (Based on the overall system data, including 'M204 Procedures Data', 'M204 File Definitions Data', 'JCL DD Statements Data', and 'Source File LLM-Generated Summaries', generate a high-level Mermaid flowchart diagram (e.g., using `graph TD;` for Top-Down or `graph LR;` for Left-to-Right) illustrating the primary data flows or control sequences within the system.
+       The diagram should identify:
+       - Key processes (e.g., JCL Jobs, important M204 Procedures like ONLINE or BATCH ones). Represent them as nodes (e.g., `jobName["JCL Job: MYJOB"]`, `procName{M204 Proc: MYPROC}`).
+       - Major data stores (e.g., M204 Files or their associated VSAM datasets). Represent them using a database shape (e.g., `fileName[("M204 File: MYFILE")]`).
+       - Data flows between these processes and data stores, or control flow from one process to another. Use arrows to indicate the direction (e.g., `-->` for flow, `-- Text -->` for flow with description).
+       Use information from 'JCL DD Statements Data' (`dsn`, `disposition`, `job_name`, `step_name`) to show JCLs interacting with datasets and initiating processes.
+       Use information from 'M204 Procedures Data' (e.g., `m204_proc_name`, `m204_proc_type`) and 'Procedure Call Relationships Data' to infer how procedures process data or trigger other procedures/COBOL programs.
+       Refer to 'Source File LLM-Generated Summaries' to understand the purpose of JCLs and M204 modules and how they contribute to data or control flow.
+       The goal is to provide an overview of how data enters, is processed by, and exits the system, or how key operational sequences unfold. Focus on the most significant flows and control paths.
+       **Enclose the syntactically correct Mermaid code for the flowchart within a fenced code block like this:**
        ```mermaid
-       erDiagram
-           CUSTOMER ||--o{{ ORDER : places
-           CUSTOMER {{
-               string cust_id PK "Customer ID"
-               string name "Customer Name"
-               string email "Email Address"
-           }}
-           ORDER ||--|{{ LINE_ITEM : "contains"
-           ORDER {{
-               string order_id PK "Order ID"
-               string cust_id FK "References CUSTOMER"
-               date order_date "Order Date"
-           }}
-           LINE_ITEM {{
-               string item_id PK "Line Item ID"
-               string order_id FK "References ORDER"
-               string product_name "Product Name"
-               int quantity "Quantity"
-           }}
+       graph TD;
+           ExternalInput[External Input Source] --> JCL_PROCESS_DATA{JCL Job: PROCESS_DATA};
+           JCL_PROCESS_DATA -- Reads --> M204_INPUT_FILE[("M204 File: INPUT_FILE")];
+           JCL_PROCESS_DATA -- Executes --> M204_PROC_VALIDATE[M204 Procedure: VALIDATE_INPUT];
+           M204_PROC_VALIDATE -- Writes Validated Data --> M204_STAGING_FILE[("M204 File: STAGING_AREA")];
+           M204_ONLINE_PROC{M204 Online Proc: UPDATE_MASTER} -- Reads/Writes --> M204_MASTER_FILE[("M204 File: MASTER_DATA")];
+           M204_STAGING_FILE -- Input for Update --> M204_ONLINE_PROC;
+           M204_MASTER_FILE -- Data Extract --> ExternalReport[External Report Output];
        ```
-       Focus on the main data files and their core attributes as described. If the `m204_detailed_description` is sparse or relationships are not clear, generate a simpler diagram showing entities and their primary attributes based on the available information, and state that detailed relationships could not be fully mapped.
-       **If data from 'M204 File Definitions Data' and 'Source File LLM-Generated Summaries' (specifically `m204_detailed_description`) is insufficient to generate a meaningful and syntactically correct diagram, include the heading and state "Data insufficient to generate a conceptual data model diagram." instead of providing malformed Mermaid code.**)
+       If the provided data is insufficient to create a meaningful data flow or control flow diagram for this overview, include the heading and state "Data insufficient to generate a system data/control flow diagram." instead of providing malformed Mermaid code.
+       This diagram is intended as a high-level overview and should complement more specific diagrams like JCL job flow or detailed procedure call diagrams found in other sections.)
 """
         },
         {
@@ -681,7 +674,7 @@ async def generate_and_save_project_requirements_document(
     """
     Generates a comprehensive Software Requirements Specification (SRS) document
     in Markdown format for a given project using an LLM.
-    Each major section is generated via a separate LLM call.
+    Each major section is generated via an LLM call, potentially in parallel.
     """
     log.info(f"Starting requirements document generation for project ID: {project_id} with options: {options.model_dump_json(exclude_none=True)}")
 
@@ -693,7 +686,7 @@ async def generate_and_save_project_requirements_document(
         project_data_for_llm = await _fetch_project_data_for_llm(db, project_id, options)
         log.info(f"Fetched project data for LLM. Keys: {list(project_data_for_llm.keys())}")
     except HTTPException as he:
-        raise he 
+        raise he
     except Exception as e_fetch:
         log.error(f"Failed to fetch project data for LLM (Project ID: {project_id}): {e_fetch}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch project data: {str(e_fetch)}")
@@ -705,30 +698,43 @@ async def generate_and_save_project_requirements_document(
     document_title = f"Requirements Document for {project_name}"
     
     sections_config = _get_sections_config()
-    markdown_parts = [f"# {document_title}\n"] 
+    markdown_parts = [f"# {document_title}\n"]
 
+    generation_tasks = []
     for section_conf in sections_config:
         section_id = section_conf["id"]
-        section_title = section_conf["title"] 
+        section_title = section_conf["title"]
         section_instructions = section_conf["instructions"]
 
-        log.info(f"Requesting LLM generation for section: {section_id} - '{section_title}'")
-        try:
-            section_content = await _generate_llm_section(
-                section_id=section_id,
-                section_title=section_title,
-                section_instructions=section_instructions,
-                formatted_data_for_prompt=formatted_data_for_prompt,
-                custom_prompt_section=custom_prompt_section
-            )
-            markdown_parts.append(section_content)
-        except Exception as e_section_gen:
-            log.error(f"Error generating section '{section_id}': {e_section_gen}", exc_info=True)
-            markdown_parts.append(f"{section_title}\n\nGeneration of this section failed due to an unexpected error: {str(e_section_gen)}")
+        log.info(f"Queueing LLM generation for section: {section_id} - '{section_title}'")
+        task = _generate_llm_section(
+            section_id=section_id,
+            section_title=section_title,
+            section_instructions=section_instructions,
+            formatted_data_for_prompt=formatted_data_for_prompt,
+            custom_prompt_section=custom_prompt_section
+        )
+        generation_tasks.append(task)
+
+    try:
+        log.info(f"Executing {len(generation_tasks)} section generation tasks in parallel.")
+        # asyncio.gather runs tasks concurrently and returns results in the order of tasks provided.
+        # _generate_llm_section is designed to return a string (content or error message),
+        # so exceptions from the LLM call itself are handled within that function.
+        generated_sections_content = await asyncio.gather(*generation_tasks)
+        markdown_parts.extend(generated_sections_content)
+        log.info("All parallel section generation tasks completed.")
+    except Exception as e_gather:
+        # This would catch exceptions if asyncio.gather itself fails, or if a task raises an
+        # exception not caught by _generate_llm_section (which is unlikely given its try/except).
+        log.error(f"Error during parallel generation of sections: {e_gather}", exc_info=True)
+        # Append a generic error message; individual failed sections should have their own error messages
+        # from _generate_llm_section.
+        markdown_parts.append(f"\n\n## Error During Document Assembly\n\nAn error occurred while assembling the document sections: {str(e_gather)}")
 
 
     markdown_content = "\n\n".join(markdown_parts)
-    log.info(f"All sections generated. Total Markdown content length: {len(markdown_content)}")
+    log.info(f"All sections processed. Total Markdown content length: {len(markdown_content)}")
 
     if not markdown_content.strip() or len(markdown_content.strip()) < len(f"# {document_title}") + 50:
         log.warning(f"Generated document content is very minimal or empty for project {project_id}. Content: '{markdown_content[:200]}'")
@@ -739,7 +745,7 @@ async def generate_and_save_project_requirements_document(
         project_id=project_id,
         document_title=document_title,
         markdown_content=markdown_content,
-        generation_options_json=options.model_dump() 
+        generation_options_json=options.model_dump()
     )
 
     db_document = RequirementDocument(**doc_create_data.model_dump())
@@ -759,9 +765,8 @@ async def generate_and_save_project_requirements_document(
             response_data.generation_options_used = RequirementGenerationOptionsSchema(**db_document.generation_options_json)
         except Exception as e_parse_resp:
             log.warning(f"Could not parse generation_options_json for response for doc ID {db_document.requirement_document_id}: {e_parse_resp}")
-            response_data.generation_options_used = None # Or attempt RequirementGenerationOptionsSchema.model_validate
+            response_data.generation_options_used = None 
     return response_data
-
 
 # --- CRUD functions for RequirementDocument ---
 

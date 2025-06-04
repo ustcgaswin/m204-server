@@ -17,7 +17,7 @@ from app.schemas.m204_analysis_schema import (
 from app.utils.logger import log
 from app.config.llm_config import llm_config
 
-LLM_API_CALL_BATCH_SIZE = 5
+LLM_API_CALL_BATCH_SIZE = 20
 
 
 class M204FieldVsamSuggestion(BaseModel):

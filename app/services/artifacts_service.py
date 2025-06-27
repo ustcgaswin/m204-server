@@ -30,7 +30,7 @@ from app.models.generated_unit_test_artifact_model import GeneratedUnitTestArtif
 
 from app.utils.logger import log
 from app.config.llm_config import llm_config
-from pydantic import BaseModel, Field as PydanticField # Added PydanticField
+from pydantic import BaseModel, Field as PydanticField 
 
 LLM_API_CALL_BATCH_SIZE = 20
 
@@ -606,8 +606,10 @@ The `jcl_content` should be the complete JCL.
                     if isinstance(result, FileDefinitionToCobolFDOutput):
                         file_control_entries_str += result.file_control_entry
                         file_section_fds_str += result.file_description_entry + "\n"
-                        if result.working_storage_entries: working_storage_for_fds_str += result.working_storage_entries + "\n"
-                        if result.comments: file_section_fds_str += f"* FD Comment ({m204_file_name_for_log}): {result.comments}\n"
+                        if result.working_storage_entries:
+                            working_storage_for_fds_str += result.working_storage_entries + "\n"
+                        if result.comments:
+                            file_section_fds_str += f"* FD Comment ({m204_file_name_for_log}): {result.comments}\n"
                     elif isinstance(result, Exception):
                         log.error(f"Error converting FD for {m204_file_name_for_log}: {result}", exc_info=True)
                         file_section_fds_str += f"* --- ERROR CONVERTING FD FOR {m204_file_name_for_log} ---\n"
@@ -630,10 +632,12 @@ The `jcl_content` should be the complete JCL.
                     if isinstance(result, M204ProcedureToCobolOutput):
                         para_base = re.sub(r'[^A-Z0-9-]', '', result.m204_procedure_name.upper().replace('%', 'P').replace('$', 'D').replace('_', '-').replace('#','N'))
                         paragraph_name = (para_base[:28] + "-PARA")
-                        if not paragraph_name or not (paragraph_name[0].isalpha() or paragraph_name[0].isdigit()): paragraph_name = "P" + (paragraph_name[1:] if paragraph_name else "") 
+                        if not paragraph_name or not (paragraph_name[0].isalpha() or paragraph_name[0].isdigit()):
+                            paragraph_name = "P" + (paragraph_name[1:] if paragraph_name else "") 
                         procedure_division_main_logic += f"           PERFORM {paragraph_name}.\n"
                         procedure_division_paragraphs += f"{paragraph_name}.\n{result.cobol_code_block}\n\n" 
-                        if result.comments: cobol_conversion_comments.append(f"* Proc {result.m204_procedure_name}: {result.comments}")
+                        if result.comments:
+                            cobol_conversion_comments.append(f"* Proc {result.m204_procedure_name}: {result.comments}")
                     elif isinstance(result, Exception):
                         log.error(f"Error converting procedure {proc_name_for_log}: {result}", exc_info=True)
                         procedure_division_paragraphs += f"* --- ERROR CONVERTING PROCEDURE {proc_name_for_log} ---\n"
@@ -675,7 +679,8 @@ MAIN-PARAGRAPH.
             log.info("Starting unit test plan generation (M204 source).")
             unit_test_file_name = f"test_{cobol_program_id_base}.txt"
             unit_test_content_parts = [f"Unit Test Plan for COBOL: {cobol_file_name}\nFrom M204 Source: {input_source_name_for_comments}\n"]
-            if not related_procedures: unit_test_content_parts.append("- No M204 procedures for test cases.\n")
+            if not related_procedures:
+                unit_test_content_parts.append("- No M204 procedures for test cases.\n")
             for proc in related_procedures:
                 unit_test_content_parts.append(f"\n--- Test Cases for M204 Procedure: {proc.m204_proc_name} ---\n")
                 if proc.suggested_test_cases_json:
@@ -687,11 +692,16 @@ MAIN-PARAGRAPH.
                                     try:
                                         tc = TestCase(**tc_data)
                                         unit_test_content_parts.extend([f"ID: {tc.test_case_id}\n  Desc: {tc.description}\n", ("  Inputs: " + str(tc.inputs) + "\n"), ("  Expected: " + str(tc.expected_outputs) + "\n")])
-                                    except Exception as e_tc: unit_test_content_parts.append(f"  Error parsing TC: {e_tc}\n")
-                                else: unit_test_content_parts.append("  Invalid TC item (not dict).\n")
-                        else: unit_test_content_parts.append("  Invalid test cases format (not list).\n")
-                    except Exception as e_json: unit_test_content_parts.append(f"  Error parsing test cases JSON: {e_json}\n")
-                else: unit_test_content_parts.append("  No pre-defined test cases.\n")
+                                    except Exception as e_tc:
+                                        unit_test_content_parts.append(f"  Error parsing TC: {e_tc}\n")
+                                else:
+                                    unit_test_content_parts.append("  Invalid TC item (not dict).\n")
+                        else:
+                            unit_test_content_parts.append("  Invalid test cases format (not list).\n")
+                    except Exception as e_json:
+                        unit_test_content_parts.append(f"  Error parsing test cases JSON: {e_json}\n")
+                else:
+                    unit_test_content_parts.append("  No pre-defined test cases.\n")
             final_unit_test_content = "".join(unit_test_content_parts)
             unit_test_schema = UnitTestOutputSchema(input_source_id=current_input_source_with_details.input_source_id, file_name=unit_test_file_name, content=final_unit_test_content, artifact_type="unit_test")
             unit_test_output_schemas.append(unit_test_schema)
@@ -704,12 +714,16 @@ MAIN-PARAGRAPH.
             if m204_files_in_this_source:
                 for m204_file_obj in m204_files_in_this_source:
                     raw_dd_name = m204_file_obj.m204_file_name
-                    if not raw_dd_name: continue
+                    if not raw_dd_name:
+                        continue
                     dd_name_candidate = re.sub(r'[^A-Z0-9]', '', raw_dd_name.upper())
-                    if not dd_name_candidate: dd_name_candidate = f"MFILE{m204_file_obj.m204_file_id}"
-                    if not dd_name_candidate[0].isalpha(): dd_name_candidate = "F" + dd_name_candidate
+                    if not dd_name_candidate:
+                        dd_name_candidate = f"MFILE{m204_file_obj.m204_file_id}"
+                    if not dd_name_candidate[0].isalpha():
+                        dd_name_candidate = "F" + dd_name_candidate
                     dd_name_final = dd_name_candidate[:8]
-                    if not dd_name_final: dd_name_final = f"DD{m204_file_obj.m204_file_id:06}"
+                    if not dd_name_final:
+                        dd_name_final = f"DD{m204_file_obj.m204_file_id:06}"
                     dsn = m204_file_obj.target_vsam_dataset_name or m204_file_obj.m204_logical_dataset_name or f"YOUR.DSN.FOR.{dd_name_final}"
                     # Basic DSN sanitization, can be improved
                     if not re.match(r"^[A-Z@#$][A-Z0-9@#$]{0,7}(\.[A-Z@#$][A-Z0-9@#$]{0,7})*$", dsn.upper()):
@@ -765,8 +779,10 @@ MAIN-PARAGRAPH.
             if should_generate_vsam:
                 m204_name_part_raw = m204_file_obj.m204_file_name or f"FILE{m204_file_obj.m204_file_id}"
                 m204_name_part = re.sub(r'[^A-Z0-9]', '', m204_name_part_raw.upper())[:8]
-                if not m204_name_part: m204_name_part = f"F{m204_file_obj.m204_file_id}"
-                if not m204_name_part[0].isalpha(): m204_name_part = "V" + m204_name_part[:7]
+                if not m204_name_part:
+                    m204_name_part = f"F{m204_file_obj.m204_file_id}"
+                if not m204_name_part[0].isalpha():
+                    m204_name_part = "V" + m204_name_part[:7]
 
                 vsam_jcl_name = f"{cobol_program_id_base}_{m204_name_part}_vsam.jcl" # cobol_program_id_base is from current InputSource
                 vsam_ds_name = m204_file_obj.target_vsam_dataset_name or f"DEFAULT.VSAM.{cobol_program_id_base}.{m204_name_part}"
@@ -782,7 +798,8 @@ MAIN-PARAGRAPH.
                     try:
                         llm_vsam_jcl_result = await self._llm_generate_vsam_jcl(m204_file_obj, cobol_program_id_base, vsam_ds_name, vsam_type, input_source_name_for_comments)
                         vsam_jcl_content = llm_vsam_jcl_result.jcl_content
-                        if llm_vsam_jcl_result.generation_comments: vsam_jcl_content = f"//* LLM Comments: {llm_vsam_jcl_result.generation_comments}\n" + vsam_jcl_content
+                        if llm_vsam_jcl_result.generation_comments:
+                            vsam_jcl_content = f"//* LLM Comments: {llm_vsam_jcl_result.generation_comments}\n" + vsam_jcl_content
                     except Exception as e:
                         log.warning(f"LLM VSAM JCL gen failed for {vsam_jcl_name}: {e}. Falling back.", exc_info=True)
                         vsam_jcl_content = self._generate_fallback_vsam_jcl(m204_file_obj, cobol_program_id_base, vsam_ds_name, vsam_type, input_source_name_for_comments)
@@ -806,9 +823,12 @@ MAIN-PARAGRAPH.
         
         # --- Save all collected artifacts to DB ---
         log.info(f"Preparing to save artifacts for InputSource ID: {current_input_source_with_details.input_source_id}")
-        if db_cobol_artifacts_to_add: self.db.add_all(db_cobol_artifacts_to_add)
-        if db_jcl_artifacts_to_add: self.db.add_all(db_jcl_artifacts_to_add)
-        if db_unit_test_artifacts_to_add: self.db.add_all(db_unit_test_artifacts_to_add)
+        if db_cobol_artifacts_to_add:
+            self.db.add_all(db_cobol_artifacts_to_add)
+        if db_jcl_artifacts_to_add:
+            self.db.add_all(db_jcl_artifacts_to_add)
+        if db_unit_test_artifacts_to_add:
+            self.db.add_all(db_unit_test_artifacts_to_add)
         # Note: self.db.commit() will be called by the calling function (generate_artifacts_for_project) after each InputSource.
         
         response = GeneratedArtifactsResponse(

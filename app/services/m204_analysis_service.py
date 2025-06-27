@@ -46,6 +46,7 @@ class M204VariableToCobolOutput(BaseModel):
     """Structured output for M204 variable to COBOL name suggestion."""
     m204_variable_name: str = Field(description="The original M204 variable name.")
     suggested_cobol_variable_name: str = Field(description="A suitable COBOL variable name, following COBOL naming conventions (e.g., max 30 chars, alphanumeric, hyphens, avoid M204-specific symbols).")
+    suggested_cobol_variable_type: Optional[str] = Field(description="A suitable COBOL variable type (e.g., PIC X(10), PIC 9(5)V99 COMP-3).", default=None)
     reasoning: Optional[str] = Field(description="Brief reasoning for the suggestion.", default=None)
 
 class M204FileVsamAnalysisOutput(BaseModel):
@@ -918,7 +919,6 @@ def _parse_m204_variable_declaration_attributes(attr_declaration_string: Optiona
 
 
 
-
 async def _extract_and_store_m204_variables(
     db: Session, input_source: InputSource, file_content: str, procedures_in_file: List[Procedure], rag_service: Optional[RagService]
 ) -> List[M204Variable]:
@@ -968,6 +968,9 @@ async def _extract_and_store_m204_variables(
 
             parsed_declaration_attributes = _parse_m204_variable_declaration_attributes(attributes_declaration_str)
             proc_name_context_for_llm = proc_id_to_name_map.get(current_proc_id_for_line) if current_proc_id_for_line else "File Level"
+            # Get the declared M204 type from parsed attributes
+            declared_m204_type = parsed_declaration_attributes.get("declared_m204_type", "UNKNOWN")
+
 
             parsed_variables_data.append({
                 "var_name": var_name,
@@ -977,7 +980,9 @@ async def _extract_and_store_m204_variables(
                 "current_proc_id_for_line": current_proc_id_for_line,
                 "proc_name_context_for_llm": proc_name_context_for_llm,
                 "parsed_declaration_attributes": parsed_declaration_attributes,
+                "declared_m204_type": declared_m204_type, # Store the parsed M204 type
                 "suggested_cobol_name": None, # To be filled by LLM
+                "suggested_cobol_variable_type": None, # To be filled by LLM
                 "original_index": len(parsed_variables_data) # To map LLM results
             })
 
@@ -985,57 +990,61 @@ async def _extract_and_store_m204_variables(
     if llm_config._llm and parsed_variables_data:
         llm_tasks = []
         var_namer_llm = llm_config._llm.as_structured_llm(M204VariableToCobolOutput)
-        log.info(f"M204_SERVICE_VAR_LLM: Preparing {len(parsed_variables_data)} LLM tasks for variable name suggestions in file {input_source.original_filename}.")
+        log.info(f"M204_SERVICE_VAR_LLM: Preparing {len(parsed_variables_data)} LLM tasks for variable name and type suggestions in file {input_source.original_filename}.")
 
         for var_data in parsed_variables_data:
             variable_name_for_llm = var_data["var_name"]
             attributes_for_llm = var_data["attributes_declaration_str"]
             proc_name_context_for_llm = var_data["proc_name_context_for_llm"]
-            declared_m204_type_for_llm = var_data["parsed_declaration_attributes"].get("declared_m204_type", "UNKNOWN")
+            declared_m204_type_for_llm = var_data["declared_m204_type"] # Use the stored parsed type
             
             var_prompt_fstr = f"""
-You are an M204 to COBOL migration expert. Suggest a COBOL-compliant variable name for the given M204 variable.
+You are an M204 to COBOL migration expert. Suggest a COBOL-compliant variable name and type for the given M204 variable.
 M204 Variable Name: {variable_name_for_llm}
 M204 Variable Prefix Type: PERCENT 
 M204 Declared Type (from 'IS' clause): {declared_m204_type_for_llm}
 M204 Full Declaration Attributes (from 'IS' clause): {attributes_for_llm or "None"}
 Context (Procedure or File Level): {proc_name_context_for_llm}
 
-Respond with a JSON object containing "m204_variable_name", "suggested_cobol_variable_name", and "reasoning".
+Respond with a JSON object containing "m204_variable_name", "suggested_cobol_variable_name", "suggested_cobol_variable_type", and "reasoning".
 The COBOL name should be max 30 chars, alphanumeric, use hyphens, and avoid M204-specific symbols like '%'.
-Consider the M204 declared type and attributes for a more meaningful COBOL name.
+The COBOL variable type should be a COBOL PICTURE clause (e.g., PIC X(10), PIC 9(5)V99 COMP-3).
+Consider the M204 declared type and attributes for meaningful COBOL suggestions.
 """
             llm_tasks.append(var_namer_llm.acomplete(prompt=var_prompt_fstr))
         
         llm_raw_results_list = []
         if llm_tasks:
-            log.info(f"M204_SERVICE_VAR_LLM: Starting {len(llm_tasks)} LLM calls in batches for variable names in file {input_source.original_filename}.")
+            log.info(f"M204_SERVICE_VAR_LLM: Starting {len(llm_tasks)} LLM calls in batches for variable names and types in file {input_source.original_filename}.")
             for i in range(0, len(llm_tasks), LLM_API_CALL_BATCH_SIZE):
                 batch_tasks = llm_tasks[i:i + LLM_API_CALL_BATCH_SIZE]
-                log.info(f"M204_SERVICE_VAR_LLM: Processing batch {i // LLM_API_CALL_BATCH_SIZE + 1} with {len(batch_tasks)} tasks for variable names in {input_source.original_filename}.")
+                log.info(f"M204_SERVICE_VAR_LLM: Processing batch {i // LLM_API_CALL_BATCH_SIZE + 1} with {len(batch_tasks)} tasks for variable names and types in {input_source.original_filename}.")
                 batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
                 llm_raw_results_list.extend(batch_results)
-                log.info(f"M204_SERVICE_VAR_LLM: Finished batch {i // LLM_API_CALL_BATCH_SIZE + 1} for variable names in {input_source.original_filename}.")
-            log.info(f"M204_SERVICE_VAR_LLM: Finished all {len(llm_tasks)} LLM calls for variable names in {input_source.original_filename}.")
+                log.info(f"M204_SERVICE_VAR_LLM: Finished batch {i // LLM_API_CALL_BATCH_SIZE + 1} for variable names and types in {input_source.original_filename}.")
+            log.info(f"M204_SERVICE_VAR_LLM: Finished all {len(llm_tasks)} LLM calls for variable names and types in {input_source.original_filename}.")
 
             for idx, result_or_exc in enumerate(llm_raw_results_list):
                 target_var_data = parsed_variables_data[idx] # Assumes order is preserved
                 variable_name_for_llm = target_var_data["var_name"]
                 suggested_name = None
+                suggested_type = None
 
                 if isinstance(result_or_exc, Exception):
-                    log.error(f"M204_SERVICE_VAR_LLM: Error suggesting COBOL name for variable {variable_name_for_llm}: {result_or_exc}", exc_info=True)
+                    log.error(f"M204_SERVICE_VAR_LLM: Error suggesting COBOL name/type for variable {variable_name_for_llm}: {result_or_exc}", exc_info=True)
                 elif result_or_exc:
                     try:
                         loaded_var_data = json.loads(result_or_exc.text)
                         var_output_model = M204VariableToCobolOutput(**loaded_var_data)
                         if var_output_model.m204_variable_name == variable_name_for_llm:
                             suggested_name = var_output_model.suggested_cobol_variable_name
+                            suggested_type = var_output_model.suggested_cobol_variable_type
                         else:
                             log.warning(f"M204_SERVICE_VAR_LLM: Mismatched variable name from LLM for {variable_name_for_llm}. LLM response: {result_or_exc.text}")
                     except Exception as e_parse_llm:
                         log.error(f"M204_SERVICE_VAR_LLM: Error parsing LLM response for variable {variable_name_for_llm}: {e_parse_llm}. Raw: '{result_or_exc.text}'", exc_info=True)
                 target_var_data["suggested_cobol_name"] = suggested_name
+                target_var_data["suggested_cobol_variable_type"] = suggested_type
 
     # Database operations
     for var_data in parsed_variables_data:
@@ -1062,11 +1071,12 @@ Consider the M204 declared type and attributes for a more meaningful COBOL name.
             "input_source_id": input_source.input_source_id,
             "procedure_id": current_proc_id_for_line,
             "variable_name": var_name,
-            "variable_type": "PERCENT",
+            "variable_type": var_data["declared_m204_type"], # Use the parsed M204 type
             "scope": scope,
             "attributes": var_data["parsed_declaration_attributes"],
             "definition_line_number": line_num,
             "cobol_mapped_variable_name": var_data["suggested_cobol_name"],
+            "cobol_variable_type": var_data["suggested_cobol_variable_type"],
         }
 
         try:
@@ -1077,10 +1087,22 @@ Consider the M204 declared type and attributes for a more meaningful COBOL name.
 
         if existing_var:
             updated = False
-            for key, value in var_create_schema.model_dump(exclude_none=True).items():
+            # Ensure all fields from the schema are checked and updated
+            update_data = var_create_schema.model_dump(exclude_none=True)
+            for key, value in update_data.items():
                 if getattr(existing_var, key) != value:
                     setattr(existing_var, key, value)
                     updated = True
+            
+            # Explicitly check if cobol_variable_type needs to be set to None if not in update_data but exists in DB
+            if 'cobol_variable_type' not in update_data and existing_var.cobol_variable_type is not None:
+                existing_var.cobol_variable_type = None
+                updated = True
+            elif 'cobol_variable_type' in update_data and existing_var.cobol_variable_type != update_data['cobol_variable_type']:
+                existing_var.cobol_variable_type = update_data['cobol_variable_type']
+                updated = True
+
+
             if updated:
                 db.add(existing_var)
                 log.info(f"M204_SERVICE: Updating existing M204Variable definition '{var_name}' (ID: {existing_var.variable_id}) from line {line_num}.")
@@ -1096,6 +1118,7 @@ Consider the M204 declared type and attributes for a more meaningful COBOL name.
             
     log.info(f"M204_SERVICE: Finished extracting and processing {len(variables_processed_for_db)} explicitly defined M204 variables for file ID: {input_source.input_source_id}.")
     return variables_processed_for_db
+
 
 
 async def _extract_and_store_m204_procedure_calls(

@@ -20,6 +20,7 @@ class M204VariableBaseSchema(BaseModel):
     definition_line_number: Optional[int] = None
     # Renamed from suggested_cobol_name to be more generic if other targets are considered
     cobol_mapped_variable_name: Optional[str] = None # Was suggested_cobol_name
+    cobol_variable_type: Optional[str] = None # e.g., PIC X(10), PIC 9(5)V99
     # is_explicitly_defined: Optional[bool] = None # Removed as it's not in the model and context implies true
 
 
@@ -31,6 +32,7 @@ class M204VariableResponseSchema(M204VariableBaseSchema):
     procedure_name: Optional[str] = None # Property from the model
     created_at: datetime
     updated_at: datetime
+    # cobol_variable_type is inherited from M204VariableBaseSchema
 
     class Config:
         from_attributes = True
@@ -124,9 +126,11 @@ class M204VariableCreateSchema(M204VariableBaseSchema):
     project_id: int
     input_source_id: int
     procedure_id: Optional[int] = None
+    # cobol_variable_type is inherited from M204VariableBaseSchema
 
 class M204VariableUpdateSchema(BaseModel):
     cobol_mapped_variable_name: Optional[str] = None
+    cobol_variable_type: Optional[str] = None # e.g., PIC X(10), PIC 9(5)V99
     variable_type: Optional[str] = None
     scope: Optional[str] = None
     attributes: Optional[Dict[str, Any]] = None

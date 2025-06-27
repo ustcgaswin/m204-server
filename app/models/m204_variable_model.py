@@ -14,11 +14,12 @@ class M204Variable(Base):
     procedure_id = Column(Integer, ForeignKey("procedures.proc_id"), nullable=True, index=True) # Can be null if defined outside a procedure
 
     variable_name = Column(String(255), nullable=False, index=True)
-    variable_type = Column(String(50), nullable=True) # e.g., "%scalar_defined", "%scalar_used", "$list_used"
+    variable_type = Column(String(50), nullable=True) # e.g., "STRING", "FIXED", "BINARY", "FLOAT"
     scope = Column(String(50), nullable=True) # e.g., "LOCAL", "PUBLIC", "PRIVATE", "GLOBAL"
     attributes = Column(JSON, nullable=True) # For storing definition attributes like (LEN=10, TYPE=BINARY)
     definition_line_number = Column(Integer, nullable=True)
     cobol_mapped_variable_name = Column(String(255), nullable=True) # Suggested COBOL name
+    cobol_variable_type = Column(String(100), nullable=True) # e.g., PIC X(10), PIC 9(5)V99
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

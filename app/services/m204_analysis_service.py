@@ -689,6 +689,59 @@ async def _extract_and_store_m204_procedures(
     log.info(f"M204_SERVICE: Finished extracting and queueing for DB {len(procedures_processed_for_db)} M204 procedures for file ID: {input_source.input_source_id}.")
     return procedures_processed_for_db
 
+
+
+def _extract_main_loop_content(file_content: str) -> Optional[str]:
+    """Extracts content between the first top-level REPEAT and its corresponding END REPEAT."""
+    if not file_content:
+        return None
+    
+    # Case-insensitive search for REPEAT and END REPEAT at the start of a line (or with leading whitespace)
+    # This helps avoid capturing loops inside procedures if we only care about the main one.
+    repeat_match = re.search(r'^\s*REPEAT\b', file_content, re.IGNORECASE | re.MULTILINE)
+    if not repeat_match:
+        return None
+
+    start_index = repeat_match.end()
+    
+    # Find corresponding END REPEAT, handling nested loops
+    end_repeat_pattern = re.compile(r'^\s*END\s+REPEAT\b', re.IGNORECASE | re.MULTILINE)
+    repeat_pattern = re.compile(r'^\s*REPEAT\b', re.IGNORECASE | re.MULTILINE)
+    
+    nesting_level = 1
+    search_offset = start_index
+    
+    content_substring = file_content[search_offset:]
+    
+    while nesting_level > 0:
+        # We need to find the relative positions of the next REPEAT and END REPEAT
+        next_end_repeat_match = end_repeat_pattern.search(content_substring)
+        next_repeat_match = repeat_pattern.search(content_substring)
+
+        if next_end_repeat_match is None:
+            # No matching END REPEAT found, malformed loop
+            return None
+
+        # If a nested REPEAT appears before the next END REPEAT
+        if next_repeat_match and next_repeat_match.start() < next_end_repeat_match.start():
+            nesting_level += 1
+            # Move the search position past the start of the nested REPEAT
+            search_offset += next_repeat_match.end()
+        else:
+            nesting_level -= 1
+            if nesting_level == 0:
+                # Found the matching END REPEAT
+                end_index = search_offset + next_end_repeat_match.start()
+                return file_content[start_index:end_index].strip()
+            else:
+                # This was a nested END REPEAT, move search position past it
+                search_offset += next_end_repeat_match.end()
+        
+        content_substring = file_content[search_offset:]
+
+    return None # Should not be reached if loops are well-formed
+
+
 async def _extract_and_store_m204_datasets(
     db: Session, input_source: InputSource, file_content: str
 ) -> List[M204File]:
@@ -1539,6 +1592,29 @@ async def process_m204_analysis(
     """
     log.info(f"M204_SERVICE: Starting M204 specific processing for file: {input_source.original_filename} (ID: {input_source.input_source_id})")
     
+    # --- Main Loop Extraction (File Level) ---
+    main_loop_content = _extract_main_loop_content(file_content)
+    if main_loop_content:
+        log.info(f"M204_SERVICE: Found main processing loop content in {input_source.original_filename}.")
+        log.debug(f"Main loop content: {main_loop_content}")
+        # Create or update a representative M204File record for this source file to hold the loop content
+        source_file_as_m204_record = db.query(M204File).filter(
+            M204File.project_id == input_source.project_id,
+            M204File.m204_file_name == input_source.original_filename,
+            M204File.defined_in_input_source_id == input_source.input_source_id
+        ).first()
+        if not source_file_as_m204_record:
+            source_file_as_m204_record = M204File(
+                project_id=input_source.project_id,
+                m204_file_name=input_source.original_filename,
+                defined_in_input_source_id=input_source.input_source_id,
+                is_db_file=False # This record represents the program file itself
+            )
+            db.add(source_file_as_m204_record)
+        
+        source_file_as_m204_record.main_processing_loop_content = main_loop_content
+        db.flush() # Ensure it gets an ID if new, and data is persisted before further steps
+
     extracted_procedures = await _extract_and_store_m204_procedures(db, input_source, file_content, rag_service)
     log.debug(f"M204_SERVICE: Flushing session after procedure extraction for {input_source.original_filename} to ensure IDs are available.")
     db.flush()
@@ -1692,8 +1768,6 @@ async def process_m204_analysis(
 
     log.info(f"M204_SERVICE: Completed M204 analysis for file: {input_source.original_filename}. Identified {len(m204_db_files_identified)} DB files for potential VSAM enhancement.")
     return analysis_result_data, m204_db_files_identified
-
-
 
 async def enhance_m204_db_file_with_vsam_suggestions(db: Session, m204_file: M204File):
     """

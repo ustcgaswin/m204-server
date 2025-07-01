@@ -171,9 +171,12 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
         content_parts.append("\n")
 
 
+    
+
     if options.include_files and "m204_files" in project_data and project_data["m204_files"]:
-        content_parts.append("M204 File Definitions Data:")
+        content_parts.append("M204 File Definitions and Main Processing Loops Data:")
         for f_data in project_data["m204_files"]:
+            log.debug(f"f_data: {f_data}")
             file_details = [
                 f"  - File Name: {f_data.get('m204_file_name', 'N/A')}",
                 f"    M204 Attributes: {f_data.get('m204_attributes', 'N/A')}",
@@ -182,6 +185,14 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                 f"    Target VSAM Type: {f_data.get('target_vsam_type', 'N/A')}"
             ]
             
+            # Add main processing loop content if it exists for this file entry
+            if f_data.get("main_processing_loop_content"):
+                log.debug("Inside main_processing_loop_content")
+                file_details.append(f"    Main Processing Loop Content (from file '{f_data.get('m204_file_name')}'):")
+                file_details.append("    ```m204")
+                file_details.append(f_data.get('main_processing_loop_content'))
+                file_details.append("    ```")
+
             file_def_json = f_data.get("file_definition_json")
             has_printed_fields_for_this_file = False 
 
@@ -283,6 +294,8 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
 
     return "\n".join(content_parts)
 
+
+
 def _get_sections_config() -> List[Dict[str, str]]:
     """
     Defines the structure and instructions for each section of the requirements document.
@@ -293,7 +306,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
             "title": "## 1. Project Overview",
             "instructions": """
    (Provide a narrative overview in a paragraph or two based on the 'Project Information' from the input data. Include project name, description, and creation date.
-    **Also, list any COBOL programs identified as targets of M204 procedures (from 'M204 Procedures Data' - `target_cobol_function_name`) and briefly describe their potential role in the system based on the procedures that call them and any relevant 'Source File LLM-Generated Summaries'.**
+        . Briefly describe the expected functionality of each target COBOL program based on the logic and summary of the source M204 procedure it will be generated from.**
     You can also incorporate high-level insights from the 'Source File LLM-Generated Summaries' if they provide a good overview of the system's nature.)
 """
         },
@@ -326,15 +339,48 @@ def _get_sections_config() -> List[Dict[str, str]]:
 """
         },
         {
+            "id": "main_processing_loop",
+            "title": "## 2. Main Processing Loop",
+            "instructions": """
+   (Based on the 'Main Processing Loop Content' provided in the 'M204 File Definitions and Main Processing Loops Data' section of the input data:
+    - If main loop content is found, write a descriptive paragraph explaining its purpose and high-level logic. Analyze the M204 code within the loop (e.g., `FOR EACH VALUE`, `FIND`, `CALL`, `IF/ELSE` blocks) to describe the sequence of operations.
+    - Identify the primary inputs (e.g., files being read, user input via screens) and outputs (e.g., files being written, reports generated) of the loop.
+    - If no main processing loop content is provided in the input data, state "No main processing loop was identified in the analyzed source files.")
+"""
+        },
+        {
+            "id": "main_processing_loop_diagram",
+            "title": "### 2.1. Main Processing Loop Flowchart",
+            "instructions": """
+      (Based on the 'Main Processing Loop Content' from the input data, generate a Mermaid flowchart diagram illustrating the logic of the main loop.
+       The diagram should represent:
+       - The start and end of the loop.
+       - Key conditional checks (e.g., `IF` statements) as decision diamonds.
+       - Major processing steps (e.g., `FIND` records, `CALL` a procedure, `PRINT` a line) as rectangular nodes.
+       - I/O operations (e.g., reading from or writing to a file) as parallelogram nodes.
+       **Enclose the syntactically correct Mermaid code within a fenced code block like this:**
+       ```mermaid
+       graph TD;
+           A[Start Loop] --> B{Is Condition X Met?};
+           B -- Yes --> C[Process Record];
+           C --> D[Call SUB_PROC];
+           D --> E[/Write to Output File/];
+           E --> A;
+           B -- No --> F[End Loop];
+       ```
+       **If no main processing loop content is available in the input data, or if the content is too simple or complex to create a meaningful diagram, include the heading and state "Data insufficient or not applicable for generating a main processing loop diagram." instead of providing malformed Mermaid code.**)
+"""
+        },
+        {
             "id": "m204_procedures",
-            "title": "## 2. M204 Procedures",
+            "title": "## 3. M204 Procedures",
             "instructions": """
    (Based on 'M204 Procedures Data' and relevant 'Source File LLM-Generated Summaries' for M204 files:
-    - For each procedure, write a descriptive paragraph. This paragraph should cover its name and type. (Information about target COBOL programs is now covered in the Project Overview section).
+    - For each procedure, write a descriptive paragraph. This paragraph should cover its name, type, and its target COBOL program name for generation (if specified).
     - If a procedure summary is available in the input, incorporate it into the descriptive paragraph.
     - Detail parameters and any variables defined within the procedure using bullet points *underneath* the main descriptive paragraph for that procedure.
     - For example:
-      "The procedure **SAMPLE_PROC** is an **ONLINE** type procedure, found in the M204 source file `SOURCEA.M204` (refer to the summary for `SOURCEA.M204` for its overall purpose). The primary function of this procedure appears to be real-time data modification based on user input.
+      "The procedure **SAMPLE_PROC** is an **ONLINE** type procedure, found in the M204 source file `SOURCEA.M204`. It is designated to be modernized into the COBOL program **SAMPLE-PROG-FUNC**. The primary function of this procedure appears to be real-time data modification based on user input.
       * Parameters: `ACCOUNT_NUMBER, UPDATE_DATA`
       * Variables defined in procedure:
         * `%OLD_VALUE` (Type: `STRING`, Scope: `LOCAL`, COBOL Mapped Name: `WS-OLD-VAL`)
@@ -344,9 +390,9 @@ def _get_sections_config() -> List[Dict[str, str]]:
         },
         {
             "id": "m204_file_definitions",
-            "title": "## 3. M204 File Definitions",
+            "title": "## 4. M204 File Definitions",
             "instructions": """
-   (Based on 'M204 File Definitions Data' and relevant 'Source File LLM-Generated Summaries' for M204 files:
+   (Based on 'M204 File Definitions and Main Processing Loops Data' and relevant 'Source File LLM-Generated Summaries' for M204 files:
     - For each M204 file, write a descriptive paragraph. This paragraph should cover its name, M204 attributes, whether it's a database file, and its target VSAM dataset name and type. Use the LLM-generated summary for the M204 source file where this file definition might be elaborated if available.
     - If field information is available within the `file_definition_json` attribute of a file, list those fields using bullet points. Each bullet point should detail the field's name and its M204 attributes. For example:
       "The M204 file **CUSTFILE** is defined with attributes `(attribute_list)`. It is flagged as a database file and maps to the target VSAM dataset **PROD.CUSTOMER.MASTER** of type `KSDS`. The M204 source summary for `MAINCUST.M204` indicates this file is central to customer data management. This file appears to store core customer master data.
@@ -359,7 +405,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         },
         {
             "id": "m204_file_vsam_jcl_diagram",
-            "title": "### 3.1. M204 File and Associated VSAM/JCL Diagram",
+            "title": "### 4.1. M204 File and Associated VSAM/JCL Diagram",
             "instructions": """
       (Based on 'M204 File Definitions Data' (`m204_file_name`, `target_vsam_dataset_name`) and 'JCL DD Statements Data' (`dd_name`, `dsn`), generate a Mermaid flowchart diagram.
        The diagram should show each M204 file and its target VSAM dataset name.
@@ -381,7 +427,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         },
         {
             "id": "global_variables",
-            "title": "## 4. Global/Public M204 Variables",
+            "title": "## 5. Global/Public M204 Variables",
             "instructions": """
    (Based on 'Global/Public M204 Variables Data':
     - Begin with an introductory paragraph about the role of global/public variables in the system.
@@ -391,7 +437,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         },
         {
             "id": "jcl_dd_statements",
-            "title": "## 5. JCL DD Statements",
+            "title": "## 6. JCL DD Statements",
             "instructions": """
    (Based on 'JCL DD Statements Data' and relevant 'Source File LLM-Generated Summaries' for JCL files:
     - Start with a paragraph describing the role of JCL DD statements in interfacing the M204 application with datasets. Refer to the LLM-generated summaries for the JCL files to provide context on the overall purpose of the JCLs containing these DD statements.
@@ -401,7 +447,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         },
         {
             "id": "jcl_job_step_flow_diagram",
-            "title": "### 5.1. JCL Job/Step Flow Diagram",
+            "title": "### 6.1. JCL Job/Step Flow Diagram",
             "instructions": """
       (Based on 'JCL DD Statements Data' (`job_name`, `step_name`, `dd_name`, `dsn`), generate a Mermaid flowchart diagram illustrating the JCL job and step flow.
        Group DD statements under their respective steps, and steps under their respective jobs.
@@ -427,7 +473,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         },
         {
             "id": "procedure_call_flow",
-            "title": "## 6. Procedure Call Flow",
+            "title": "## 7. Procedure Call Flow",
             "instructions": """
    (Based on 'Procedure Call Relationships Data':
     - Describe the procedure call flow using narrative paragraphs to explain major sequences or interactions.
@@ -437,7 +483,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         },
         {
             "id": "procedure_call_diagram",
-            "title": "### 6.1. Procedure Call Diagram",
+            "title": "### 7.1. Procedure Call Diagram",
             "instructions": """
       (Based on the 'Procedure Call Relationships Data', generate a Mermaid flowchart diagram (e.g., `graph TD;` for Top-Down or `graph LR;` for Left-to-Right) illustrating the direct call relationships between procedures.
        The diagram should clearly show which procedure calls which other procedure(s). Use the actual procedure names found in the data.
@@ -455,7 +501,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         },
         {
             "id": "data_dictionary",
-            "title": "## 7. Data Dictionary / Key Data Elements",
+            "title": "## 8. Data Dictionary / Key Data Elements",
             "instructions": """
    (Synthesize information from 'M204 File Definitions Data' (primarily `file_definition_json` if available for field details), 'Global/Public M204 Variables Data', and 'M204 Procedures Data' (variables_in_procedure).
     - Describe key data elements in paragraphs. For each element or group of related elements, discuss its apparent meaning and use.
@@ -465,7 +511,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         },
         {
             "id": "external_interfaces",
-            "title": "## 8. External Interfaces",
+            "title": "## 9. External Interfaces",
             "instructions": """
    (Infer from 'JCL DD Statements Data' (DSNs) and 'M204 File Definitions Data' (attributes suggesting external links).
     - Describe in paragraph form any identified external systems, datasets, or interfaces that the M204 application interacts with. Explain the nature of these interactions if discernible.)
@@ -473,7 +519,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         },
         {
             "id": "non_functional_requirements",
-            "title": "## 9. Non-Functional Requirements",
+            "title": "## 10. Non-Functional Requirements",
             "instructions": """
    (Review all provided data for hints towards non-functional requirements.
     - Describe any identified NFRs (e.g., performance considerations from file attributes, security aspects from field encryption, operational constraints) in paragraph form.
@@ -482,7 +528,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         },
         {
             "id": "other_observations",
-            "title": "## 10. Other Observations / Summary",
+            "title": "## 11. Other Observations / Summary",
             "instructions": """
    (Provide a concluding summary of the system in narrative paragraphs. Highlight any overarching patterns, complexities, or notable observations that don't fit neatly into other sections. Address points from the 'Additional Instructions/Custom Section from User' here if not covered elsewhere.)
 """
@@ -501,7 +547,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
             "title": "### A. System Architecture Overview",
             "instructions": """
    (Describe the high-level components of the M204-based system and their primary roles.
-    Illustrate how M204 procedures (distinguishing between `m204_proc_type` like ONLINE, BATCH, INCLUDE, SUBROUTINE), COBOL programs (as indicated by `target_cobol_function_name` in procedures, detailed in Project Overview), JCL (from `DDStatement` data providing `job_name`, `step_name`, `dd_name`, `dsn`, and `disposition`), and M204 files/VSAM datasets (from `M204File` data, including `m204_file_name`, `target_vsam_dataset_name`, `target_vsam_type`) interact to form the overall system architecture. **Use the 'Source File LLM-Generated Summaries' to provide context on the purpose of specific JCL files or M204 source modules.**
+    Illustrate how M204 procedures (distinguishing between `m204_proc_type` like ONLINE, BATCH, INCLUDE, SUBROUTINE), the target COBOL programs to be generated from them (as indicated by `target_cobol_function_name`), JCL (from `DDStatement` data providing `job_name`, `step_name`, `dd_name`, `dsn`, and `disposition`), and M204 files/VSAM datasets (from `M204File` data, including `m204_file_name`, `target_vsam_dataset_name`, `target_vsam_type`) interact to form the overall system architecture. **Use the 'Source File LLM-Generated Summaries' to provide context on the purpose of specific JCL files or M204 source modules.**
     Identify any distinct subsystems or processing layers if they can be inferred from procedure groupings, naming conventions, or data flow patterns observed in the input data and file summaries.)
 """
         },
@@ -527,7 +573,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
             "id": "tech_req_core_processing",
             "title": "### C. Core Processing Logic and Control Flow",
             "instructions": """
-   (Explain the main processing sequences and business logic implemented within the M204 procedures, referencing their `m204_proc_type` and interactions with COBOL programs (whose roles are discussed in Project Overview). **Contextualize with 'Source File LLM-Generated Summaries' for the M204 files containing these procedures.**
+   (Explain the main processing sequences and business logic implemented within the M204 procedures, referencing their `m204_proc_type` and their relationship to the target COBOL programs to be generated. **Contextualize with 'Source File LLM-Generated Summaries' for the M204 files containing these procedures.**
     Highlight critical procedures or call chains by analyzing `Procedure Call Relationships Data` (using `calling_procedure_name`, `called_procedure_name`, `line_number` of call, and `is_external` flag). Discuss the significance of frequently called procedures or key external calls.
     Describe how user interactions (for `ONLINE` procedures) or batch processes (inferred from `BATCH` procedure types and associated JCL `job_name`/`step_name` context) are handled.
     Discuss the role of `M204Variable`s:
@@ -554,7 +600,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
             "instructions": """
    (Summarize the core technologies used, based on available data:
     - **Model 204:** Note its role (e.g., primary application logic, database). Mention specific features used if inferable from `Procedure.m204_proc_type` (ONLINE, BATCH, INCLUDE, SUBROUTINE indicating User Language/SOUL usage), `M204File.m204_attributes`, or field attributes. **Refer to 'Source File LLM-Generated Summaries' for M204 files for broader context on how M204 is utilized.**
-    - **COBOL:** Its role (e.g., complex business logic, batch processing) as indicated by `target_cobol_function_name` in procedure data (detailed in Project Overview).
+    - **COBOL:** Its role as the **target language for modernization**. The generated COBOL programs (identified by `target_cobol_function_name`) will handle complex business logic and batch processing derived from the M204 procedures.
     - **JCL:** Its function in orchestrating batch jobs, file management, and program execution, detailed by `DDStatement` data (`job_name`, `step_name`, `dsn`, `disposition`). **The 'Source File LLM-Generated Summaries' for JCLs will provide an overview of the job functionalities.**
     - **VSAM:** The types of datasets used (e.g., KSDS, ESDS from `M204File.target_vsam_type`) and their purpose.
     Discuss any technical constraints or environmental considerations inferred from the system data:
@@ -592,6 +638,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
 """
         }
     ]
+
 
 async def _generate_llm_section(
     section_id: str,
@@ -856,4 +903,4 @@ async def create_requirement_document(db: Session, doc_data: RequirementDocument
     elif db_document.generation_options_json:
         log.warning(f"generation_options_json is not a dict after creation. Type: {type(db_document.generation_options_json)}. Data: {db_document.generation_options_json}")
         response.generation_options_used = None
-    return response
+    return

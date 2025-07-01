@@ -48,6 +48,11 @@ class M204ProcedureToCobolOutput(BaseModel):
     cobol_code_block: str = PydanticField(description="Generated COBOL code block.")
     comments: Optional[str] = PydanticField(description="Conversion comments.", default=None)
 
+class MainLoopToCobolOutput(BaseModel):
+    """Structured output for M204 main processing loop to COBOL conversion."""
+    cobol_code_block: str = PydanticField(description="Generated COBOL code block for the main processing loop, intended to be placed in its own paragraph.")
+    comments: Optional[str] = PydanticField(description="Conversion comments regarding the main loop.", default=None)
+
 class FileDefinitionToCobolFDOutput(BaseModel):
     logical_file_name: Optional[str] = PydanticField(description="M204 logical name for SELECT.", default=None)
     file_control_entry: str = PydanticField(description="COBOL SELECT statement.")
@@ -164,6 +169,70 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
                 comments=f"LLM conversion failed: {str(e)}"
             )
 
+    async def _llm_convert_main_loop_to_cobol(self, main_loop_content: str, m204_file_name: str) -> MainLoopToCobolOutput:
+        """Converts an M204 main processing loop to a COBOL paragraph using an LLM."""
+        if not llm_config._llm:
+            log.warning(f"LLM not available for main loop conversion from file {m204_file_name}. Returning placeholder.")
+            return MainLoopToCobolOutput(
+                cobol_code_block="      * --- Placeholder for Main Processing Loop ---\n"
+                                 "      DISPLAY 'Main processing loop logic to be implemented.'.\n"
+                                 "      * --- End of Placeholder ---",
+                comments="LLM not available. Manual conversion of main loop required."
+            )
+
+        prompt_fstr = f"""
+You are an expert M204 to COBOL migration specialist.
+Convert the following M204 main processing loop, extracted from the M204 file '{m204_file_name}', into a COBOL code block. This block will be placed into its own paragraph named `MAIN-PROCESSING-LOOP-PARA`.
+
+M204 Main Loop Content:
+```m204
+{main_loop_content}
+```
+
+Your task is to generate *only* the COBOL statements that represent the logic of this loop.
+- Convert M204 `FOR EACH VALUE...` or `FIND` loops into appropriate COBOL `PERFORM` loops with `READ` statements.
+- Convert M204 `CALL` statements to COBOL `PERFORM <procedure-name>-PARA` statements.
+- Translate `IF/ELSE`, `PRINT`, and other logic into their COBOL equivalents.
+- The generated `cobol_code_block` MUST NOT include the paragraph name itself (e.g., `MAIN-PROCESSING-LOOP-PARA.`).
+- The code should be correctly indented to be placed inside a paragraph (starting in Area B, column 12).
+- Assume all required files are OPEN and will be CLOSED elsewhere. Assume variables are defined in WORKING-STORAGE.
+
+Respond with a JSON object structured according to the MainLoopToCobolOutput model:
+```json
+{{
+  "cobol_code_block": "string",
+  "comments": "string (optional)"
+}}
+```
+Example of a valid `cobol_code_block` for a loop:
+```cobol
+      PERFORM UNTIL END-OF-FILE = 'Y'
+          READ INPUT-FILE
+              AT END
+                  MOVE 'Y' TO END-OF-FILE
+              NOT AT END
+                  PERFORM PROCESS-RECORD-PARA
+          END-READ
+      END-PERFORM.
+```
+"""
+        json_text_output: Optional[str] = None
+        try:
+            async with self.llm_semaphore:
+                log.debug(f"Attempting LLM call for M204 main loop to COBOL from file: {m204_file_name} (semaphore acquired)")
+                llm_call = llm_config._llm.as_structured_llm(MainLoopToCobolOutput)
+                response = await llm_call.acomplete(prompt=prompt_fstr)
+                json_text_output = response.text
+            log.debug(f"LLM call for M204 main loop to COBOL from file: {m204_file_name} completed (semaphore released)")
+            return MainLoopToCobolOutput(**json.loads(json_text_output))
+        except Exception as e:
+            log.error(f"LLM error converting main loop from file {m204_file_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
+            return MainLoopToCobolOutput(
+                cobol_code_block="      * --- Error during COBOL conversion for Main Processing Loop ---\n"
+                                 "      DISPLAY 'Error in main loop logic.'.\n"
+                                 "      * --- See logs for details ---",
+                comments=f"LLM conversion failed for main loop: {str(e)}"
+            )
 
     async def _llm_convert_file_definition_to_fd(self, m204_file: M204File) -> FileDefinitionToCobolFDOutput:
         """Convert M204 file definition JSON to COBOL FD using LLM"""
@@ -619,9 +688,28 @@ The `jcl_content` should be the complete JCL.
                 file_section_fds_str = "* No M204 files for FD generation.\n"
             log.info("FD generation process finished (M204 source).")
 
+            main_loop_cobol_block = ""
+            main_loop_paragraph = ""
+            cobol_conversion_comments = []
+
+            # --- Main Processing Loop Conversion ---
+            main_loop_source_file = next((f for f in m204_files_in_this_source if f.main_processing_loop_content), None)
+            if main_loop_source_file and llm_config._llm:
+                log.info(f"Found main processing loop in M204 file '{main_loop_source_file.m204_file_name}'. Converting to COBOL.")
+                main_loop_result = await self._llm_convert_main_loop_to_cobol(
+                    main_loop_source_file.main_processing_loop_content,
+                    main_loop_source_file.m204_file_name
+                )
+                main_loop_cobol_block = main_loop_result.cobol_code_block
+                if main_loop_result.comments:
+                    cobol_conversion_comments.append(f"* Main Loop: {main_loop_result.comments}")
+                main_loop_paragraph = f"MAIN-PROCESSING-LOOP-PARA.\n{main_loop_cobol_block}\n\n"
+            elif main_loop_source_file:
+                log.warning("Main processing loop found, but LLM is not configured. Skipping conversion.")
+                main_loop_paragraph = "MAIN-PROCESSING-LOOP-PARA.\n      * Main processing loop found but LLM not configured for conversion.\n\n"
+
             procedure_division_main_logic = ""
             procedure_division_paragraphs = ""
-            cobol_conversion_comments = []
 
             log.info(f"Starting M204 procedure to COBOL conversion for {len(related_procedures)} procedures (M204 source).")
             if llm_config._llm and related_procedures:
@@ -634,7 +722,9 @@ The `jcl_content` should be the complete JCL.
                         paragraph_name = (para_base[:28] + "-PARA")
                         if not paragraph_name or not (paragraph_name[0].isalpha() or paragraph_name[0].isdigit()):
                             paragraph_name = "P" + (paragraph_name[1:] if paragraph_name else "") 
-                        procedure_division_main_logic += f"           PERFORM {paragraph_name}.\n"
+                        # If there is no main loop, perform procedures sequentially. Otherwise, assume main loop calls them.
+                        if not main_loop_cobol_block:
+                            procedure_division_main_logic += f"           PERFORM {paragraph_name}.\n"
                         procedure_division_paragraphs += f"{paragraph_name}.\n{result.cobol_code_block}\n\n" 
                         if result.comments:
                             cobol_conversion_comments.append(f"* Proc {result.m204_procedure_name}: {result.comments}")
@@ -643,10 +733,15 @@ The `jcl_content` should be the complete JCL.
                         procedure_division_paragraphs += f"* --- ERROR CONVERTING PROCEDURE {proc_name_for_log} ---\n"
             elif not llm_config._llm:
                 procedure_division_paragraphs = "      * LLM not configured for M204 Procedure to COBOL conversion.\n"
-                # Add placeholders if procedures exist but LLM doesn't
             else:
                 procedure_division_paragraphs = "   * No M204 procedures for COBOL conversion.\n"
             log.info("M204 procedure to COBOL conversion finished (M204 source).")
+
+            # Determine the main logic flow
+            if main_loop_cobol_block:
+                procedure_division_main_logic = "           PERFORM MAIN-PROCESSING-LOOP-PARA.\n"
+            elif not procedure_division_main_logic: # No main loop and no procedures
+                procedure_division_main_logic = "           DISPLAY 'No M204 procedures or main loop mapped.'."
 
             cobol_content = f"""\
 IDENTIFICATION DIVISION.
@@ -667,8 +762,9 @@ WORKING-STORAGE SECTION.
 PROCEDURE DIVISION.
 MAIN-LOGIC SECTION.
 MAIN-PARAGRAPH.
-{procedure_division_main_logic if procedure_division_main_logic.strip() else "           DISPLAY 'No M204 procedures mapped.'."}
+{procedure_division_main_logic}
            STOP RUN.
+{main_loop_paragraph if main_loop_paragraph.strip() else ""}
 {procedure_division_paragraphs if procedure_division_paragraphs.strip() else "   * No procedure paragraphs."}
 """
             cobol_output_schema = CobolOutputSchema(input_source_id=current_input_source_with_details.input_source_id, file_name=cobol_file_name, content=cobol_content, artifact_type="cobol")
@@ -955,5 +1051,4 @@ MAIN-PARAGRAPH.
             all_project_artifacts_content.append(input_source_artifact_bundle)
         
         log.info(f"Successfully prepared artifact contents for project {project_id}.")
-        return all_project_artifacts_content  
-        
+        return all_project_artifacts_content

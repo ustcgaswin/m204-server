@@ -21,14 +21,7 @@ from app.services import parmlib_analysis_service
 from app.services import jcl_analysis_service
 from app.services import m204_analysis_service
 
-# REMOVED/COMMENTED: _shared_rag_service and local set_global_rag_service
-# _shared_rag_service: Optional[RagService] = None
 
-# def set_global_rag_service(instance: RagService):
-#     """Sets the global RAG service instance for this module and passes it to sub-services if needed."""
-#     global _shared_rag_service
-#     _shared_rag_service = instance
-#     log.info(f"ORCHESTRATOR: Global RAG service instance has been set in analysis_service: {type(instance)}")
 
 async def _get_input_source_for_analysis(db: Session, input_source_id: int) -> InputSource:
     input_source = db.query(InputSource).filter(InputSource.input_source_id == input_source_id).first()

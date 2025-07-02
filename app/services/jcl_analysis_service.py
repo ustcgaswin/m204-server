@@ -297,13 +297,16 @@ class JCLIterativeDescriptionOutput(BaseModel):
     return accumulated_description
 
 async def process_jcl_analysis(
-    db: Session, input_source: InputSource, file_content: str
+    db: Session, input_source: InputSource, file_content: str, rag_service: Optional[Any]
 ) -> Tuple[GenericAnalysisResultDataSchema, List[M204File]]:
     """
     Main function to process JCL file content.
     This function will be called by the main analysis_service orchestrator.
     """
     log.info(f"JCL_SERVICE: Starting JCL analysis for file: {input_source.original_filename} (ID: {input_source.input_source_id})")
+    
+    # The rag_service parameter is accepted but not currently used in this function.
+    # It is included for future use and to match the calling signature from the orchestrator.
     
     extracted_dd_statements, m204_files_from_jcl = await _extract_and_store_dd_statements_from_jcl(db, input_source, file_content)
     

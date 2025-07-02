@@ -176,7 +176,7 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
         else:
             message = f"File type '{file_type}' for {input_source.original_filename} is not specifically handled by detailed analysis. Basic processing completed."
             log.warning(f"ORCHESTRATOR: Unhandled file type '{file_type}' for InputSource ID: {input_source_id}, File: {input_source.original_filename}")
-            analysis_details = GenericAnalysisResultDataSchema(message=message)
+            analysis_details = GenericAnalysisResultDataSchema(summary=message)
             errors.append(f"File type '{file_type}' not supported for detailed analysis.")
 
         if not errors and analysis_details is not None: 
@@ -246,14 +246,13 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
                     refreshed_defined_files.append(M204FileResponseSchema.model_validate(m204_file_orm))
             analysis_details.defined_files_found = refreshed_defined_files
     
+    # Corrected to match the UnifiedAnalysisReportSchema definition
     return UnifiedAnalysisReportSchema(
         input_source_id=input_source.input_source_id,
-        project_id=input_source.project_id,
         original_filename=input_source.original_filename,
-        source_type=input_source.source_type,
+        file_type_processed=input_source.source_type or "unknown",
         analysis_status=input_source.analysis_status,
-        last_analyzed_timestamp=input_source.last_analyzed_timestamp,
         message=message,
         errors=list(set(errors)),
-        analysis_details=analysis_details
+        details=analysis_details
     )

@@ -344,7 +344,7 @@ async def _save_parmlib_file(db: Session, input_source: InputSource, file_data: 
     return m204_file
 
 
-async def process_parmlib_analysis(db: Session, input_source: InputSource, file_content: str) -> M204AnalysisResultDataSchema:
+async def process_parmlib_analysis(db: Session, input_source: InputSource, file_content: str) -> Tuple[M204AnalysisResultDataSchema, List[M204File]]:
     """
     Main function to process PARMLIB file content with simplified JSON storage.
     """
@@ -352,7 +352,7 @@ async def process_parmlib_analysis(db: Session, input_source: InputSource, file_
     
     processed_files = await _extract_m204_files_from_parmlib(db, input_source, file_content)
     
-    refreshed_files = []
+    refreshed_files: List[M204File] = []
     if processed_files:
         try:
             # Flush all pending changes from _save_parmlib_file to ensure IDs are set
@@ -392,4 +392,4 @@ async def process_parmlib_analysis(db: Session, input_source: InputSource, file_
         procedure_calls_found=[]
     )
     log.info(f"PARMLIB_PROCESS: Completed PARMLIB analysis for file: {input_source.original_filename}. Found {len(file_responses)} defined files.")
-    return analysis_result
+    return analysis_result, refreshed_files

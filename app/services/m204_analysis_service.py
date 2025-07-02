@@ -26,7 +26,7 @@ from app.services.rag_service import RagService # For type hinting
 from app.utils.logger import log
 from app.config.llm_config import llm_config
 from llama_index.core.node_parser import SentenceSplitter
-from app.config.db_config import SessionLocal
+
 
 # --- Pydantic Models for LLM Structured Output ---
 
@@ -338,19 +338,16 @@ If no specific test cases can be generated (e.g., procedure is too simple or abs
 
 
 async def _task_generate_and_store_m204_description(
+    db: Session,
     input_source_id: int,
     file_content: str,
     original_filename: str
 ):
     """
-    Background task to generate M204 description and store it in InputSource.
-    Manages its own database session.
+    Synchronous task to generate M204 description and store it in InputSource.
+    Uses the database session provided by the caller.
     """
-    db: Optional[Session] = None
     try:
-        db = SessionLocal() # Create a new session for this task
-        log.info(f"M204_DESC_TASK: DB session created for background task for {original_filename} (ID: {input_source_id})")
-
         log.info(f"M204_DESC_TASK: Starting description generation for {original_filename} (ID: {input_source_id})")
         
         input_s = db.query(InputSource).filter(InputSource.input_source_id == input_source_id).first()
@@ -361,26 +358,21 @@ async def _task_generate_and_store_m204_description(
         description = await _generate_m204_description_iteratively_with_llm(file_content, original_filename)
         
         if description:
-            # IMPORTANT: Assumes InputSource model has a field 'generated_m204_description'
+            # IMPORTANT: Assumes InputSource model has a field 'm204_detailed_description'
             if hasattr(input_s, 'm204_detailed_description'):
                 input_s.m204_detailed_description = description
                 db.add(input_s)
-                db.commit()
-                log.info(f"M204_DESC_TASK: Description generated and stored for {original_filename} (ID: {input_source_id}) in field 'm204_detailed_description'. Length: {len(description)}")
+                # The calling function will be responsible for the commit.
+                log.info(f"M204_DESC_TASK: Description generated and queued for storage for {original_filename} (ID: {input_source_id}). Length: {len(description)}")
             else:
                 log.error(f"M204_DESC_TASK: InputSource model does not have 'm204_detailed_description' field for {original_filename} (ID: {input_source_id}). Description not saved.")
         else:
             log.warning(f"M204_DESC_TASK: Description generation returned empty for {original_filename} (ID: {input_source_id}).")
             
     except Exception as e:
-        log.error(f"M204_DESC_TASK: Error in background M204 description generation/storage for {original_filename} (ID: {input_source_id}): {e}", exc_info=True)
-        if db:
-            db.rollback()
-    finally:
-        if db:
-            db.close()
-            log.info(f"M204_DESC_TASK: DB session closed for background task for {original_filename} (ID: {input_source_id})")
-
+        log.error(f"M204_DESC_TASK: Error in M204 description generation/storage for {original_filename} (ID: {input_source_id}): {e}", exc_info=True)
+        # Re-raise the exception to allow the orchestrator to handle it
+        raise
 
 
 async def _generate_m204_description_iteratively_with_llm(file_content: str, original_filename: str) -> str:
@@ -1578,7 +1570,6 @@ async def _extract_and_store_m204_image_statements(
 # --- Main Processing Function ---
 
 
-
 async def process_m204_analysis(
     db: Session, 
     input_source: InputSource, 
@@ -1586,8 +1577,8 @@ async def process_m204_analysis(
     rag_service: Optional[RagService]
 ) -> Tuple[M204AnalysisResultDataSchema, List[M204File]]:
     """
-    Main function to process M204 source file content (procedures, datasets, vars, calls, images).
-    Also initiates background generation of a detailed M204 file description.
+    Main function to process M204 source file content, including generating a detailed description.
+    The function will only return after all analysis and description generation is complete.
     Returns the analysis results and a list of M204File objects identified as DB files.
     """
     log.info(f"M204_SERVICE: Starting M204 specific processing for file: {input_source.original_filename} (ID: {input_source.input_source_id})")
@@ -1684,6 +1675,21 @@ async def process_m204_analysis(
     
     await _resolve_procedure_calls(db, input_source.project_id, extracted_procedure_calls, extracted_procedures)
 
+    # --- Description Generation ---
+    # This is now awaited, ensuring it completes before the function returns.
+    log.info(f"M204_SERVICE: Starting detailed description generation for {input_source.original_filename} as part of the main analysis flow.")
+    try:
+        await _task_generate_and_store_m204_description(
+            db=db,
+            input_source_id=input_source.input_source_id,
+            file_content=file_content,
+            original_filename=input_source.original_filename
+        )
+        log.info(f"M204_SERVICE: Detailed description generation complete for {input_source.original_filename}.")
+    except Exception as e_desc:
+        log.error(f"M204_SERVICE: Detailed description generation failed for {input_source.original_filename}: {e_desc}. Continuing to return structural analysis results.", exc_info=True)
+
+
     all_m204_files_map: Dict[Any, M204File] = {} 
     for f_list in [extracted_dataset_files, extracted_image_files]:
         for f_obj in f_list:
@@ -1752,19 +1758,6 @@ async def process_m204_analysis(
         variables_found=variable_responses,
         procedure_calls_found=procedure_call_responses,
     )
-
-    if input_source.input_source_id is not None:
-        log.info(f"M204_SERVICE: Creating background task for M204 description generation for file: {input_source.original_filename} (ID: {input_source.input_source_id})")
-        asyncio.create_task(
-            _task_generate_and_store_m204_description(
-                input_source_id=input_source.input_source_id,
-                file_content=file_content, 
-                original_filename=input_source.original_filename
-            )
-        )
-    else:
-        log.warning(f"M204_SERVICE: input_source_id is None for {input_source.original_filename}. Skipping background M204 description generation task.")
-
 
     log.info(f"M204_SERVICE: Completed M204 analysis for file: {input_source.original_filename}. Identified {len(m204_db_files_identified)} DB files for potential VSAM enhancement.")
     return analysis_result_data, m204_db_files_identified

@@ -307,7 +307,6 @@ def _get_sections_config() -> List[Dict[str, str]]:
             "title": "## 1. Project Overview",
             "instructions": """
    (Provide a narrative overview in a paragraph or two based on the 'Project Information' from the input data. Include project name, description, and creation date.
-        . Briefly describe the expected functionality of each target COBOL program based on the logic and summary of the source M204 procedure it will be generated from.**
     You can also incorporate high-level insights from the 'Source File LLM-Generated Summaries' if they provide a good overview of the system's nature.)
 """
         },
@@ -344,7 +343,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
             "title": "## 2. Main Processing Loop",
             "instructions": """
    (Based on the 'Main Processing Loop Content' provided in the 'M204 File Definitions and Main Processing Loops Data' section of the input data:
-    - If main loop content is found, write a descriptive paragraph explaining its purpose and high-level logic. Analyze the M204 code within the loop (e.g., `FOR EACH VALUE`, `FIND`, `CALL`, `IF/ELSE` blocks) to describe the sequence of operations.
+    - If main loop content is found, write a descriptive paragraph explaining its purpose and high-level logic. Analyze the M204 code within the loop (e.g., `FOR EACH VALUE`, `FIND`, `CALL`, `IF/ELSE` blocks) to describe the sequence of operations. **Pay close attention to nested logic, such as `IF` conditions inside other `IF/ELSE` blocks. Trace the logic through all levels of nesting, describing the specific conditions that lead to each processing path, rather than just summarizing the nested block as a whole.**
     - Identify the primary inputs (e.g., files being read, user input via screens) and outputs (e.g., files being written, reports generated) of the loop.
     - If no main processing loop content is provided in the input data, state "No main processing loop was identified in the analyzed source files.")
 """
@@ -356,18 +355,27 @@ def _get_sections_config() -> List[Dict[str, str]]:
       (Based on the 'Main Processing Loop Content' from the input data, generate a Mermaid flowchart diagram illustrating the logic of the main loop.
        The diagram should represent:
        - The start and end of the loop.
-       - Key conditional checks (e.g., `IF` statements) as decision diamonds.
+       - Key conditional checks (e.g., `IF` statements) as decision diamonds. **Crucially, represent all levels of nested `IF` statements as a sequence of decision diamonds, showing how the logic flows from an outer condition to inner ones.**
        - Major processing steps (e.g., `FIND` records, `CALL` a procedure, `PRINT` a line) as rectangular nodes.
        - I/O operations (e.g., reading from or writing to a file) as parallelogram nodes.
-       **Enclose the syntactically correct Mermaid code within a fenced code block like this:**
+       **Enclose the syntactically correct Mermaid code within a fenced code block. Here is an example showing multiple nested conditions:**
        ```mermaid
        graph TD;
-           A[Start Loop] --> B{Is Condition X Met?};
-           B -- Yes --> C[Process Record];
-           C --> D[Call SUB_PROC];
-           D --> E[/Write to Output File/];
-           E --> A;
-           B -- No --> F[End Loop];
+           A[Start Loop] --> B{Is Record Type 'A'?};
+           B -- Yes --> C{Is Field X > 100?};
+           C -- Yes --> D{Is Status 'NEW'?};
+           D -- Yes --> E[Process New 'A' Record > 100];
+           D -- No --> F[Process Existing 'A' Record > 100];
+           C -- No --> G[Process 'A' Record <= 100];
+           B -- No --> H{Is Record Type 'B'?};
+           H -- Yes --> I[Process 'B' Record];
+           H -- No --> J[Process Other Record Types];
+           E --> K[End of Iteration];
+           F --> K;
+           G --> K;
+           I --> K;
+           J --> K;
+           K --> A;
        ```
        **If no main processing loop content is available in the input data, or if the content is too simple or complex to create a meaningful diagram, include the heading and state "Data insufficient or not applicable for generating a main processing loop diagram." instead of providing malformed Mermaid code.**)
 """

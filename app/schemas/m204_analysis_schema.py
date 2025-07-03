@@ -75,7 +75,7 @@ class M204ProcedureResponseSchema(M204ProcedureBaseSchema):
     created_at: datetime
     updated_at: datetime
     variables: List[M204VariableResponseSchema] = Field(default_factory=list) # From relationship
-    suggested_test_cases_json: Optional[List[TestCaseSchema]] = None # Parsed from JSON
+    suggested_test_cases_json: Optional[List[TestCaseSchema]] = Field(default=None, validation_alias='suggested_test_cases_json')
 
     class Config:
         from_attributes = True

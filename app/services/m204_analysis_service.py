@@ -60,7 +60,7 @@ class TestCase(BaseModel):
     """Defines the structure for a single unit test case."""
     test_case_id: str = Field(description="A unique identifier for the test case (e.g., TC_001, TC_VALID_INPUT).")
     description: str = Field(description="A brief description of what this test case covers.")
-    preconditions: Optional[List[str]] = Field(description="Any preconditions or setup required (e.g., specific data in files, %variables set).", default_factory=list)
+    preconditions: Optional[List[str]] = Field(default=None, description="Any preconditions or setup required (e.g., specific data in files, %variables set).")
     inputs: Dict[str, Any] = Field(description="Key-value pairs of input parameters or %variables and their test values.")
     expected_outputs: Dict[str, Any] = Field(description="Key-value pairs of expected output %variables, screen elements, or file states and their values.")
     expected_behavior_description: str = Field(description="A textual description of the expected behavior, side effects, or outcome (e.g., 'Record X is written to FILEA', 'Error message Y is displayed').")
@@ -1169,82 +1169,59 @@ Consider the M204 declared type and attributes for meaningful COBOL suggestions.
 async def _extract_and_store_m204_procedure_calls(
     db: Session, input_source: InputSource, file_content: str, defined_procedures_in_file: List[Procedure]
 ) -> List[ProcedureCall]:
-    log.info(f"M204_SERVICE: Extracting M204 procedure calls for file ID: {input_source.input_source_id} using old service logic.")
+    log.info(f"M204_SERVICE: Extracting M204 procedure calls for file ID: {input_source.input_source_id}.")
     procedure_calls_created = []
     lines = file_content.splitlines()
     call_pattern = re.compile(r"^\s*CALL\s+([A-Z0-9_#@$-]+)(?:\s*\(.*?\))?", re.IGNORECASE | re.MULTILINE)
-    
-    proc_line_map = {proc.start_line_in_source: proc.proc_id for proc in defined_procedures_in_file if proc.start_line_in_source and proc.proc_id is not None}
-    current_calling_proc_id_for_line: Optional[int] = None
-    sorted_proc_starts = sorted(proc_line_map.keys())
 
-    for i, line_content in enumerate(lines): 
+    for i, line_content in enumerate(lines):
         line_num = i + 1
-        
-        temp_calling_proc_id: Optional[int] = None
-        for start_line in sorted_proc_starts:
-            proc_obj_for_scope = next((p for p in defined_procedures_in_file if p.start_line_in_source == start_line and p.proc_id == proc_line_map.get(start_line)), None)
+        match = call_pattern.match(line_content)
+        if not match:
+            continue
 
-            if proc_obj_for_scope and proc_obj_for_scope.end_line_in_source and \
-               proc_obj_for_scope.start_line_in_source <= line_num <= proc_obj_for_scope.end_line_in_source:
-                temp_calling_proc_id = proc_line_map[start_line]
-                break 
-            elif proc_obj_for_scope and not proc_obj_for_scope.end_line_in_source and \
-                 proc_obj_for_scope.start_line_in_source <= line_num: 
-                temp_calling_proc_id = proc_line_map[start_line]
-            elif line_num < start_line: 
-                break
-        current_calling_proc_id_for_line = temp_calling_proc_id
+        current_calling_proc_id_for_line: Optional[int] = None
+        # Find the procedure that contains the current line number by checking all defined procedures
+        for proc in defined_procedures_in_file:
+            if proc.start_line_in_source and proc.end_line_in_source:
+                if proc.start_line_in_source <= line_num <= proc.end_line_in_source:
+                    current_calling_proc_id_for_line = proc.proc_id
+                    break  # Found the containing procedure, no need to check others
 
-        match = call_pattern.match(line_content) 
-        if match:
-            called_proc_name = match.group(1)
-            
-            existing_call = db.query(ProcedureCall).filter_by(
+        called_proc_name = match.group(1)
+
+        existing_call = db.query(ProcedureCall).filter_by(
+            project_id=input_source.project_id,
+            calling_input_source_id=input_source.input_source_id,
+            calling_procedure_id=current_calling_proc_id_for_line,
+            called_procedure_name=called_proc_name,
+            line_number=line_num
+        ).first()
+
+        if existing_call:
+            # If you need to update existing calls, the logic would go here.
+            # For now, we just append it to the list of calls processed in this run.
+            procedure_calls_created.append(existing_call)
+            continue
+
+        try:
+            call_data = M204ProcedureCallCreateSchema(
                 project_id=input_source.project_id,
                 calling_input_source_id=input_source.input_source_id,
                 calling_procedure_id=current_calling_proc_id_for_line,
                 called_procedure_name=called_proc_name,
-                line_number=line_num 
-            ).first()
+                line_number=line_num,
+                is_external=None # Will be resolved later
+            )
+            db_call = ProcedureCall(**call_data.model_dump(exclude_none=True))
+            db.add(db_call)
+            procedure_calls_created.append(db_call)
+            log.debug(f"M204_SERVICE: Created new procedure call to '{called_proc_name}' at line {line_num}.")
+        except Exception as e:
+            log.error(f"M204_SERVICE: Error creating DB entry for procedure call to '{called_proc_name}' at line {line_num}: {e}", exc_info=True)
 
-            if existing_call:
-                update_existing = False
-                if hasattr(existing_call, 'call_arguments_string') and existing_call.call_arguments_string is not None:
-                    existing_call.call_arguments_string = None
-                    update_existing = True
-                if hasattr(existing_call, 'parsed_arguments_json') and existing_call.parsed_arguments_json is not None:
-                    existing_call.parsed_arguments_json = None
-                    update_existing = True
-                if hasattr(existing_call, 'is_external') and existing_call.is_external is True: 
-                    existing_call.is_external = None 
-                    update_existing = True
-
-                if update_existing:
-                    db.add(existing_call)
-                    log.debug(f"M204_SERVICE: Clearing argument/external fields for existing call to '{called_proc_name}' at line {line_num} to align with old logic.")
-                procedure_calls_created.append(existing_call)
-                continue
-
-            try:
-                call_data = M204ProcedureCallCreateSchema(
-                    project_id=input_source.project_id,
-                    calling_input_source_id=input_source.input_source_id,
-                    calling_procedure_id=current_calling_proc_id_for_line,
-                    called_procedure_name=called_proc_name,
-                    line_number=line_num, 
-                    is_external=None      
-                )
-                db_call = ProcedureCall(**call_data.model_dump(exclude_none=True)) 
-                db.add(db_call)
-                procedure_calls_created.append(db_call)
-                log.debug(f"M204_SERVICE: Created new procedure call to '{called_proc_name}' at line {line_num} using old logic.")
-            except Exception as e:
-                log.error(f"M204_SERVICE: Error creating DB entry for procedure call to '{called_proc_name}' at line {line_num}: {e}", exc_info=True)
-    
-    log.info(f"M204_SERVICE: Finished extracting {len(procedure_calls_created)} procedure calls for file ID {input_source.input_source_id} using old logic.")
+    log.info(f"M204_SERVICE: Finished extracting {len(procedure_calls_created)} procedure calls for file ID {input_source.input_source_id}.")
     return procedure_calls_created
-
 
 async def _resolve_procedure_calls(db: Session, project_id: int, calls_in_file: List[ProcedureCall], procs_in_file: List[Procedure]):
     log.info(f"M204_SERVICE: Resolving internal/external status for {len(calls_in_file)} procedure calls in project {project_id}.")

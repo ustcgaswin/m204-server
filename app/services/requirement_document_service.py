@@ -58,9 +58,59 @@ def _serialize_model_instance(instance: Any, schema_class: Optional[Any] = None)
             data[column.name] = value
     return data
 
+async def _structure_m204_loop_logic(loop_content_string: str) -> Optional[Dict[str, Any]]:
+    """
+    Uses an LLM to parse a raw M204 code string into a structured JSON "Operation Tree".
+    This is a pre-processing step to simplify the final document generation.
+    """
+    if not loop_content_string or not llm_config._llm:
+        return None
+
+    log.info("Attempting to structure complex M204 loop logic into JSON...")
+
+    prompt = f"""
+You are an expert M204 code parser. Your task is to analyze the provided M204 code snippet and convert its logical flow into a structured JSON object.
+
+The JSON object must be an array of 'operations'. Each operation can be one of two types: `action` or `conditional`.
+
+- An `action` represents a single command like `CALL`, `PRINT`, `FIND`, or a variable assignment. It must have the fields: `type: "action"`, `statement: "The original code line"`, and `description: "A plain-language summary of the action"`.
+- A `conditional` represents an `IF/ELSE IF/ELSE` block. It must have the fields: `type: "conditional"` and `branches`. The `branches` field is an array where each object represents one branch (`IF`, `ELSE IF`, or `ELSE`).
+- Each `branch` object must have a `condition: "The condition string, e.g., 'IF %STATUS EQ 'A'' or simply 'ELSE'"` and an `operations` field, which is a nested array following these same rules recursively.
+
+Your response must contain *only* the raw JSON object and nothing else. Do not wrap it in markdown, and do not add any explanations.
+
+M204 Code to Parse:
+```m204
+{loop_content_string}
+```
+"""
+    try:
+        completion_response = await llm_config._llm.acomplete(prompt=prompt)
+        if completion_response and completion_response.text:
+            # The response should be a JSON string, so we parse it.
+            json_text = completion_response.text.strip()
+            # Handle cases where the LLM might still wrap the output in markdown
+            if json_text.startswith("```json"):
+                json_text = json_text[7:]
+            if json_text.endswith("```"):
+                json_text = json_text[:-3]
+            
+            structured_logic = json.loads(json_text)
+            log.info("Successfully structured M204 loop logic into JSON.")
+            return structured_logic
+        else:
+            log.warning("LLM returned no content for M204 loop structuring.")
+            return None
+    except json.JSONDecodeError as e_json:
+        log.error(f"Failed to decode JSON from LLM response for loop structuring: {e_json}. Response text: '{completion_response.text[:500]}'")
+        return None
+    except Exception as e:
+        log.error(f"An unexpected error occurred during M204 loop structuring: {e}", exc_info=True)
+        return None
+
 async def _fetch_project_data_for_llm(db: Session, project_id: int, options: RequirementGenerationOptionsSchema) -> Dict[str, Any]:
     """
-    Fetches all relevant data for a project to be used in the LLM prompt.
+    Fetches all relevant data for a project and pre-processes complex parts for the LLM prompt.
     """
     project_data: Dict[str, Any] = {}
 
@@ -101,9 +151,19 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
 
     # M204 Files
     if options.include_files:
-        # Removed selectinload(M204File.fields) as M204Field model and relationship are removed
-        m204_files = db.query(M204File).filter(M204File.project_id == project_id).all()
-        project_data["m204_files"] = [M204FileResponseSchema.model_validate(f).model_dump(exclude_none=True) for f in m204_files]
+        m204_files_query = db.query(M204File).filter(M204File.project_id == project_id)
+        m204_files_results = m204_files_query.all()
+        
+        # Convert to dictionaries first to allow modification
+        m204_files_data = [M204FileResponseSchema.model_validate(f).model_dump(exclude_none=True) for f in m204_files_results]
+
+        # Pre-process complex loop logic
+        for file_data in m204_files_data:
+            if file_data.get("main_processing_loop_content"):
+                structured_logic = await _structure_m204_loop_logic(file_data["main_processing_loop_content"])
+                file_data["structured_loop_logic"] = structured_logic # Will be None on failure
+
+        project_data["m204_files"] = m204_files_data
 
     # Global/Public M204 Variables
     if options.include_global_variables:
@@ -187,8 +247,15 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
             ]
             
             # Add main processing loop content if it exists for this file entry
-            if f_data.get("main_processing_loop_content"):
-                log.debug("Inside main_processing_loop_content")
+            structured_loop = f_data.get("structured_loop_logic")
+            if structured_loop:
+                log.debug("Including structured_loop_logic in prompt.")
+                file_details.append(f"    Structured Main Processing Loop Logic (from file '{f_data.get('m204_file_name')}'):")
+                file_details.append("    ```json")
+                file_details.append(json.dumps(structured_loop, indent=2))
+                file_details.append("    ```")
+            elif f_data.get("main_processing_loop_content"):
+                log.debug("Falling back to raw main_processing_loop_content in prompt.")
                 file_details.append(f"    Main Processing Loop Content (from file '{f_data.get('m204_file_name')}'):")
                 file_details.append("    ```m204")
                 file_details.append(f_data.get('main_processing_loop_content'))
@@ -342,22 +409,23 @@ def _get_sections_config() -> List[Dict[str, str]]:
             "id": "main_processing_loop",
             "title": "## 2. Main Processing Loop",
             "instructions": """
-   (Based on the 'Main Processing Loop Content' provided in the 'M204 File Definitions and Main Processing Loops Data' section of the input data:
-    - If main loop content is found, write a descriptive paragraph explaining its purpose and high-level logic. Analyze the M204 code within the loop (e.g., `FOR EACH VALUE`, `FIND`, `CALL`, `IF/ELSE` blocks) to describe the sequence of operations. **Pay close attention to nested logic, such as `IF` conditions inside other `IF/ELSE` blocks. Trace the logic through all levels of nesting, describing the specific conditions that lead to each processing path, rather than just summarizing the nested block as a whole.**
-    - Identify the primary inputs (e.g., files being read, user input via screens) and outputs (e.g., files being written, reports generated) of the loop.
-    - If no main processing loop content is provided in the input data, state "No main processing loop was identified in the analyzed source files.")
+   (If 'Structured Main Processing Loop Logic (JSON)' is provided in the input data, recursively walk the JSON object to describe the logic. For each `action`, describe it. For each `conditional`, describe the condition of each `branch` and then detail its nested operations. Ensure every node in the JSON tree is described in sequence.
+    If only raw 'Main Processing Loop Content' is provided (as a fallback), analyze the M204 code directly. Describe its purpose, high-level logic, and trace the sequence of operations, paying close attention to nested `IF/ELSE` blocks.
+    Identify the primary inputs and outputs of the loop.
+    If no loop data is provided, state "No main processing loop was identified in the analyzed source files.")
 """
         },
         {
             "id": "main_processing_loop_diagram",
             "title": "### 2.1. Main Processing Loop Flowchart",
             "instructions": """
-      (Based on the 'Main Processing Loop Content' from the input data, generate a Mermaid flowchart diagram illustrating the logic of the main loop.
-       The diagram should represent:
+      (If 'Structured Main Processing Loop Logic (JSON)' is provided, generate a Mermaid flowchart by walking the JSON tree. `action` types should be rectangular process nodes. `conditional` types should be decision diamonds, with arrows pointing to the first operation in each `branch`. Connect all operations sequentially to represent the full logic flow.
+       If only raw 'Main Processing Loop Content' is provided (as a fallback), generate the diagram by analyzing the M204 code directly.
+       Represent:
        - The start and end of the loop.
-       - Key conditional checks (e.g., `IF` statements) as decision diamonds. **Crucially, represent all levels of nested `IF` statements as a sequence of decision diamonds, showing how the logic flows from an outer condition to inner ones.**
-       - Major processing steps (e.g., `FIND` records, `CALL` a procedure, `PRINT` a line) as rectangular nodes.
-       - I/O operations (e.g., reading from or writing to a file) as parallelogram nodes.
+       - Key conditional checks (e.g., `IF` statements) as decision diamonds, including all levels of nesting.
+       - Major processing steps (e.g., `FIND`, `CALL`) as rectangular nodes.
+       - I/O operations as parallelogram nodes.
        **Enclose the syntactically correct Mermaid code within a fenced code block. Here is an example showing multiple nested conditions:**
        ```mermaid
        graph TD;
@@ -377,7 +445,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
            J --> K;
            K --> A;
        ```
-       **If no main processing loop content is available in the input data, or if the content is too simple or complex to create a meaningful diagram, include the heading and state "Data insufficient or not applicable for generating a main processing loop diagram." instead of providing malformed Mermaid code.**)
+       **If data is insufficient or not applicable for generating a diagram, include the heading and state "Data insufficient or not applicable for generating a main processing loop diagram." instead of providing malformed Mermaid code.**)
 """
         },
         {
@@ -690,7 +758,17 @@ Ensure the entire output for this section is valid Markdown.
     try:
         completion_response = await llm_config._llm.acomplete(prompt=prompt_for_section)
         if completion_response and completion_response.text:
-            section_content = completion_response.text
+            section_content = completion_response.text.strip()
+
+            # Sanitize the output: remove potential markdown code block wrappers
+            if section_content.startswith("```markdown"):
+                section_content = section_content[len("```markdown"):].lstrip()
+            elif section_content.startswith("```"):
+                section_content = section_content[len("```"):].lstrip()
+            
+            if section_content.endswith("```"):
+                section_content = section_content[:-len("```")].rstrip()
+
             normalized_content_start = section_content.lstrip().replace('\r\n', '\n').replace('\r', '\n')
             normalized_expected_title = section_title.replace('\r\n', '\n').replace('\r', '\n')
 
@@ -724,6 +802,8 @@ Ensure the entire output for this section is valid Markdown.
         log.debug(f"Prompt length for failed section '{section_id}': {len(prompt_for_section)}")
         return f"{section_title}\n\nError generating content for this section: {str(e_llm_section)}"
 
+
+
 async def generate_and_save_project_requirements_document(
     db: Session,
     project_id: int,
@@ -743,7 +823,7 @@ async def generate_and_save_project_requirements_document(
 
     try:
         project_data_for_llm = await _fetch_project_data_for_llm(db, project_id, options)
-        log.info(f"Fetched project data for LLM. Keys: {list(project_data_for_llm.keys())}")
+        log.info(f"Fetched and pre-processed project data for LLM. Keys: {list(project_data_for_llm.keys())}")
     except HTTPException as he:
         raise he
     except Exception as e_fetch:
@@ -910,9 +990,9 @@ async def create_requirement_document(db: Session, doc_data: RequirementDocument
         try:
             response.generation_options_used = RequirementGenerationOptionsSchema(**db_document.generation_options_json)
         except Exception as e_parse: 
-            log.warning(f"Could not parse generation_options_json from created document for response: {e_parse}. Data: {db_document.generation_options_json}") 
+            log.warning(f"Could not parse generation_options_json from created document for response: {e_parse}. Data: {db_document.generation_options_json}")
             response.generation_options_used = None
     elif db_document.generation_options_json:
         log.warning(f"generation_options_json is not a dict after creation. Type: {type(db_document.generation_options_json)}. Data: {db_document.generation_options_json}")
         response.generation_options_used = None
-    return
+    return response

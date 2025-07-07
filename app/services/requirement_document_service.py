@@ -108,6 +108,7 @@ M204 Code to Parse:
         log.error(f"An unexpected error occurred during M204 loop structuring: {e}", exc_info=True)
         return None
 
+
 async def _fetch_project_data_for_llm(db: Session, project_id: int, options: RequirementGenerationOptionsSchema) -> Dict[str, Any]:
     """
     Fetches all relevant data for a project and pre-processes complex parts for the LLM prompt.
@@ -124,7 +125,17 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
     if options.include_project_overview: # Tying inclusion to project overview
         input_sources = db.query(InputSource).filter(InputSource.project_id == project_id).all()
         source_summaries = []
+        main_loop_content = None # Variable to hold the main loop content
+        main_loop_source_filename = None # To identify which file the loop came from
         for src in input_sources:
+            # Check for and capture the main processing loop content from any M204 source
+            if src.source_type == 'm204' and src.main_processing_loop_content:
+                if not main_loop_content: # Take the first one found
+                    main_loop_content = src.main_processing_loop_content
+                    main_loop_source_filename = src.original_filename or f"InputSource ID {src.input_source_id}"
+                else:
+                    log.warning(f"Multiple main_processing_loop_content found for project {project_id}. Using the first one from source '{main_loop_source_filename}'.")
+
             summary_item = {
                 "original_filename": src.original_filename,
                 "source_type": src.source_type,
@@ -136,6 +147,16 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
                 source_summaries.append(summary_item)
         if source_summaries:
             project_data["source_file_llm_summaries"] = source_summaries
+        
+        # Process and add the main loop content if found
+        if main_loop_content:
+            log.info(f"Found main processing loop content from '{main_loop_source_filename}', structuring for LLM prompt.")
+            structured_logic = await _structure_m204_loop_logic(main_loop_content)
+            project_data["main_processing_loop"] = {
+                "source_filename": main_loop_source_filename,
+                "raw_content": main_loop_content,
+                "structured_logic": structured_logic
+            }
 
 
     # M204 Procedures
@@ -154,14 +175,8 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
         m204_files_query = db.query(M204File).filter(M204File.project_id == project_id)
         m204_files_results = m204_files_query.all()
         
-        # Convert to dictionaries first to allow modification
+        # Convert to dictionaries. The loop processing is now removed from here.
         m204_files_data = [M204FileResponseSchema.model_validate(f).model_dump(exclude_none=True) for f in m204_files_results]
-
-        # Pre-process complex loop logic
-        for file_data in m204_files_data:
-            if file_data.get("main_processing_loop_content"):
-                structured_logic = await _structure_m204_loop_logic(file_data["main_processing_loop_content"])
-                file_data["structured_loop_logic"] = structured_logic # Will be None on failure
 
         project_data["m204_files"] = m204_files_data
 
@@ -187,6 +202,8 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
     return project_data
 
 
+
+
 def _construct_llm_prompt_content(project_data: Dict[str, Any], options: RequirementGenerationOptionsSchema) -> str:
     """
     Constructs the detailed data dump part of the LLM prompt.
@@ -209,6 +226,28 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
             if summary_info.get('m204_detailed_description'):
                 content_parts.append(f"    M204 Summary: {summary_info['m204_detailed_description']}")
         content_parts.append("\n")
+
+    # Main Processing Loop (now handled at the top level)
+    if "main_processing_loop" in project_data and project_data["main_processing_loop"]:
+        loop_data = project_data["main_processing_loop"]
+        source_file = loop_data.get('source_filename', 'an M204 source file')
+        content_parts.append(f"Main Processing Loop (from {source_file}):")
+        
+        structured_loop = loop_data.get("structured_logic")
+        if structured_loop:
+            log.debug("Including structured_loop_logic in prompt.")
+            content_parts.append("  Structured Logic (JSON):")
+            content_parts.append("  ```json")
+            content_parts.append(json.dumps(structured_loop, indent=2))
+            content_parts.append("  ```")
+        elif loop_data.get("raw_content"):
+            log.debug("Falling back to raw main_processing_loop_content in prompt.")
+            content_parts.append("  Raw M204 Content:")
+            content_parts.append("  ```m204")
+            content_parts.append(loop_data.get('raw_content'))
+            content_parts.append("  ```")
+        content_parts.append("\n")
+
 
     if options.include_procedures and "procedures" in project_data and project_data["procedures"]:
         content_parts.append("M204 Procedures Data:")
@@ -235,7 +274,7 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
     
 
     if options.include_files and "m204_files" in project_data and project_data["m204_files"]:
-        content_parts.append("M204 File Definitions and Main Processing Loops Data:")
+        content_parts.append("M204 File Definitions Data:")
         for f_data in project_data["m204_files"]:
             log.debug(f"f_data: {f_data}")
             file_details = [
@@ -246,20 +285,7 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                 f"    Target VSAM Type: {f_data.get('target_vsam_type', 'N/A')}"
             ]
             
-            # Add main processing loop content if it exists for this file entry
-            structured_loop = f_data.get("structured_loop_logic")
-            if structured_loop:
-                log.debug("Including structured_loop_logic in prompt.")
-                file_details.append(f"    Structured Main Processing Loop Logic (from file '{f_data.get('m204_file_name')}'):")
-                file_details.append("    ```json")
-                file_details.append(json.dumps(structured_loop, indent=2))
-                file_details.append("    ```")
-            elif f_data.get("main_processing_loop_content"):
-                log.debug("Falling back to raw main_processing_loop_content in prompt.")
-                file_details.append(f"    Main Processing Loop Content (from file '{f_data.get('m204_file_name')}'):")
-                file_details.append("    ```m204")
-                file_details.append(f_data.get('main_processing_loop_content'))
-                file_details.append("    ```")
+            # The main processing loop content is no longer part of f_data, so the logic here is removed.
 
             file_def_json = f_data.get("file_definition_json")
             has_printed_fields_for_this_file = False 
@@ -361,7 +387,6 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
         content_parts.append("\n")
 
     return "\n".join(content_parts)
-
 
 
 def _get_sections_config() -> List[Dict[str, str]]:
@@ -763,30 +788,39 @@ Ensure the entire output for this section is valid Markdown.
             # Sanitize the output: remove potential markdown code block wrappers
             if section_content.startswith("```markdown"):
                 section_content = section_content[len("```markdown"):].lstrip()
-            elif section_content.startswith("```"):
-                section_content = section_content[len("```"):].lstrip()
             
             if section_content.endswith("```"):
                 section_content = section_content[:-len("```")].rstrip()
 
-            normalized_content_start = section_content.lstrip().replace('\r\n', '\n').replace('\r', '\n')
-            normalized_expected_title = section_title.replace('\r\n', '\n').replace('\r', '\n')
+            # Fix for unclosed mermaid blocks
+            if "```mermaid" in section_content:
+                parts = section_content.split("```mermaid")
+                processed_content = parts[0]
+                for i in range(1, len(parts)):
+                    # Re-add the mermaid block start
+                    processed_content += "```mermaid"
+                    
+                    # Check if the subsequent part contains a closing fence
+                    if "```" not in parts[i]:
+                        log.warning(f"Found unclosed mermaid block in section '{section_id}'. Appending closing fence.")
+                        # Add the content, ensuring it ends with a newline before the fence
+                        processed_content += parts[i].rstrip() + "\n```"
+                    else:
+                        # The part already contains a closing fence, so just append it
+                        processed_content += parts[i]
+                section_content = processed_content
 
-            if not normalized_content_start.startswith(normalized_expected_title):
+            if not section_content.lstrip().startswith(section_title):
                 log.warning(f"LLM output for section '{section_id}' did not start with the expected title. Expected: '{section_title}'. Got: '{section_content[:200]}'. Prepending title.")
                 section_content = f"{section_title}\n\n{section_content.lstrip()}"
             else:
+                # This logic helps ensure proper spacing after the title if the LLM doesn't add it.
                 lines = section_content.splitlines()
-                if len(lines) > 0 and lines[0].strip() == section_title.strip(): # Title is on its own line
-                    # If there's content on the next line and it's not a list/code block, ensure double newline
-                    if len(lines) > 1 and lines[1].strip() != "" and \
-                       not section_content.startswith(f"{section_title}\n\n") and \
-                       not (lines[1].strip().startswith("*") or lines[1].strip().startswith("-") or lines[1].strip().startswith("```")):
-                        section_content = f"{section_title}\n\n{section_content[len(lines[0]):].lstrip()}"
-                # If title and content are on the same line (less likely with current prompt but possible)
-                elif section_content.startswith(section_title) and not section_content.startswith(f"{section_title}\n"):
-                     section_content = f"{section_title}\n\n{section_content[len(section_title):].lstrip()}"
-
+                if len(lines) > 1 and lines[0].strip() == section_title.strip():
+                    if not section_content.startswith(f"{section_title}\n\n"):
+                         # Add a newline if the next line isn't already blank or a list/code block
+                        if lines[1].strip() and not (lines[1].strip().startswith(("*", "-", "```"))):
+                            section_content = f"{section_title}\n\n{section_content[len(lines[0]):].lstrip()}"
 
             log.info(f"Successfully generated content for section '{section_id}'. Length: {len(section_content)}")
             return section_content

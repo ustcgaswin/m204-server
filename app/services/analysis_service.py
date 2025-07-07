@@ -1,6 +1,5 @@
 import os
 import asyncio
-import time 
 from sqlalchemy.orm import Session
 from typing import List, Optional, Union
 
@@ -124,51 +123,48 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
                         m204_db_files_for_vsam_enhancement.append(m204_file_obj)
             log.info(f"ORCHESTRATOR: JCL analysis for {input_source.original_filename} found {len(analysis_details.dd_statements_found if analysis_details and hasattr(analysis_details, 'dd_statements_found') else [])} DD statements. {len(m204_db_files_for_vsam_enhancement)} DB files identified/updated for VSAM enhancement.")
 
-        elif file_type in ["m204", "online", "batch", "include", "screen", "map", "subroutine", "userlanguage"]: 
-            m204_db_files_from_m204_service = []
-            
-            # Create tasks for M204 analysis and description generation to run concurrently
-            m204_analysis_task = m204_analysis_service.process_m204_analysis(
+        elif file_type in ["m204", "online", "batch", "include", "screen", "map", "subroutine", "userlanguage"]:
+            # Run M204 structural analysis first
+            log.info(f"ORCHESTRATOR: Starting M204 structural analysis for {input_source.original_filename}.")
+            analysis_details, m204_db_files_from_m204_service = await m204_analysis_service.process_m204_analysis(
                 db, input_source, file_content, current_rag_service_instance
             )
+            log.info(f"ORCHESTRATOR: Completed M204 structural analysis for {input_source.original_filename}.")
             
-            description_task = None
+            # Commit the structural analysis results before starting the description generation
+            db.commit()
+            log.info(f"ORCHESTRATOR: Committed structural analysis results for {input_source.original_filename}.")
+
+            # Now, run the description and main loop generation tasks sequentially
             if llm_config._llm:
-                log.info(f"ORCHESTRATOR: Preparing concurrent M204 detailed description generation for {input_source.original_filename}.")
-                description_task = m204_analysis_service._task_generate_and_store_m204_description(
-                    db=db,
-                    input_source_id=input_source.input_source_id,
-                    file_content=file_content,
-                    original_filename=input_source.original_filename
-                )
+                log.info(f"ORCHESTRATOR: Starting sequential M204 detailed description and main loop generation for {input_source.original_filename}.")
+                try:
+                    # Generate and store the detailed description
+                    await m204_analysis_service._task_generate_and_store_m204_description(
+                        db=db,
+                        input_source_id=input_source.input_source_id,
+                        file_content=file_content,
+                        original_filename=input_source.original_filename
+                    )
+                    log.info(f"ORCHESTRATOR: Completed M204 detailed description generation for {input_source.original_filename}.")
+
+                    # Extract and store the main processing loop content
+                    await m204_analysis_service.extract_and_store_main_loop(
+                        db=db,
+                        input_source_id=input_source.input_source_id,
+                        file_content=file_content
+                    )
+                    log.info(f"ORCHESTRATOR: Completed M204 main processing loop extraction for {input_source.original_filename}.")
+
+                except Exception as e_desc:
+                    log.error(f"ORCHESTRATOR: M204 description/main loop generation for {input_source.original_filename} failed. Error: {e_desc}", exc_info=True)
+                    errors.append("Failed to generate M204 detailed description or main loop.")
             else:
-                log.warning(f"ORCHESTRATOR: LLM not configured. Skipping M204 detailed description generation for {input_source.original_filename}.")
-
-            # Await both tasks
-            tasks_to_run = [m204_analysis_task]
-            if description_task:
-                tasks_to_run.append(description_task)
-            
-            log.info(f"ORCHESTRATOR: Awaiting completion of M204 analysis and description generation for {input_source.original_filename}.")
-            start_time = time.time()
-            results = await asyncio.gather(*tasks_to_run, return_exceptions=True)
-            end_time = time.time()
-            log.info(f"ORCHESTRATOR: M204 concurrent tasks for {input_source.original_filename} completed in {end_time - start_time:.2f} seconds.")
-
-            # Process results
-            analysis_result_tuple = results[0]
-            if isinstance(analysis_result_tuple, Exception):
-                raise analysis_result_tuple # Re-raise exception from process_m204_analysis
-            
-            analysis_details, m204_db_files_from_m204_service = analysis_result_tuple
-            
-            if description_task and len(results) > 1 and isinstance(results[1], Exception):
-                log.error(f"ORCHESTRATOR: M204 detailed description generation for {input_source.original_filename} failed. Error: {results[1]}", exc_info=results[1])
-                errors.append("Failed to generate M204 detailed description.")
+                log.warning(f"ORCHESTRATOR: LLM not configured. Skipping M204 detailed description and main loop generation for {input_source.original_filename}.")
 
             message = f"M204 source code analysis completed for {input_source.original_filename}."
             for m204_file_obj in m204_db_files_from_m204_service:
-                if m204_file_obj.is_db_file: 
+                if m204_file_obj.is_db_file:
                      if m204_file_obj not in m204_db_files_for_vsam_enhancement:
                         m204_db_files_for_vsam_enhancement.append(m204_file_obj)
             log.info(f"ORCHESTRATOR: M204 source analysis for {input_source.original_filename} completed. {len(m204_db_files_for_vsam_enhancement)} DB files identified for VSAM enhancement.")

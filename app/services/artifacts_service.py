@@ -693,18 +693,17 @@ The `jcl_content` should be the complete JCL.
             cobol_conversion_comments = []
 
             # --- Main Processing Loop Conversion ---
-            main_loop_source_file = next((f for f in m204_files_in_this_source if f.main_processing_loop_content), None)
-            if main_loop_source_file and llm_config._llm:
-                log.info(f"Found main processing loop in M204 file '{main_loop_source_file.m204_file_name}'. Converting to COBOL.")
+            if current_input_source_with_details.main_processing_loop_content and llm_config._llm:
+                log.info(f"Found main processing loop in InputSource '{input_source_name_for_comments}'. Converting to COBOL.")
                 main_loop_result = await self._llm_convert_main_loop_to_cobol(
-                    main_loop_source_file.main_processing_loop_content,
-                    main_loop_source_file.m204_file_name
+                    current_input_source_with_details.main_processing_loop_content,
+                    input_source_name_for_comments
                 )
                 main_loop_cobol_block = main_loop_result.cobol_code_block
                 if main_loop_result.comments:
                     cobol_conversion_comments.append(f"* Main Loop: {main_loop_result.comments}")
                 main_loop_paragraph = f"MAIN-PROCESSING-LOOP-PARA.\n{main_loop_cobol_block}\n\n"
-            elif main_loop_source_file:
+            elif current_input_source_with_details.main_processing_loop_content:
                 log.warning("Main processing loop found, but LLM is not configured. Skipping conversion.")
                 main_loop_paragraph = "MAIN-PROCESSING-LOOP-PARA.\n      * Main processing loop found but LLM not configured for conversion.\n\n"
 
@@ -935,7 +934,7 @@ MAIN-PARAGRAPH.
         )
         log.info(f"Finished artifact generation for InputSource ID: {input_source.input_source_id} ('{input_source_name_for_comments}'). Returning {len(response.cobol_files)} COBOL, {len(response.jcl_files)} JCL, {len(response.unit_test_files)} Unit Test files.")
         return response
-    
+
     async def generate_artifacts_for_project(self, project_id: int) -> List[InputSourceArtifacts]:
         project = self.db.query(Project).filter(Project.project_id == project_id).first()
         if not project:

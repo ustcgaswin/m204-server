@@ -32,7 +32,6 @@ class M204File(Base):
     target_vsam_dataset_name = Column(String(255), nullable=True) # Suggested VSAM DSN
     target_vsam_type = Column(String(50), nullable=True) # Suggested VSAM type (KSDS, ESDS, etc.)
     primary_key_field_name = Column(String(255), nullable=True) # Comma-separated if composite, derived from vsam_suggestions in JSON
-    main_processing_loop_content = Column(Text, nullable=True) # For M204 source, stores the REPEAT...END REPEAT block
     
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

@@ -12,6 +12,7 @@ from app.models.procedure_model import Procedure
 from app.models.m204_file_model import M204File
 from app.models.m204_variable_model import M204Variable
 from app.models.procedure_call_model import ProcedureCall
+from app.models.m204_image_definition_model import M204ImageDefinition
 
 from app.schemas.m204_analysis_schema import (
     M204ProcedureCreateSchema, M204ProcedureResponseSchema,
@@ -682,6 +683,35 @@ async def _extract_and_store_m204_procedures(
     return procedures_processed_for_db
 
 
+
+async def extract_and_store_main_loop(db: Session, input_source_id: int, file_content: str):
+    """
+    Extracts the main processing loop from the file content and stores it in the InputSource record.
+    This is intended to be called by the orchestrator after structural analysis.
+    """
+    try:
+        log.info(f"M204_MAIN_LOOP_TASK: Starting main loop extraction for InputSource ID: {input_source_id}")
+        input_s = db.query(InputSource).filter(InputSource.input_source_id == input_source_id).first()
+        if not input_s:
+            log.error(f"M204_MAIN_LOOP_TASK: InputSource with ID {input_source_id} not found. Cannot store main loop content.")
+            return
+
+        main_loop_content = _extract_main_loop_content(file_content)
+
+        if main_loop_content:
+            if hasattr(input_s, 'main_processing_loop_content'):
+                input_s.main_processing_loop_content = main_loop_content
+                db.add(input_s)
+                log.info(f"M204_MAIN_LOOP_TASK: Main loop content extracted and queued for storage for InputSource ID: {input_source_id}. Length: {len(main_loop_content)}")
+            else:
+                log.error("M204_MAIN_LOOP_TASK: InputSource model does not have 'main_processing_loop_content' field. Main loop content not saved.")
+        else:
+            log.info(f"M204_MAIN_LOOP_TASK: No main processing loop (REPEAT...END REPEAT) found for InputSource ID: {input_source_id}.")
+
+    except Exception as e:
+        log.error(f"M204_MAIN_LOOP_TASK: Error in main loop extraction/storage for InputSource ID {input_source_id}: {e}", exc_info=True)
+        # Re-raise to allow the orchestrator to handle it
+        raise
 
 def _extract_main_loop_content(file_content: str) -> Optional[str]:
     """Extracts content between the first top-level REPEAT and its corresponding END REPEAT."""
@@ -1436,14 +1466,14 @@ Ensure the output "m204_image_name" is "{image_name_context}" and "m204_field_na
 
 async def _extract_and_store_m204_image_statements(
     db: Session, input_source: InputSource, file_content: str
-) -> List[M204File]:
+) -> List[M204ImageDefinition]:
     """
-    Extract IMAGE statements from M204 source and appends their definitions
-    to the file_definition_json of existing M204File entries that match
-    on m204_logical_dataset_name. Does not create new M204File entries.
+    REFACTORED: Extracts IMAGE statements from M204 source and stores them as
+    independent M204ImageDefinition records. It no longer tries to link them
+    to M204File records directly.
     """
-    log.info(f"M204_SERVICE: Extracting IMAGE statements to append to existing M204Files for file ID: {input_source.input_source_id} ({input_source.original_filename})")
-    m204_files_updated = []
+    log.info(f"M204_SERVICE: Extracting IMAGE statements as definitions for file ID: {input_source.input_source_id} ({input_source.original_filename})")
+    m204_images_created = []
     lines = file_content.splitlines()
     image_start_pattern = re.compile(r"^\s*IMAGE\s+([A-Z0-9_.#@$-]+)", re.IGNORECASE)
     
@@ -1454,96 +1484,129 @@ async def _extract_and_store_m204_image_statements(
         
         image_match = image_start_pattern.match(line_content_for_match.strip())
         if image_match:
-            image_name_from_statement = image_match.group(1) # Original case
-            image_name_upper = image_name_from_statement.upper() # For matching
-            log.debug(f"M204_SERVICE_IMG: Found IMAGE statement start: '{image_name_from_statement}' (matching as '{image_name_upper}') at line {current_line_num_for_start} in file '{input_source.original_filename}'.")
+            image_name_from_statement = image_match.group(1)
+            log.debug(f"M204_SERVICE_IMG: Found IMAGE statement start: '{image_name_from_statement}' at line {current_line_num_for_start} in file '{input_source.original_filename}'.")
             
             temp_image_content_lines = []
             found_end_image = False
-            image_content_end_line_idx = i # Line index of 'IMAGE ...'
+            image_content_end_line_idx = i
             
-            # Search for 'END IMAGE'
             for j in range(i + 1, len(lines)):
-                current_image_line_content = lines[j]
-                if current_image_line_content.strip().upper() == 'END IMAGE':
-                    image_content_end_line_idx = j # Line index of 'END IMAGE'
+                if lines[j].strip().upper() == 'END IMAGE':
+                    image_content_end_line_idx = j
                     found_end_image = True
-                    log.debug(f"M204_SERVICE_IMG: Found 'END IMAGE' for '{image_name_from_statement}' at line {j + 1}.")
                     break
-                temp_image_content_lines.append(current_image_line_content)
+                temp_image_content_lines.append(lines[j])
             
             if not found_end_image:
-                log.warning(f"M204_SERVICE_IMG: IMAGE '{image_name_from_statement}' starting at line {current_line_num_for_start} in '{input_source.original_filename}' did not have a corresponding 'END IMAGE'. Skipping this IMAGE block.")
-                i += 1 # Move to the next line to avoid reprocessing the IMAGE start
+                log.warning(f"M204_SERVICE_IMG: IMAGE '{image_name_from_statement}' at line {current_line_num_for_start} did not have a corresponding 'END IMAGE'. Skipping.")
+                i += 1
                 continue
 
             image_block_content_for_parse = "\n".join(temp_image_content_lines)
-            log.debug(f"M204_SERVICE_IMG: Content for IMAGE '{image_name_from_statement}' (lines {current_line_num_for_start + 1} to {image_content_end_line_idx}):\n{image_block_content_for_parse[:300]}{'...' if len(image_block_content_for_parse) > 300 else ''}")
-            
-            parsed_image_fields_data = await _parse_image_definition(image_name_from_statement, image_block_content_for_parse) # Pass image_name_from_statement as context
-            log.debug(f"M204_SERVICE_IMG: Parsed IMAGE fields data for '{image_name_from_statement}': {json.dumps(parsed_image_fields_data)}")
+            parsed_image_fields_data = await _parse_image_definition(image_name_from_statement, image_block_content_for_parse)
             
             if parsed_image_fields_data and parsed_image_fields_data.get("fields"):
-                current_image_definition_for_json = {
-                    "image_name": image_name_from_statement, 
-                    "source_type": "IMAGE_STATEMENT", 
-                    "start_line_number": current_line_num_for_start,
-                    "end_line_number": image_content_end_line_idx + 1, # Convert 0-based index to 1-based line number
-                    "fields": parsed_image_fields_data["fields"]
-                }
-                
-                log.debug(f"M204_SERVICE_IMG: Parsed IMAGE '{image_name_from_statement}'. Querying for existing M204File: project_id={input_source.project_id}, UPPER(m204_logical_dataset_name)='{image_name_upper}'.")
-                existing_file = db.query(M204File).filter(
-                    M204File.project_id == input_source.project_id,
-                    func.upper(M204File.m204_logical_dataset_name) == image_name_upper
+                existing_image_def = db.query(M204ImageDefinition).filter(
+                    M204ImageDefinition.project_id == input_source.project_id,
+                    M204ImageDefinition.image_name == image_name_from_statement,
+                    M204ImageDefinition.input_source_id == input_source.input_source_id
                 ).first()
 
-                if existing_file:
-                    log.info(f"M204_SERVICE_IMG: Found existing M204File (ID: {existing_file.m204_file_id}, Name: '{existing_file.m204_file_name}', Logical: '{existing_file.m204_logical_dataset_name}') for IMAGE '{image_name_from_statement}'. Current file_definition_json: {existing_file.file_definition_json}")
-
-                    updated_json = existing_file.file_definition_json or {}
-                    if not isinstance(updated_json, dict):
-                        log.warning(f"M204_SERVICE_IMG: file_definition_json for M204File '{existing_file.m204_file_name}' (ID: {existing_file.m204_file_id}) is not a dict ({type(updated_json)}). Re-initializing to empty dict.")
-                        updated_json = {}
-                    
-                    if "image_definitions" not in updated_json or not isinstance(updated_json.get("image_definitions"), list):
-                        log.debug(f"M204_SERVICE_IMG: Initializing 'image_definitions' list in JSON for M204File '{existing_file.m204_file_name}'.")
-                        updated_json["image_definitions"] = []
-                    
-                    # Check for duplicates based on image_name, start_line, and end_line to be more specific
-                    is_duplicate_image_in_json = any(
-                        img_def.get("image_name", "").upper() == image_name_upper and 
-                        img_def.get("start_line_number") == current_image_definition_for_json["start_line_number"] and
-                        img_def.get("end_line_number") == current_image_definition_for_json["end_line_number"] and
-                        img_def.get("source_type") == "IMAGE_STATEMENT"
-                        for img_def in updated_json.get("image_definitions", [])
+                if not existing_image_def:
+                    new_image_def = M204ImageDefinition(
+                        project_id=input_source.project_id,
+                        input_source_id=input_source.input_source_id,
+                        image_name=image_name_from_statement,
+                        start_line_number=current_line_num_for_start,
+                        end_line_number=image_content_end_line_idx + 1,
+                        fields_json=parsed_image_fields_data
                     )
-
-                    if not is_duplicate_image_in_json:
-                        updated_json["image_definitions"].append(current_image_definition_for_json)
-                        existing_file.file_definition_json = updated_json 
-                        log.debug(f"M204_SERVICE_IMG: Prepared updated_json for M204File '{existing_file.m204_file_name}': {json.dumps(updated_json)}")
-                        
-                        db.add(existing_file)
-                        if existing_file not in m204_files_updated:
-                            m204_files_updated.append(existing_file)
-                        log.info(f"M204_SERVICE_IMG: Appended IMAGE definition '{image_name_from_statement}' (lines {current_line_num_for_start}-{image_content_end_line_idx + 1}) to JSON of M204File '{existing_file.m204_file_name}'. Session will update on commit.")
-                    else:
-                        log.debug(f"M204_SERVICE_IMG: IMAGE definition '{image_name_from_statement}' from lines {current_line_num_for_start}-{image_content_end_line_idx + 1} already exists in JSON for M204File '{existing_file.m204_file_name}'. Skipping append.")
+                    db.add(new_image_def)
+                    m204_images_created.append(new_image_def)
+                    log.info(f"M204_SERVICE_IMG: Created new M204ImageDefinition for '{image_name_from_statement}'.")
                 else:
-                    log.warning(f"M204_SERVICE_IMG: IMAGE statement for '{image_name_from_statement}' (matched as '{image_name_upper}') found at line {current_line_num_for_start} in '{input_source.original_filename}', but no existing M204File with matching m204_logical_dataset_name was found in project {input_source.project_id}. This IMAGE definition will not be persisted as a new M204File row.")
-                
-                i = image_content_end_line_idx + 1 # Move past 'END IMAGE'
-                continue 
-            else: 
-                log.warning(f"M204_SERVICE_IMG: IMAGE '{image_name_from_statement}' at line {current_line_num_for_start} in '{input_source.original_filename}' parsed no fields or data was invalid. Skipping storage of this IMAGE definition.")
-                i = image_content_end_line_idx + 1 if found_end_image else i + 1 # Move past 'END IMAGE' or current line
-                continue
+                    existing_image_def.fields_json = parsed_image_fields_data
+                    db.add(existing_image_def)
+                    m204_images_created.append(existing_image_def)
+                    log.info(f"M204_SERVICE_IMG: Updated existing M204ImageDefinition for '{image_name_from_statement}'.")
+            
+            i = image_content_end_line_idx + 1
+            continue
         
         i += 1
-    log.info(f"M204_SERVICE: Finished extracting IMAGE statements for file ID: {input_source.input_source_id}. {len(m204_files_updated)} M204File records were potentially updated.")
-    return m204_files_updated
+    log.info(f"M204_SERVICE: Finished extracting {len(m204_images_created)} IMAGE definitions for file ID: {input_source.input_source_id}.")
+    return m204_images_created
 
+
+async def _link_images_to_files(db: Session, input_source: InputSource, file_content: str) -> List[M204File]:
+    """
+    NEW: Scans source code for commands that link an IMAGE to a FILE (e.g., READ IMAGE...FROM)
+    and copies the image layout into the file's file_definition_json.
+    """
+    log.info(f"M204_LINKER: Starting IMAGE to FILE linkage analysis for {input_source.original_filename}")
+    updated_files = []
+    link_pattern = re.compile(
+        r"^\s*(?:READ|WRITE)\s+IMAGE\s+([A-Z0-9_#@$-]+)\s+(?:FROM|TO)\s+([A-Z0-9_#@$-.]+)", # Allow '.' in file name
+        re.IGNORECASE | re.MULTILINE
+    )
+    # Import flag_modified and other necessary modules
+    from sqlalchemy.orm.attributes import flag_modified
+    from sqlalchemy import or_
+
+    for match in link_pattern.finditer(file_content):
+        image_name = match.group(1)
+        file_name_from_usage = match.group(2) # This will be 'MORTGAGE.INPUT'
+        log.info(f"M204_LINKER: Found potential link: IMAGE '{image_name}' with FILE '{file_name_from_usage}'")
+
+        image_def = db.query(M204ImageDefinition).filter(
+            M204ImageDefinition.project_id == input_source.project_id,
+            func.upper(M204ImageDefinition.image_name) == image_name.upper()
+        ).first()
+
+        # CORRECTED QUERY: Check against both logical name and file name (DDNAME)
+        m204_file = db.query(M204File).filter(
+            M204File.project_id == input_source.project_id,
+            or_(
+                func.upper(M204File.m204_logical_dataset_name) == file_name_from_usage.upper(),
+                func.upper(M204File.m204_file_name) == file_name_from_usage.upper()
+            )
+        ).first()
+
+        if image_def and m204_file:
+            log.info(f"M204_LINKER: Matched IMAGE '{image_name}' to M204File '{m204_file.m204_file_name}' (Logical: {m204_file.m204_logical_dataset_name}). Updating JSON.")
+            
+            image_definition_for_json = {
+                "image_name": image_def.image_name,
+                "source_type": "IMAGE_STATEMENT",
+                "fields": image_def.fields_json.get("fields", []) if image_def.fields_json else []
+            }
+
+            updated_json = m204_file.file_definition_json or {}
+            if "image_definitions" not in updated_json:
+                updated_json["image_definitions"] = []
+            
+            # Check for duplicates before appending
+            existing_images = [img.get("image_name") for img in updated_json["image_definitions"]]
+            if image_definition_for_json["image_name"] not in existing_images:
+                updated_json["image_definitions"].append(image_definition_for_json)
+                m204_file.file_definition_json = updated_json
+                # Mark the JSON field as modified
+                flag_modified(m204_file, "file_definition_json")
+                db.add(m204_file)
+                if m204_file not in updated_files:
+                    updated_files.append(m204_file)
+                log.info(f"M204_LINKER: Appended layout from IMAGE '{image_name}' to M204File '{m204_file.m204_file_name}'.")
+            else:
+                log.info(f"M204_LINKER: Layout from IMAGE '{image_name}' already exists in M204File '{m204_file.m204_file_name}'. Skipping append.")
+        else:
+            if not image_def:
+                log.warning(f"M204_LINKER: Could not find a parsed M204ImageDefinition for IMAGE '{image_name}'.")
+            if not m204_file:
+                log.warning(f"M204_LINKER: Could not find a defined M204File for FILE '{file_name_from_usage}'.")
+
+    return updated_files
+    
 # --- Main Processing Function ---
 
 
@@ -1554,34 +1617,12 @@ async def process_m204_analysis(
     rag_service: Optional[RagService]
 ) -> Tuple[M204AnalysisResultDataSchema, List[M204File]]:
     """
-    Main function to process M204 source file content, including generating a detailed description.
-    The function will only return after all analysis and description generation is complete.
+    Main function to process M204 source file content for structural analysis.
+    The function will only return after all analysis is complete.
     Returns the analysis results and a list of M204File objects identified as DB files.
+    Main loop and description generation are handled separately by the orchestrator.
     """
-    log.info(f"M204_SERVICE: Starting M204 specific processing for file: {input_source.original_filename} (ID: {input_source.input_source_id})")
-    
-    # --- Main Loop Extraction (File Level) ---
-    main_loop_content = _extract_main_loop_content(file_content)
-    if main_loop_content:
-        log.info(f"M204_SERVICE: Found main processing loop content in {input_source.original_filename}.")
-        log.debug(f"Main loop content: {main_loop_content}")
-        # Create or update a representative M204File record for this source file to hold the loop content
-        source_file_as_m204_record = db.query(M204File).filter(
-            M204File.project_id == input_source.project_id,
-            M204File.m204_file_name == input_source.original_filename,
-            M204File.defined_in_input_source_id == input_source.input_source_id
-        ).first()
-        if not source_file_as_m204_record:
-            source_file_as_m204_record = M204File(
-                project_id=input_source.project_id,
-                m204_file_name=input_source.original_filename,
-                defined_in_input_source_id=input_source.input_source_id,
-                is_db_file=False # This record represents the program file itself
-            )
-            db.add(source_file_as_m204_record)
-        
-        source_file_as_m204_record.main_processing_loop_content = main_loop_content
-        db.flush() # Ensure it gets an ID if new, and data is persisted before further steps
+    log.info(f"M204_SERVICE: Starting M204 structural processing for file: {input_source.original_filename} (ID: {input_source.input_source_id})")
 
     extracted_procedures = await _extract_and_store_m204_procedures(db, input_source, file_content, rag_service)
     log.debug(f"M204_SERVICE: Flushing session after procedure extraction for {input_source.original_filename} to ensure IDs are available.")
@@ -1628,8 +1669,13 @@ async def process_m204_analysis(
         log.error(f"M204_SERVICE_PRE_IMG_LOG: Error logging M204File table contents: {e_log_table}", exc_info=True)
     # --- End of logging M204File table contents ---
 
-    extracted_image_files = await _extract_and_store_m204_image_statements(db, input_source, file_content)
+    # REFACTORED: This now saves to the new M204ImageDefinition table and doesn't return files.
+    await _extract_and_store_m204_image_statements(db, input_source, file_content)
     
+    # FLUSH a second time to ensure M204ImageDefinition records are available for the linker.
+    log.debug(f"M204_SERVICE: Flushing session after IMAGE statement extraction for {input_source.original_filename} to ensure definitions are queryable.")
+    db.flush()
+
     log.info(f"M204_SERVICE: Starting parallel extraction of variables and procedure calls for {input_source.original_filename}")
     variable_task = _extract_and_store_m204_variables(db, input_source, file_content, extracted_procedures, rag_service)
     procedure_call_task = _extract_and_store_m204_procedure_calls(db, input_source, file_content, extracted_procedures)
@@ -1652,24 +1698,19 @@ async def process_m204_analysis(
     
     await _resolve_procedure_calls(db, input_source.project_id, extracted_procedure_calls, extracted_procedures)
 
-    # --- Description Generation ---
-    # This is now awaited, ensuring it completes before the function returns.
-    log.info(f"M204_SERVICE: Starting detailed description generation for {input_source.original_filename} as part of the main analysis flow.")
-    try:
-        await _task_generate_and_store_m204_description(
-            db=db,
-            input_source_id=input_source.input_source_id,
-            file_content=file_content,
-            original_filename=input_source.original_filename
-        )
-        log.info(f"M204_SERVICE: Detailed description generation complete for {input_source.original_filename}.")
-    except Exception as e_desc:
-        log.error(f"M204_SERVICE: Detailed description generation failed for {input_source.original_filename}: {e_desc}. Continuing to return structural analysis results.", exc_info=True)
+    # NEW STEP: After all elements are parsed, link IMAGEs to FILEs based on usage.
+    log.info(f"M204_SERVICE: Starting IMAGE to FILE linkage analysis for {input_source.original_filename}")
+    updated_m204_files_from_linking = await _link_images_to_files(db, input_source, file_content)
+    log.info(f"M204_SERVICE: Finished IMAGE to FILE linkage analysis. {len(updated_m204_files_from_linking)} files were updated with IMAGE layouts.")
 
+
+    # --- Description Generation is now handled by the orchestrator ---
 
     all_m204_files_map: Dict[Any, M204File] = {} 
-    for f_list in [extracted_dataset_files, extracted_image_files]:
+    # MODIFIED: The old extracted_image_files is replaced by the new list from the linking function.
+    for f_list in [extracted_dataset_files, updated_m204_files_from_linking]:
         for f_obj in f_list:
+            # Use m204_file_id as the key if available to deduplicate objects
             obj_key_for_map = f_obj.m204_file_id if hasattr(f_obj, 'm204_file_id') and f_obj.m204_file_id is not None else id(f_obj)
             if obj_key_for_map not in all_m204_files_map:
                 all_m204_files_map[obj_key_for_map] = f_obj
@@ -1691,6 +1732,9 @@ async def process_m204_analysis(
                 item_id_attr = 'variable_id'
             elif hasattr(item, 'call_id'): 
                 item_id_attr = 'call_id'
+            elif hasattr(item, 'image_definition_id'): # Handle M204ImageDefinition if it were included
+                item_id_attr = 'image_definition_id'
+
 
             if item not in db and not db.object_session(item): 
                 db.add(item) 
@@ -1739,6 +1783,7 @@ async def process_m204_analysis(
     log.info(f"M204_SERVICE: Completed M204 analysis for file: {input_source.original_filename}. Identified {len(m204_db_files_identified)} DB files for potential VSAM enhancement.")
     return analysis_result_data, m204_db_files_identified
 
+
 async def enhance_m204_db_file_with_vsam_suggestions(db: Session, m204_file: M204File):
     """
     Updates an M204File (only if is_db_file is True) and its JSON field definitions with VSAM suggestions.
@@ -1760,28 +1805,33 @@ async def enhance_m204_db_file_with_vsam_suggestions(db: Session, m204_file: M20
     
     fields_context_list = []
     if m204_file.file_definition_json:
-        file_definition = m204_file.file_definition_json
-        # Expecting "db_file" type for files undergoing VSAM enhancement
-        if file_definition.get('file_type') == "db_file" and file_definition.get('source') == "parmlib":
-            fields = file_definition.get('fields', {})
+        # Check for image definitions first, as they are more likely for non-parmlib files
+        if "image_definitions" in m204_file.file_definition_json:
+            for image_def in m204_file.file_definition_json.get("image_definitions", []):
+                for field in image_def.get("fields", []):
+                    fields_context_list.append({
+                        "name": field.get("field_name"),
+                        "attributes_text": f"Type: {field.get('m204_type')}, Length: {field.get('length')}",
+                        "current_cobol_picture_clause": field.get("cobol_layout_suggestions", {}).get("cobol_picture_clause"),
+                        "current_vsam_length": field.get("cobol_layout_suggestions", {}).get("field_byte_length")
+                    })
+        # Then check for parmlib structure
+        elif m204_file.file_definition_json.get('file_type') == "db_file" and m204_file.file_definition_json.get('source') == "parmlib":
+            fields = m204_file.file_definition_json.get('fields', {})
             for field_name, field_data in fields.items():
-                # field_data from PARMLIB should already have 'attributes' (list of strings)
-                # and 'vsam_suggestions' (dict, possibly empty)
                 vsam_suggestions = field_data.get('vsam_suggestions', {}) 
                 fields_context_list.append({
                     "name": field_name,
-                    "attributes_text": ', '.join(field_data.get('attributes', [])), # M204 attributes
-                    "attributes_json": field_data.get('attributes', []), # M204 attributes as list
+                    "attributes_text": ', '.join(field_data.get('attributes', [])),
                     "current_is_key_component": vsam_suggestions.get('is_key_component', False),
                     "current_key_order": vsam_suggestions.get('key_order'),
-                    "current_cobol_picture_clause": vsam_suggestions.get('cobol_picture_clause'), # Renamed from current_vsam_data_type
+                    "current_cobol_picture_clause": vsam_suggestions.get('cobol_picture_clause'),
                     "current_vsam_length": vsam_suggestions.get('vsam_length')
                 })
         else:
-            log.warning(f"M204_VSAM_ENHANCE: M204File '{m204_file.m204_file_name}' is_db_file=True, but its file_definition_json is not of type 'db_file' from 'parmlib'. JSON: {m204_file.file_definition_json}. Skipping VSAM field analysis.")
-            # Still might suggest VSAM type based on DEFINE DATASET attributes if no fields.
+            log.warning(f"M204_VSAM_ENHANCE: M204File '{m204_file.m204_file_name}' is_db_file=True, but its file_definition_json does not match known structures (parmlib or image). JSON: {m204_file.file_definition_json}. Skipping VSAM field analysis.")
     
-    fields_context_str = json.dumps(fields_context_list, indent=2) if fields_context_list else "No PARMLIB fields defined or found for this file."
+    fields_context_str = json.dumps(fields_context_list, indent=2) if fields_context_list else "No PARMLIB or IMAGE fields defined or found for this file."
     
     prompt_fstr = f"""
 You are an expert Mainframe M204 to COBOL/VSAM migration specialist.
@@ -1793,15 +1843,15 @@ M204 Logical Dataset Name (if from DEFINE DATASET): {m204_file.m204_logical_data
 M204 File 'DEFINE DATASET' Attributes (if available):
 {file_attributes_from_define_dataset}
 
-Defined Fields (from PARMLIB file definition JSON), including any current VSAM-related suggestions:
+Defined Fields (from PARMLIB or IMAGE definitions), including any current VSAM-related suggestions:
 ```json
 {fields_context_str}
 ```
 
-Based on this information, considering both the original M204 field attributes (from PARMLIB) and any 'current_is_key_component', 'current_key_order', 'current_cobol_picture_clause', 'current_vsam_length' suggestions from the input JSON:
+Based on this information, considering both the original M204 field attributes and any 'current_is_key_component', 'current_key_order', 'current_cobol_picture_clause', 'current_vsam_length' suggestions from the input JSON:
 
 1.  Suggest the most appropriate VSAM file organization (KSDS, ESDS, RRDS, or LDS) for this M204 database file.
-2.  For each field listed in the input `Defined Fields` JSON (from PARMLIB), provide refined suggestions for its role in a VSAM structure:
+2.  For each field listed in the input `Defined Fields` JSON, provide refined suggestions for its role in a VSAM structure:
     *   `m204_field_name`: string (Must match one of the input field names from the "name" key in the `Defined Fields` JSON)
     *   `is_key_component`: boolean (true if this field should be part of the primary key for KSDS/RRDS)
     *   `key_order`: integer (1-based order if it's a key component. Null if not a key component.)
@@ -1811,7 +1861,7 @@ Based on this information, considering both the original M204 field attributes (
 
 Respond with a JSON object structured according to the M204FileVsamAnalysisOutput model.
 Ensure `m204_field_name` in `field_specific_suggestions` matches one of the input field names.
-If no PARMLIB fields are provided or applicable for key structure (e.g., for ESDS), `field_specific_suggestions` can be an empty list.
+If no fields are provided or applicable for key structure (e.g., for ESDS), `field_specific_suggestions` can be an empty list.
 For KSDS, identify the primary key field(s).
 Your suggestions for fields should be the final determination, considering all available information.
 """
@@ -1822,7 +1872,6 @@ Your suggestions for fields should be the final determination, considering all a
         json_text_output = completion_response.text
         
         loaded_vsam_data = json.loads(json_text_output)
-        # M204FileVsamAnalysisOutput uses M204FieldVsamSuggestion, which should now have cobol_picture_clause
         vsam_output = M204FileVsamAnalysisOutput(**loaded_vsam_data)
 
         if vsam_output.m204_file_name != m204_file.m204_file_name:
@@ -1832,49 +1881,48 @@ Your suggestions for fields should be the final determination, considering all a
         m204_file.target_vsam_type = vsam_output.suggested_vsam_type
         log.info(f"M204_VSAM_ENHANCE: LLM suggested VSAM type for {m204_file.m204_file_name}: {m204_file.target_vsam_type}. Reasoning: {vsam_output.overall_reasoning or 'N/A'}")
 
-        if m204_file.file_definition_json and \
-           m204_file.file_definition_json.get('file_type') == "db_file" and \
-           vsam_output.field_specific_suggestions:
-            
-            file_definition = m204_file.file_definition_json # This is a mutable dict
-            parmlib_fields = file_definition.get('fields', {})
+        if m204_file.file_definition_json and vsam_output.field_specific_suggestions:
+            file_definition = m204_file.file_definition_json
             primary_key_components = []
             
-            for field_suggestion in vsam_output.field_specific_suggestions:
-                field_name_from_llm = field_suggestion.m204_field_name
-                
-                if field_name_from_llm in parmlib_fields:
-                    if 'vsam_suggestions' not in parmlib_fields[field_name_from_llm]:
-                        parmlib_fields[field_name_from_llm]['vsam_suggestions'] = {}
-                    
-                    parmlib_fields[field_name_from_llm]['vsam_suggestions'].update({
-                        'is_key_component': field_suggestion.is_key_component,
-                        'key_order': field_suggestion.key_order if field_suggestion.is_key_component else None,
-                        'cobol_picture_clause': field_suggestion.cobol_picture_clause, # Renamed from vsam_data_type
-                        'vsam_length': field_suggestion.vsam_length,
-                        'reasoning': field_suggestion.reasoning
-                    })
-                    log.info(f"M204_VSAM_ENHANCE: Updated VSAM suggestions for PARMLIB field '{field_name_from_llm}' in {m204_file.m204_file_name}: key={field_suggestion.is_key_component}, order={field_suggestion.key_order}, pic='{field_suggestion.cobol_picture_clause}', len={field_suggestion.vsam_length}")
-                    
-                    if field_suggestion.is_key_component and field_suggestion.key_order is not None:
-                        primary_key_components.append({
-                            "name": field_name_from_llm, 
-                            "order": field_suggestion.key_order
-                        })
-                else:
-                    log.warning(f"M204_VSAM_ENHANCE: LLM provided VSAM suggestion for field '{field_name_from_llm}' which was not found in the PARMLIB fields of M204File '{m204_file.m204_file_name}'.")
+            # Handle PARMLIB structure
+            if file_definition.get('source') == 'parmlib':
+                parmlib_fields = file_definition.get('fields', {})
+                for field_suggestion in vsam_output.field_specific_suggestions:
+                    field_name_from_llm = field_suggestion.m204_field_name
+                    if field_name_from_llm in parmlib_fields:
+                        if 'vsam_suggestions' not in parmlib_fields[field_name_from_llm]:
+                            parmlib_fields[field_name_from_llm]['vsam_suggestions'] = {}
+                        
+                        parmlib_fields[field_name_from_llm]['vsam_suggestions'].update(field_suggestion.model_dump())
+                        log.info(f"M204_VSAM_ENHANCE: Updated VSAM suggestions for PARMLIB field '{field_name_from_llm}' in {m204_file.m204_file_name}.")
+                        
+                        if field_suggestion.is_key_component and field_suggestion.key_order is not None:
+                            primary_key_components.append({"name": field_name_from_llm, "order": field_suggestion.key_order})
             
-            # Mark the JSON field as modified for SQLAlchemy
+            # Handle IMAGE structure
+            elif 'image_definitions' in file_definition:
+                for image_def in file_definition.get("image_definitions", []):
+                    for field in image_def.get("fields", []):
+                        for field_suggestion in vsam_output.field_specific_suggestions:
+                            if field.get("field_name") == field_suggestion.m204_field_name:
+                                if 'vsam_suggestions' not in field:
+                                    field['vsam_suggestions'] = {}
+                                field['vsam_suggestions'].update(field_suggestion.model_dump())
+                                log.info(f"M204_VSAM_ENHANCE: Updated VSAM suggestions for IMAGE field '{field_suggestion.m204_field_name}' in {m204_file.m204_file_name}.")
+                                
+                                if field_suggestion.is_key_component and field_suggestion.key_order is not None:
+                                    primary_key_components.append({"name": field_suggestion.m204_field_name, "order": field_suggestion.key_order})
+
             if primary_key_components:
                 primary_key_components.sort(key=lambda x: x["order"])
                 m204_file.primary_key_field_name = ", ".join([comp["name"] for comp in primary_key_components])
                 log.info(f"M204_VSAM_ENHANCE: Updated primary key for {m204_file.m204_file_name}: {m204_file.primary_key_field_name}")
             else:
-                # Only clear PK if it was previously set and now no components are identified
                 if m204_file.primary_key_field_name is not None:
-                    log.info(f"M204_VSAM_ENHANCE: No primary key components identified by LLM for {m204_file.m204_file_name}. Clearing existing PK '{m204_file.primary_key_field_name}'.")
+                    log.info(f"M204_VSAM_ENHANCE: No primary key components identified. Clearing existing PK '{m204_file.primary_key_field_name}'.")
                 m204_file.primary_key_field_name = None
-            
+
             # Notify SQLAlchemy that the JSON has been modified in-place
             from sqlalchemy.orm.attributes import flag_modified
             flag_modified(m204_file, "file_definition_json")

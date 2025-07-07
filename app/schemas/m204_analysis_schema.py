@@ -113,7 +113,6 @@ class M204FileResponseSchema(M204FileBaseSchema):
     m204_file_id: int
     project_id: int
     defined_in_input_source_id: Optional[int] = None
-    main_processing_loop_content: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

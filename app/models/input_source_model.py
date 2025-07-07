@@ -20,6 +20,8 @@ class InputSource(Base):
     error_message = Column(Text, nullable=True)
     jcl_detailed_description = Column(Text, nullable=True) 
     m204_detailed_description = Column(Text, nullable=True) # New field for M204 detailed description
+    main_processing_loop_content = Column(Text, nullable=True) # For M204 main loop
+
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

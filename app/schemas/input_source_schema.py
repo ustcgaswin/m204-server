@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import  Optional # Ensure List, Dict, Any are imported if used by commented out lines
+from typing import  Optional
 from datetime import datetime
 # from .m204_analysis_schema import M204ProcedureResponseSchema, M204FileResponseSchema, M204VariableResponseSchema, M204ProcedureCallResponseSchema 
 # from .generic_analysis_schema import DDStatementResponseSchema
@@ -13,7 +13,8 @@ class InputSourceBaseSchema(BaseModel):
     file_path_or_identifier: str 
     analysis_status: Optional[str] = Field(default="pending")
     jcl_detailed_description: Optional[str] = None 
-    m204_detailed_description: Optional[str] = None # New field
+    m204_detailed_description: Optional[str] = None
+    main_processing_loop_content: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -29,7 +30,8 @@ class InputSourceUpdateSchema(BaseModel):
     last_analyzed_timestamp: Optional[datetime] = None
     error_message: Optional[str] = None
     jcl_detailed_description: Optional[str] = None 
-    m204_detailed_description: Optional[str] = None # New field for updates
+    m204_detailed_description: Optional[str] = None
+    main_processing_loop_content: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -45,7 +47,8 @@ class InputSourceResponseSchema(BaseModel):
     last_analyzed_timestamp: Optional[datetime] = None
     error_message: Optional[str] = None
     jcl_detailed_description: Optional[str] = None 
-    m204_detailed_description: Optional[str] = None # New field
+    m204_detailed_description: Optional[str] = None
+    main_processing_loop_content: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -60,7 +63,8 @@ class InputSourceMinimalResponseSchema(BaseModel):
     file_path_or_identifier: str 
     analysis_status: Optional[str] = None
     jcl_detailed_description: Optional[str] = None 
-    m204_detailed_description: Optional[str] = None # New field
+    m204_detailed_description: Optional[str] = None
+    main_processing_loop_content: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

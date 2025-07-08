@@ -3,7 +3,7 @@ from typing import List, Tuple, Optional, Dict, Any
 
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
-from pydantic import BaseModel, Field # Added for LLM structured output
+from pydantic import BaseModel, Field  # Added for LLM structured output
 
 from app.models.input_source_model import InputSource
 from app.models.m204_file_model import M204File
@@ -14,7 +14,7 @@ from app.schemas.generic_analysis_schema import (
     GenericAnalysisResultDataSchema
 )
 from app.utils.logger import log
-from app.config.llm_config import llm_config # Import LLM configuration
+from app.config.llm_config import llm_config  # Import LLM configuration
 import json
 
 # LlamaIndex text splitter
@@ -25,8 +25,6 @@ class JCLIterativeDescriptionOutput(BaseModel):
     updated_description: str = Field(description="The refined and extended description of the JCL based on the current chunk and previous summary.")
     reasoning_for_update: Optional[str] = Field(description="Brief reasoning for how the current chunk updated the description.", default=None)
     key_elements_in_chunk: List[str] = Field(default_factory=list, description="List of key JCL statements or elements identified in the current chunk (e.g., JOB, EXEC PGM=, DD DSN=).")
-
-
 
 
 async def _extract_and_store_dd_statements_from_jcl(
@@ -115,13 +113,11 @@ async def _extract_and_store_dd_statements_from_jcl(
                     update_m204_file = True
                     log.debug(f"JCL_SERVICE_UPDATE: Marking M204File '{dd_name}' as DB file due to explicit DSN.")
                 elif not is_explicit_m204_db_dsn and existing_m204_file.is_db_file is None: 
-                    # Only mark as False if it was previously None. If it was True (e.g. from M204 source), JCL non-DB DSN shouldn't override it.
                     existing_m204_file.is_db_file = False 
                     update_m204_file = True
                     log.debug(f"JCL_SERVICE_UPDATE: Marking M204File '{dd_name}' as NOT a DB file (is_db_file=None previously).")
 
                 if dsn_val and existing_m204_file.target_vsam_dataset_name != dsn_val:
-                    # JCL DSN can provide a more concrete DSN than a logical name from M204 source
                     existing_m204_file.target_vsam_dataset_name = dsn_val
                     update_m204_file = True
                     log.debug(f"JCL_SERVICE_UPDATE: Updating target_vsam_dataset_name for M204File '{dd_name}' to '{dsn_val}'.")
@@ -216,13 +212,7 @@ async def _generate_jcl_description_iteratively_with_llm(file_content: str, orig
         return "LLM not configured. JCL description could not be generated."
 
     try:
-        # Using SentenceSplitter; chunk_size is in tokens. JCL lines are short, so 200 tokens might be many lines.
-        # For JCL, a line-based splitter might be more intuitive, but adhering to "LlamaIndex splitters".
-        # Adjust chunk_size and chunk_overlap as needed.
-        # A chunk_size of 200 tokens for JCL might be too small, leading to many calls.
-        # Consider a larger chunk_size like 500-1000 for JCL if context window allows.
-        # For this example, sticking to the requested "200".
-        text_splitter = SentenceSplitter(chunk_size=200, chunk_overlap=20) # 200 tokens, 20 tokens overlap
+        text_splitter = SentenceSplitter(chunk_size=200, chunk_overlap=20)
         jcl_chunks = text_splitter.split_text(file_content)
     except Exception as e_splitter:
         log.error(f"JCL_SERVICE_LLM: Error splitting JCL content for {original_filename}: {e_splitter}", exc_info=True)
@@ -233,7 +223,6 @@ async def _generate_jcl_description_iteratively_with_llm(file_content: str, orig
         return "JCL content was empty or too short to process for description."
 
     accumulated_description = f"Initial analysis of JCL file: {original_filename}."
-    # Assuming JCLIterativeDescriptionOutput is defined in the same file or imported correctly
     llm_structured_caller = llm_config._llm.as_structured_llm(JCLIterativeDescriptionOutput)
 
     log.info(f"JCL_SERVICE_LLM: Starting iterative description generation for {original_filename} with {len(jcl_chunks)} chunks.")
@@ -269,9 +258,8 @@ class JCLIterativeDescriptionOutput(BaseModel):
     reasoning_for_update: Optional[str]
     key_elements_in_chunk: List[str]
 """
-        completion_response = None # Initialize for broader scope in except block
+        completion_response = None
         try:
-            # Corrected handling of LLM structured output
             completion_response = await llm_structured_caller.acomplete(prompt)
             if completion_response and completion_response.text:
                 loaded_data = json.loads(completion_response.text)
@@ -287,48 +275,45 @@ class JCLIterativeDescriptionOutput(BaseModel):
             log.error(f"JCL_SERVICE_LLM: JSON parsing error for chunk {i+1} of {original_filename}: {e_json_iter}. Raw output: '{raw_output_text}'", exc_info=True)
             accumulated_description += f"\n\n[LLM Error processing chunk {i+1}: Could not parse LLM output. Error: {str(e_json_iter)}]"
         except Exception as e_llm_iter:
-            # This will catch other errors from the LLM call or Pydantic model validation if json.loads was successful
             log.error(f"JCL_SERVICE_LLM: Error during LLM call or processing for chunk {i+1} of {original_filename}: {e_llm_iter}", exc_info=True)
             accumulated_description += f"\n\n[LLM Error processing chunk {i+1}: Could not fully integrate this section. Error: {str(e_llm_iter)}]"
-            # Optionally, break or decide to continue with potentially degraded quality
-            # For now, we continue and append an error note.
 
     log.info(f"JCL_SERVICE_LLM: Finished iterative description generation for {original_filename}.")
     return accumulated_description
 
+
+async def generate_and_store_jcl_description(
+    db: Session, input_source: InputSource, file_content: str
+) -> None:
+    """
+    Generates a detailed JCL description using the LLM and stores it in the InputSource.
+    """
+    try:
+        description = await _generate_jcl_description_iteratively_with_llm(
+            file_content,
+            input_source.original_filename or f"InputSourceID_{input_source.input_source_id}"
+        )
+        input_source.jcl_detailed_description = description
+        db.add(input_source)
+        log.info(f"JCL_SERVICE: Stored JCL description for InputSource ID {input_source.input_source_id} (length: {len(description)}).")
+    except Exception as e:
+        log.error(f"JCL_SERVICE: Failed to generate/store JCL description for InputSource ID {input_source.input_source_id}: {e}", exc_info=True)
+
+
 async def process_jcl_analysis(
     db: Session, input_source: InputSource, file_content: str, rag_service: Optional[Any]
-) -> Tuple[GenericAnalysisResultDataSchema, List[M204File]]:
+) -> Tuple[GenericAnalysisResultDataSchema, List[int]]:
     """
     Main function to process JCL file content.
     This function will be called by the main analysis_service orchestrator.
+    Returns:
+        - GenericAnalysisResultDataSchema (analysis summary)
+        - List of M204File IDs (not ORM objects, to avoid DetachedInstanceError)
     """
     log.info(f"JCL_SERVICE: Starting JCL analysis for file: {input_source.original_filename} (ID: {input_source.input_source_id})")
     
-    # The rag_service parameter is accepted but not currently used in this function.
-    # It is included for future use and to match the calling signature from the orchestrator.
-    
     extracted_dd_statements, m204_files_from_jcl = await _extract_and_store_dd_statements_from_jcl(db, input_source, file_content)
-    
-    # Generate and store detailed JCL description using iterative LLM process
-    jcl_description_final = "Description generation not attempted or file not identified as JCL."
-    if input_source.source_type and "jcl" in input_source.source_type.lower():
-        log.info(f"JCL_SERVICE: Initiating detailed JCL description generation for {input_source.original_filename}")
-        jcl_description_final = await _generate_jcl_description_iteratively_with_llm(
-            file_content, 
-            input_source.original_filename or f"InputSourceID_{input_source.input_source_id}"
-        )
-        try:
-            input_source.jcl_detailed_description = jcl_description_final
-            db.add(input_source) 
-            log.info(f"JCL_SERVICE: Updated InputSource ID {input_source.input_source_id} with detailed JCL description (length: {len(jcl_description_final)}).")
-        except Exception as e_save_desc:
-            log.error(f"JCL_SERVICE: Failed to assign JCL description to InputSource ID {input_source.input_source_id} in session: {e_save_desc}", exc_info=True)
-            # If saving fails, the generated description is lost for this run unless logged/handled otherwise.
-            # The input_source object in the session might still hold it if the error is during flush/commit by caller.
 
-    # The main orchestrator (analysis_service.perform_source_file_analysis) will handle the commit.
-    
     refreshed_dds = []
     for dd in extracted_dd_statements:
         try:
@@ -353,28 +338,16 @@ async def process_jcl_analysis(
 
     dd_responses = [DDStatementResponseSchema.model_validate(dd) for dd in refreshed_dds]
     
-    description_status_msg = "Not applicable for this file type."
-    if input_source.source_type and "jcl" in input_source.source_type.lower():
-        if "LLM not configured" in jcl_description_final:
-            description_status_msg = "LLM not configured."
-        elif "Error generating JCL description" in jcl_description_final or "Error splitting JCL content" in jcl_description_final:
-            description_status_msg = "Failed (LLM/Splitter Error)."
-        elif "empty or too short to process" in jcl_description_final:
-            description_status_msg = "Content too short."
-        elif jcl_description_final and len(jcl_description_final) > 50: # Arbitrary length to indicate some success
-            description_status_msg = "Generated."
-        else:
-            description_status_msg = "Attempted, but result seems minimal."
-
-
     summary_msg = (f"JCL analysis processed. Found {len(dd_responses)} DD statements. "
-                   f"Identified/updated {len(refreshed_m204_files)} M204File entries from this JCL. "
-                   f"Detailed JCL description status: {description_status_msg}")
-    
+                   f"Identified/updated {len(refreshed_m204_files)} M204File entries from this JCL.")
+
     schema_result = GenericAnalysisResultDataSchema(
         dd_statements_found=dd_responses, 
         summary=summary_msg
     )
     
+    # Return only the IDs of the M204File objects to avoid DetachedInstanceError
+    m204_file_ids = [mfile.m204_file_id for mfile in refreshed_m204_files]
+
     log.info(f"JCL_SERVICE: Completed JCL analysis for file: {input_source.original_filename}. Summary: {summary_msg}")
-    return schema_result, refreshed_m204_files
+    return schema_result, m204_file_ids

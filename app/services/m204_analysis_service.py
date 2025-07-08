@@ -1289,255 +1289,535 @@ async def _resolve_procedure_calls(db: Session, project_id: int, calls_in_file: 
             db.add(call)
 
 # --- IMAGE Statement Extraction ---
-async def _parse_image_definition(image_name_context: str, image_content: str) -> Dict[str, Any]:
+# async def _parse_image_definition(image_name_context: str, image_content: str) -> Dict[str, Any]:
+#     """
+#     Parse IMAGE definition content to extract field information for COBOL FDs,
+#     including LLM-suggested COBOL field names (LLM calls made in parallel for fields).
+#     """
+#     parsed_field_details = [] # Stores details of each parsed field before LLM processing
+#     lines = image_content.strip().split('\n')
+#     for line_idx, line in enumerate(lines):
+#         line = line.strip()
+#         if not line or line.upper().startswith('END IMAGE'):
+#             continue
+            
+#         field_match = re.match(
+#             r"([A-Z0-9_.#@$-]+)\s+IS\s+([A-Z]+)(?:\s+LEN\s+(\d+))?(?:\s+DIGITS\s+(\d+))?(?:\s+DP\s+(\d+))?",
+#             line,
+#             re.IGNORECASE
+#         )
+        
+#         if field_match:
+#             m204_field_name_original = field_match.group(1)
+#             m204_type = field_match.group(2).upper()
+#             length = int(field_match.group(3)) if field_match.group(3) else None
+#             digits = int(field_match.group(4)) if field_match.group(4) else None
+#             decimal_places = int(field_match.group(5)) if field_match.group(5) else None
+            
+#             parsed_field_details.append({
+#                 "m204_field_name_original": m204_field_name_original,
+#                 "m204_type": m204_type,
+#                 "length": length,
+#                 "digits": digits,
+#                 "decimal_places": decimal_places,
+#                 "original_index": len(parsed_field_details) # To map LLM results back
+#             })
+
+#     llm_tasks = []
+#     llm_results_map: Dict[int, Any] = {} # Store LLM results by original_index
+
+#     if llm_config._llm and parsed_field_details:
+#         field_namer_llm = llm_config._llm.as_structured_llm(ImageFieldToCobolOutput)
+#         for field_data in parsed_field_details:
+#             field_prompt_fstr = f"""
+# You are an M204 to COBOL migration expert. Suggest a COBOL-compliant field name for the given M204 IMAGE field.
+# M204 IMAGE Name: {image_name_context}
+# M204 Field Name: {field_data['m204_field_name_original']}
+# M204 Field Type (from 'IS' clause): {field_data['m204_type']}
+# M204 Field Length: {field_data['length'] or 'N/A'}
+# M204 Field Digits: {field_data['digits'] or 'N/A'}
+# M204 Field Decimal Places: {field_data['decimal_places'] or 'N/A'}
+
+# Respond with a JSON object structured according to the ImageFieldToCobolOutput model.
+# The COBOL field name should be max 30 chars, alphanumeric, use hyphens, and avoid M204-specific symbols like '.'.
+# It should be suitable for use in a COBOL record description.
+# Consider the M204 field type and attributes for a more meaningful COBOL name.
+# Ensure the output "m204_image_name" is "{image_name_context}" and "m204_field_name" is "{field_data['m204_field_name_original']}".
+# """
+#             # Create a coroutine for each LLM call
+#             llm_tasks.append(
+#                 field_namer_llm.acomplete(prompt=field_prompt_fstr)
+#             )
+        
+#         if llm_tasks:
+#             log.info(f"M204_SERVICE_IMG_FIELD_LLM: Starting {len(llm_tasks)} parallel LLM calls for fields in IMAGE '{image_name_context}'.")
+#             # Gather results from all LLM tasks
+#             llm_raw_results = await asyncio.gather(*llm_tasks, return_exceptions=True)
+#             log.info(f"M204_SERVICE_IMG_FIELD_LLM: Finished {len(llm_tasks)} parallel LLM calls for fields in IMAGE '{image_name_context}'.")
+
+#             for idx, result_or_exc in enumerate(llm_raw_results):
+#                 original_field_data = parsed_field_details[idx] # Match by index
+#                 m204_field_name_original = original_field_data["m204_field_name_original"]
+#                 suggested_cobol_name_for_field = m204_field_name_original.upper().replace('.', '-') # Fallback
+#                 reasoning = None
+
+#                 if isinstance(result_or_exc, Exception):
+#                     log.error(f"M204_SERVICE_IMG_FIELD_LLM: Error suggesting COBOL name for {image_name_context}.{m204_field_name_original} (parallel task): {result_or_exc}. Using fallback.", exc_info=True)
+#                 elif result_or_exc: # It's a completion response
+#                     try:
+#                         loaded_field_data = json.loads(result_or_exc.text)
+#                         field_output_model = ImageFieldToCobolOutput(**loaded_field_data)
+#                         if field_output_model.m204_field_name == m204_field_name_original and \
+#                            field_output_model.m204_image_name == image_name_context:
+#                             suggested_cobol_name_for_field = field_output_model.suggested_cobol_field_name
+#                             reasoning = field_output_model.reasoning
+#                             log.debug(f"M204_SERVICE_IMG_FIELD_LLM: Suggested COBOL name for {image_name_context}.{m204_field_name_original} is '{suggested_cobol_name_for_field}'. Reason: {reasoning or 'N/A'}")
+#                         else:
+#                             log.warning(f"M204_SERVICE_IMG_FIELD_LLM: Mismatched IMAGE/field name from LLM for {image_name_context}.{m204_field_name_original}. LLM response: {result_or_exc.text}. Using fallback.")
+#                     except Exception as e_field_llm_parse:
+#                         log.error(f"M204_SERVICE_IMG_FIELD_LLM: Error parsing LLM response for {image_name_context}.{m204_field_name_original}: {e_field_llm_parse}. Raw: '{result_or_exc.text}'. Using fallback.", exc_info=True)
+                
+#                 llm_results_map[original_field_data["original_index"]] = {
+#                     "suggested_cobol_field_name": suggested_cobol_name_for_field,
+#                     "reasoning": reasoning
+#                 }
+    
+#     final_fields_output = []
+#     for field_data in parsed_field_details:
+#         m204_field_name_original = field_data["m204_field_name_original"]
+#         m204_type = field_data["m204_type"]
+#         length = field_data["length"]
+#         digits = field_data["digits"]
+#         decimal_places = field_data["decimal_places"]
+#         original_idx = field_data["original_index"]
+
+#         llm_suggestion = llm_results_map.get(original_idx)
+#         if llm_suggestion:
+#             suggested_cobol_name_for_field = llm_suggestion["suggested_cobol_field_name"]
+#             # We don't store the reasoning from ImageFieldToCobolOutput in the final field_info directly,
+#             # but it's logged above. The reasoning in "cobol_layout_suggestions" is different.
+#         else: # LLM not configured, or this field somehow missed LLM processing (should not happen if LLM is on)
+#             suggested_cobol_name_for_field = m204_field_name_original.upper().replace('.', '-')
+#             if not llm_config._llm and not llm_tasks: # Only log once if LLM is off
+#                  if original_idx == 0: # Log only for the first field if LLM is off
+#                     log.warning(f"M204_SERVICE_IMG_FIELD_LLM: LLM not configured. Using basic fallback for COBOL field names in IMAGE '{image_name_context}'.")
+
+
+#         data_type_mapping = {
+#             'STRING': {'cobol_type': 'CHARACTER', 'typical_pic': 'PIC X'},
+#             'PACKED': {'cobol_type': 'PACKED_DECIMAL', 'typical_pic': 'PIC 9 COMP-3'},
+#             'BINARY': {'cobol_type': 'BINARY', 'typical_pic': 'PIC 9 COMP'},
+#             'FLOAT': {'cobol_type': 'FLOATING_POINT', 'typical_pic': 'COMP-1'}, 
+#             'DOUBLE': {'cobol_type': 'FLOATING_POINT', 'typical_pic': 'COMP-2'}  
+#         }
+        
+#         type_info = data_type_mapping.get(m204_type, {'cobol_type': m204_type, 'typical_pic': 'PIC X'}) 
+        
+#         suggested_pic = None
+#         actual_field_byte_length = length 
+
+#         if m204_type == 'STRING' and length:
+#             suggested_pic = f"PIC X({length})"
+#         elif m204_type == 'PACKED' and digits:
+#             num_digits = digits
+#             if decimal_places:
+#                 suggested_pic = f"PIC S9({num_digits-decimal_places})V9({decimal_places}) COMP-3"
+#             else:
+#                 suggested_pic = f"PIC S9({num_digits}) COMP-3"
+#             actual_field_byte_length = (digits // 2) + 1
+#         elif m204_type == 'BINARY' and length: 
+#             if length == 2: 
+#                 suggested_pic = "PIC S9(4) COMP"
+#             elif length == 4: 
+#                 suggested_pic = "PIC S9(9) COMP"
+#             elif length == 8: 
+#                 suggested_pic = "PIC S9(18) COMP"
+#             else: 
+#                 suggested_pic = f"PIC S9({length * 2 -1}) COMP" # Approximation
+#             actual_field_byte_length = length
+#         elif m204_type == 'FLOAT' and (length == 4 or length is None): 
+#             suggested_pic = "COMP-1"
+#             actual_field_byte_length = 4
+#         elif m204_type == 'DOUBLE' and (length == 8 or length is None): 
+#             suggested_pic = "COMP-2"
+#             actual_field_byte_length = 8
+        
+#         field_info = {
+#             "field_name": m204_field_name_original,
+#             "suggested_cobol_field_name": suggested_cobol_name_for_field,
+#             "data_type": type_info['cobol_type'], 
+#             "m204_type": m204_type,
+#             "length": length, 
+#             "digits": digits, 
+#             "decimal_places": decimal_places, 
+#             "position": original_idx + 1, # 1-based position in the IMAGE statement
+#             "cobol_layout_suggestions": { 
+#                 "cobol_picture_clause": suggested_pic,
+#                 "field_byte_length": actual_field_byte_length, 
+#                 "reasoning": f"Initial COBOL layout suggestion based on M204 type {m204_type}"
+#             }
+#         }
+#         final_fields_output.append(field_info)
+            
+#     return {
+#         "fields": final_fields_output,
+#         "total_fields": len(final_fields_output)
+#     }
+
+
+async def _parse_image_definition(
+    image_name_context: str,
+    image_content: str
+) -> Dict[str, Any]:
     """
     Parse IMAGE definition content to extract field information for COBOL FDs,
-    including LLM-suggested COBOL field names (LLM calls made in parallel for fields).
+    including LLM-suggested COBOL field names (LLM calls made in parallel,
+    bounded by a semaphore).
     """
-    parsed_field_details = [] # Stores details of each parsed field before LLM processing
+    import re
+    import asyncio
+    import json
+
+    # Semaphore to bound concurrent LLM calls per image
+    llm_semaphore = asyncio.Semaphore(10)
+
+    # 1) Extract raw field lines
+    parsed_field_details = []
     lines = image_content.strip().split('\n')
-    for line_idx, line in enumerate(lines):
+    for line in lines:
         line = line.strip()
         if not line or line.upper().startswith('END IMAGE'):
             continue
-            
+
         field_match = re.match(
-            r"([A-Z0-9_.#@$-]+)\s+IS\s+([A-Z]+)(?:\s+LEN\s+(\d+))?(?:\s+DIGITS\s+(\d+))?(?:\s+DP\s+(\d+))?",
+            r"([A-Z0-9_.#@$-]+)\s+IS\s+([A-Z]+)"
+            r"(?:\s+LEN\s+(\d+))?"
+            r"(?:\s+DIGITS\s+(\d+))?"
+            r"(?:\s+DP\s+(\d+))?",
             line,
             re.IGNORECASE
         )
-        
-        if field_match:
-            m204_field_name_original = field_match.group(1)
-            m204_type = field_match.group(2).upper()
-            length = int(field_match.group(3)) if field_match.group(3) else None
-            digits = int(field_match.group(4)) if field_match.group(4) else None
-            decimal_places = int(field_match.group(5)) if field_match.group(5) else None
-            
-            parsed_field_details.append({
-                "m204_field_name_original": m204_field_name_original,
-                "m204_type": m204_type,
-                "length": length,
-                "digits": digits,
-                "decimal_places": decimal_places,
-                "original_index": len(parsed_field_details) # To map LLM results back
-            })
+        if not field_match:
+            continue
 
-    llm_tasks = []
-    llm_results_map: Dict[int, Any] = {} # Store LLM results by original_index
+        parsed_field_details.append({
+            "m204_field_name_original": field_match.group(1),
+            "m204_type":               field_match.group(2).upper(),
+            "length":                  int(field_match.group(3))
+                                        if field_match.group(3) else None,
+            "digits":                  int(field_match.group(4))
+                                        if field_match.group(4) else None,
+            "decimal_places":          int(field_match.group(5))
+                                        if field_match.group(5) else None,
+            "original_index":          len(parsed_field_details)
+        })
 
+    # 2) Fan-out LLM calls in parallel, bounded by semaphore
+    llm_results_map: Dict[int, Any] = {}
     if llm_config._llm and parsed_field_details:
-        field_namer_llm = llm_config._llm.as_structured_llm(ImageFieldToCobolOutput)
-        for field_data in parsed_field_details:
-            field_prompt_fstr = f"""
-You are an M204 to COBOL migration expert. Suggest a COBOL-compliant field name for the given M204 IMAGE field.
-M204 IMAGE Name: {image_name_context}
-M204 Field Name: {field_data['m204_field_name_original']}
-M204 Field Type (from 'IS' clause): {field_data['m204_type']}
-M204 Field Length: {field_data['length'] or 'N/A'}
-M204 Field Digits: {field_data['digits'] or 'N/A'}
-M204 Field Decimal Places: {field_data['decimal_places'] or 'N/A'}
+        field_namer_llm = (
+            llm_config._llm
+            .as_structured_llm(ImageFieldToCobolOutput)
+        )
 
-Respond with a JSON object structured according to the ImageFieldToCobolOutput model.
-The COBOL field name should be max 30 chars, alphanumeric, use hyphens, and avoid M204-specific symbols like '.'.
-It should be suitable for use in a COBOL record description.
-Consider the M204 field type and attributes for a more meaningful COBOL name.
-Ensure the output "m204_image_name" is "{image_name_context}" and "m204_field_name" is "{field_data['m204_field_name_original']}".
+        async def call_llm(field_data):
+            prompt = f"""
+You are an M204→COBOL migration expert. Suggest a COBOL-compliant
+field name for this M204 field.
+M204 IMAGE: {image_name_context}
+M204 Field: {field_data['m204_field_name_original']}
+Type: {field_data['m204_type']}
+Length: {field_data['length'] or 'N/A'}
+Digits: {field_data['digits'] or 'N/A'}
+DP: {field_data['decimal_places'] or 'N/A'}
+
+Respond with JSON per ImageFieldToCobolOutput.
 """
-            # Create a coroutine for each LLM call
-            llm_tasks.append(
-                field_namer_llm.acomplete(prompt=field_prompt_fstr)
-            )
-        
-        if llm_tasks:
-            log.info(f"M204_SERVICE_IMG_FIELD_LLM: Starting {len(llm_tasks)} parallel LLM calls for fields in IMAGE '{image_name_context}'.")
-            # Gather results from all LLM tasks
-            llm_raw_results = await asyncio.gather(*llm_tasks, return_exceptions=True)
-            log.info(f"M204_SERVICE_IMG_FIELD_LLM: Finished {len(llm_tasks)} parallel LLM calls for fields in IMAGE '{image_name_context}'.")
+            async with llm_semaphore:
+                return await field_namer_llm.acomplete(prompt=prompt)
 
-            for idx, result_or_exc in enumerate(llm_raw_results):
-                original_field_data = parsed_field_details[idx] # Match by index
-                m204_field_name_original = original_field_data["m204_field_name_original"]
-                suggested_cobol_name_for_field = m204_field_name_original.upper().replace('.', '-') # Fallback
-                reasoning = None
+        tasks = [call_llm(fd) for fd in parsed_field_details]
+        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                if isinstance(result_or_exc, Exception):
-                    log.error(f"M204_SERVICE_IMG_FIELD_LLM: Error suggesting COBOL name for {image_name_context}.{m204_field_name_original} (parallel task): {result_or_exc}. Using fallback.", exc_info=True)
-                elif result_or_exc: # It's a completion response
-                    try:
-                        loaded_field_data = json.loads(result_or_exc.text)
-                        field_output_model = ImageFieldToCobolOutput(**loaded_field_data)
-                        if field_output_model.m204_field_name == m204_field_name_original and \
-                           field_output_model.m204_image_name == image_name_context:
-                            suggested_cobol_name_for_field = field_output_model.suggested_cobol_field_name
-                            reasoning = field_output_model.reasoning
-                            log.debug(f"M204_SERVICE_IMG_FIELD_LLM: Suggested COBOL name for {image_name_context}.{m204_field_name_original} is '{suggested_cobol_name_for_field}'. Reason: {reasoning or 'N/A'}")
-                        else:
-                            log.warning(f"M204_SERVICE_IMG_FIELD_LLM: Mismatched IMAGE/field name from LLM for {image_name_context}.{m204_field_name_original}. LLM response: {result_or_exc.text}. Using fallback.")
-                    except Exception as e_field_llm_parse:
-                        log.error(f"M204_SERVICE_IMG_FIELD_LLM: Error parsing LLM response for {image_name_context}.{m204_field_name_original}: {e_field_llm_parse}. Raw: '{result_or_exc.text}'. Using fallback.", exc_info=True)
-                
-                llm_results_map[original_field_data["original_index"]] = {
-                    "suggested_cobol_field_name": suggested_cobol_name_for_field,
-                    "reasoning": reasoning
-                }
-    
+        for idx, result in enumerate(raw_results):
+            fd = parsed_field_details[idx]
+            orig = fd["m204_field_name_original"]
+            fallback = orig.upper().replace('.', '-')
+            suggested = fallback
+            reasoning = None
+
+            if isinstance(result, Exception):
+                log.error(
+                    f"LLM error for {image_name_context}.{orig}",
+                    exc_info=True
+                )
+            else:
+                try:
+                    data = json.loads(result.text)
+                    out = ImageFieldToCobolOutput(**data)
+                    if (out.m204_image_name == image_name_context
+                            and out.m204_field_name == orig):
+                        suggested = out.suggested_cobol_field_name
+                        reasoning = out.reasoning
+                    else:
+                        log.warning(
+                            f"LLM returned mismatched names for "
+                            f"{image_name_context}.{orig}; using fallback"
+                        )
+                except Exception:
+                    log.error(
+                        f"Error parsing LLM JSON for {image_name_context}.{orig}",
+                        exc_info=True
+                    )
+
+            llm_results_map[fd["original_index"]] = {
+                "suggested": suggested,
+                "reasoning": reasoning
+            }
+
+    # 3) Build final fields output
     final_fields_output = []
-    for field_data in parsed_field_details:
-        m204_field_name_original = field_data["m204_field_name_original"]
-        m204_type = field_data["m204_type"]
-        length = field_data["length"]
-        digits = field_data["digits"]
-        decimal_places = field_data["decimal_places"]
-        original_idx = field_data["original_index"]
+    for fd in parsed_field_details:
+        idx = fd["original_index"]
+        m204_type = fd["m204_type"]
+        length = fd["length"]
+        digits = fd["digits"]
+        decp = fd["decimal_places"]
 
-        llm_suggestion = llm_results_map.get(original_idx)
-        if llm_suggestion:
-            suggested_cobol_name_for_field = llm_suggestion["suggested_cobol_field_name"]
-            # We don't store the reasoning from ImageFieldToCobolOutput in the final field_info directly,
-            # but it's logged above. The reasoning in "cobol_layout_suggestions" is different.
-        else: # LLM not configured, or this field somehow missed LLM processing (should not happen if LLM is on)
-            suggested_cobol_name_for_field = m204_field_name_original.upper().replace('.', '-')
-            if not llm_config._llm and not llm_tasks: # Only log once if LLM is off
-                 if original_idx == 0: # Log only for the first field if LLM is off
-                    log.warning(f"M204_SERVICE_IMG_FIELD_LLM: LLM not configured. Using basic fallback for COBOL field names in IMAGE '{image_name_context}'.")
+        # Data type mapping
+        type_map = {
+            'STRING': {'cobol_type': 'CHARACTER',      'pic': 'PIC X'},
+            'PACKED': {'cobol_type': 'PACKED_DECIMAL', 'pic': 'PIC 9 COMP-3'},
+            'BINARY': {'cobol_type': 'BINARY',         'pic': 'PIC 9 COMP'},
+            'FLOAT':  {'cobol_type': 'FLOATING_POINT', 'pic': 'COMP-1'},
+            'DOUBLE': {'cobol_type': 'FLOATING_POINT', 'pic': 'COMP-2'},
+        }.get(m204_type, {'cobol_type': m204_type, 'pic': 'PIC X'})
 
-
-        data_type_mapping = {
-            'STRING': {'cobol_type': 'CHARACTER', 'typical_pic': 'PIC X'},
-            'PACKED': {'cobol_type': 'PACKED_DECIMAL', 'typical_pic': 'PIC 9 COMP-3'},
-            'BINARY': {'cobol_type': 'BINARY', 'typical_pic': 'PIC 9 COMP'},
-            'FLOAT': {'cobol_type': 'FLOATING_POINT', 'typical_pic': 'COMP-1'}, 
-            'DOUBLE': {'cobol_type': 'FLOATING_POINT', 'typical_pic': 'COMP-2'}  
-        }
-        
-        type_info = data_type_mapping.get(m204_type, {'cobol_type': m204_type, 'typical_pic': 'PIC X'}) 
-        
+        # PIC and byte-length logic
         suggested_pic = None
-        actual_field_byte_length = length 
-
+        byte_len = length
         if m204_type == 'STRING' and length:
             suggested_pic = f"PIC X({length})"
         elif m204_type == 'PACKED' and digits:
-            num_digits = digits
-            if decimal_places:
-                suggested_pic = f"PIC S9({num_digits-decimal_places})V9({decimal_places}) COMP-3"
+            if decp:
+                suggested_pic = (
+                    f"PIC S9({digits-decp})V9({decp}) COMP-3"
+                )
             else:
-                suggested_pic = f"PIC S9({num_digits}) COMP-3"
-            actual_field_byte_length = (digits // 2) + 1
-        elif m204_type == 'BINARY' and length: 
-            if length == 2: 
+                suggested_pic = f"PIC S9({digits}) COMP-3"
+            byte_len = (digits // 2) + 1
+        elif m204_type == 'BINARY' and length:
+            if length == 2:
                 suggested_pic = "PIC S9(4) COMP"
-            elif length == 4: 
+            elif length == 4:
                 suggested_pic = "PIC S9(9) COMP"
-            elif length == 8: 
+            elif length == 8:
                 suggested_pic = "PIC S9(18) COMP"
-            else: 
-                suggested_pic = f"PIC S9({length * 2 -1}) COMP" # Approximation
-            actual_field_byte_length = length
-        elif m204_type == 'FLOAT' and (length == 4 or length is None): 
+            else:
+                suggested_pic = f"PIC S9({length*2-1}) COMP"
+        elif m204_type == 'FLOAT':
             suggested_pic = "COMP-1"
-            actual_field_byte_length = 4
-        elif m204_type == 'DOUBLE' and (length == 8 or length is None): 
+            byte_len = 4
+        elif m204_type == 'DOUBLE':
             suggested_pic = "COMP-2"
-            actual_field_byte_length = 8
-        
-        field_info = {
-            "field_name": m204_field_name_original,
-            "suggested_cobol_field_name": suggested_cobol_name_for_field,
-            "data_type": type_info['cobol_type'], 
+            byte_len = 8
+
+        llm_sugg = llm_results_map.get(idx, {})
+        final_fields_output.append({
+            "field_name": fd["m204_field_name_original"],
+            "suggested_cobol_field_name": llm_sugg.get("suggested"),
+            "data_type": type_map['cobol_type'],
             "m204_type": m204_type,
-            "length": length, 
-            "digits": digits, 
-            "decimal_places": decimal_places, 
-            "position": original_idx + 1, # 1-based position in the IMAGE statement
-            "cobol_layout_suggestions": { 
+            "length": length,
+            "digits": digits,
+            "decimal_places": decp,
+            "position": idx + 1,
+            "cobol_layout_suggestions": {
                 "cobol_picture_clause": suggested_pic,
-                "field_byte_length": actual_field_byte_length, 
-                "reasoning": f"Initial COBOL layout suggestion based on M204 type {m204_type}"
+                "field_byte_length": byte_len,
+                "reasoning": (
+                    llm_sugg.get("reasoning")
+                    or f"Based on M204 type {m204_type}"
+                )
             }
-        }
-        final_fields_output.append(field_info)
+        })
+
+    return {"fields": final_fields_output,
+            "total_fields": len(final_fields_output)}
+
+
+
+# async def _extract_and_store_m204_image_statements(
+#     db: Session, input_source: InputSource, file_content: str
+# ) -> List[M204ImageDefinition]:
+#     """
+#     REFACTORED: Extracts IMAGE statements from M204 source and stores them as
+#     independent M204ImageDefinition records. It no longer tries to link them
+#     to M204File records directly.
+#     """
+#     log.info(f"M204_SERVICE: Extracting IMAGE statements as definitions for file ID: {input_source.input_source_id} ({input_source.original_filename})")
+#     m204_images_created = []
+#     lines = file_content.splitlines()
+#     image_start_pattern = re.compile(r"^\s*IMAGE\s+([A-Z0-9_.#@$-]+)", re.IGNORECASE)
+    
+#     i = 0
+#     while i < len(lines):
+#         line_content_for_match = lines[i] 
+#         current_line_num_for_start = i + 1
+        
+#         image_match = image_start_pattern.match(line_content_for_match.strip())
+#         if image_match:
+#             image_name_from_statement = image_match.group(1)
+#             log.debug(f"M204_SERVICE_IMG: Found IMAGE statement start: '{image_name_from_statement}' at line {current_line_num_for_start} in file '{input_source.original_filename}'.")
             
-    return {
-        "fields": final_fields_output,
-        "total_fields": len(final_fields_output)
-    }
+#             temp_image_content_lines = []
+#             found_end_image = False
+#             image_content_end_line_idx = i
+            
+#             for j in range(i + 1, len(lines)):
+#                 if lines[j].strip().upper() == 'END IMAGE':
+#                     image_content_end_line_idx = j
+#                     found_end_image = True
+#                     break
+#                 temp_image_content_lines.append(lines[j])
+            
+#             if not found_end_image:
+#                 log.warning(f"M204_SERVICE_IMG: IMAGE '{image_name_from_statement}' at line {current_line_num_for_start} did not have a corresponding 'END IMAGE'. Skipping.")
+#                 i += 1
+#                 continue
+
+#             image_block_content_for_parse = "\n".join(temp_image_content_lines)
+#             parsed_image_fields_data = await _parse_image_definition(image_name_from_statement, image_block_content_for_parse)
+            
+#             if parsed_image_fields_data and parsed_image_fields_data.get("fields"):
+#                 existing_image_def = db.query(M204ImageDefinition).filter(
+#                     M204ImageDefinition.project_id == input_source.project_id,
+#                     M204ImageDefinition.image_name == image_name_from_statement,
+#                     M204ImageDefinition.input_source_id == input_source.input_source_id
+#                 ).first()
+
+#                 if not existing_image_def:
+#                     new_image_def = M204ImageDefinition(
+#                         project_id=input_source.project_id,
+#                         input_source_id=input_source.input_source_id,
+#                         image_name=image_name_from_statement,
+#                         start_line_number=current_line_num_for_start,
+#                         end_line_number=image_content_end_line_idx + 1,
+#                         fields_json=parsed_image_fields_data
+#                     )
+#                     db.add(new_image_def)
+#                     m204_images_created.append(new_image_def)
+#                     log.info(f"M204_SERVICE_IMG: Created new M204ImageDefinition for '{image_name_from_statement}'.")
+#                 else:
+#                     existing_image_def.fields_json = parsed_image_fields_data
+#                     db.add(existing_image_def)
+#                     m204_images_created.append(existing_image_def)
+#                     log.info(f"M204_SERVICE_IMG: Updated existing M204ImageDefinition for '{image_name_from_statement}'.")
+            
+#             i = image_content_end_line_idx + 1
+#             continue
+        
+#         i += 1
+#     log.info(f"M204_SERVICE: Finished extracting {len(m204_images_created)} IMAGE definitions for file ID: {input_source.input_source_id}.")
+#     return m204_images_created
+
 
 async def _extract_and_store_m204_image_statements(
-    db: Session, input_source: InputSource, file_content: str
+    db: Session,
+    input_source: InputSource,
+    file_content: str
 ) -> List[M204ImageDefinition]:
     """
-    REFACTORED: Extracts IMAGE statements from M204 source and stores them as
-    independent M204ImageDefinition records. It no longer tries to link them
-    to M204File records directly.
+    Extract all IMAGE…END IMAGE blocks, parse them in parallel,
+    and upsert M204ImageDefinition records.
     """
-    log.info(f"M204_SERVICE: Extracting IMAGE statements as definitions for file ID: {input_source.input_source_id} ({input_source.original_filename})")
-    m204_images_created = []
+    log.info(
+        f"M204_SERVICE: Bulk extracting IMAGE blocks for file "
+        f"ID={input_source.input_source_id}"
+    )
     lines = file_content.splitlines()
-    image_start_pattern = re.compile(r"^\s*IMAGE\s+([A-Z0-9_.#@$-]+)", re.IGNORECASE)
-    
+    start_re = re.compile(r"^\s*IMAGE\s+([A-Z0-9_.#@$-]+)", re.IGNORECASE)
+
+    # 1) Collect IMAGE blocks
+    blocks: List[Tuple[str,int,int,str]] = []
     i = 0
     while i < len(lines):
-        line_content_for_match = lines[i] 
-        current_line_num_for_start = i + 1
-        
-        image_match = image_start_pattern.match(line_content_for_match.strip())
-        if image_match:
-            image_name_from_statement = image_match.group(1)
-            log.debug(f"M204_SERVICE_IMG: Found IMAGE statement start: '{image_name_from_statement}' at line {current_line_num_for_start} in file '{input_source.original_filename}'.")
-            
-            temp_image_content_lines = []
-            found_end_image = False
-            image_content_end_line_idx = i
-            
-            for j in range(i + 1, len(lines)):
-                if lines[j].strip().upper() == 'END IMAGE':
-                    image_content_end_line_idx = j
-                    found_end_image = True
-                    break
-                temp_image_content_lines.append(lines[j])
-            
-            if not found_end_image:
-                log.warning(f"M204_SERVICE_IMG: IMAGE '{image_name_from_statement}' at line {current_line_num_for_start} did not have a corresponding 'END IMAGE'. Skipping.")
-                i += 1
-                continue
-
-            image_block_content_for_parse = "\n".join(temp_image_content_lines)
-            parsed_image_fields_data = await _parse_image_definition(image_name_from_statement, image_block_content_for_parse)
-            
-            if parsed_image_fields_data and parsed_image_fields_data.get("fields"):
-                existing_image_def = db.query(M204ImageDefinition).filter(
-                    M204ImageDefinition.project_id == input_source.project_id,
-                    M204ImageDefinition.image_name == image_name_from_statement,
-                    M204ImageDefinition.input_source_id == input_source.input_source_id
-                ).first()
-
-                if not existing_image_def:
-                    new_image_def = M204ImageDefinition(
-                        project_id=input_source.project_id,
-                        input_source_id=input_source.input_source_id,
-                        image_name=image_name_from_statement,
-                        start_line_number=current_line_num_for_start,
-                        end_line_number=image_content_end_line_idx + 1,
-                        fields_json=parsed_image_fields_data
-                    )
-                    db.add(new_image_def)
-                    m204_images_created.append(new_image_def)
-                    log.info(f"M204_SERVICE_IMG: Created new M204ImageDefinition for '{image_name_from_statement}'.")
-                else:
-                    existing_image_def.fields_json = parsed_image_fields_data
-                    db.add(existing_image_def)
-                    m204_images_created.append(existing_image_def)
-                    log.info(f"M204_SERVICE_IMG: Updated existing M204ImageDefinition for '{image_name_from_statement}'.")
-            
-            i = image_content_end_line_idx + 1
+        m = start_re.match(lines[i].strip())
+        if not m:
+            i += 1
             continue
-        
-        i += 1
-    log.info(f"M204_SERVICE: Finished extracting {len(m204_images_created)} IMAGE definitions for file ID: {input_source.input_source_id}.")
-    return m204_images_created
 
+        name = m.group(1)
+        start_ln = i + 1
+        body: List[str] = []
+        end_ln = None
+
+        for j in range(i + 1, len(lines)):
+            if lines[j].strip().upper() == "END IMAGE":
+                end_ln = j + 1
+                break
+            body.append(lines[j])
+
+        if end_ln is None:
+            log.warning(
+                f"M204_SERVICE_IMG: IMAGE '{name}' @ line "
+                f"{start_ln} has no END IMAGE, skipping."
+            )
+            i += 1
+            continue
+
+        blocks.append((name, start_ln, end_ln, "\n".join(body)))
+        i = end_ln
+
+    log.info(f"M204_SERVICE: Found {len(blocks)} IMAGE blocks.")
+
+    # 2) Parse each block concurrently
+    parse_tasks = [
+        _parse_image_definition(name, text)
+        for name, _, _, text in blocks
+    ]
+    parsed_list = await asyncio.gather(*parse_tasks)
+
+    # 3) Upsert results
+    results: List[M204ImageDefinition] = []
+    for (name, s_ln, e_ln, _), parsed in zip(blocks, parsed_list):
+        if not parsed or not parsed.get("fields"):
+            continue
+
+        existing = (
+            db.query(M204ImageDefinition)
+              .filter_by(
+                  project_id      = input_source.project_id,
+                  input_source_id = input_source.input_source_id,
+                  image_name      = name
+              )
+              .first()
+        )
+        if existing:
+            existing.fields_json      = parsed
+            existing.start_line_number= s_ln
+            existing.end_line_number  = e_ln
+            db.add(existing)
+            results.append(existing)
+            log.info(f"Updated IMAGE '{name}'")
+        else:
+            new_def = M204ImageDefinition(
+                project_id       = input_source.project_id,
+                input_source_id  = input_source.input_source_id,
+                image_name       = name,
+                start_line_number= s_ln,
+                end_line_number  = e_ln,
+                fields_json      = parsed
+            )
+            db.add(new_def)
+            results.append(new_def)
+            log.info(f"Created IMAGE '{name}'")
+
+    log.info(
+        f"M204_SERVICE: Upserted {len(results)} IMAGE definitions for "
+        f"file ID={input_source.input_source_id}"
+    )
+    return results
 
 async def _link_images_to_files(db: Session, input_source: InputSource, file_content: str) -> List[M204File]:
     """

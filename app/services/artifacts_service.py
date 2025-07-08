@@ -234,17 +234,21 @@ Example of a valid `cobol_code_block` for a loop:
                 comments=f"LLM conversion failed for main loop: {str(e)}"
             )
 
-    async def _llm_convert_file_definition_to_fd(self, m204_file: M204File) -> FileDefinitionToCobolFDOutput:
-        """Convert M204 file definition JSON to COBOL FD using LLM"""
-        if not llm_config._llm or not m204_file.file_definition_json:
-            log.warning(f"LLM not available or no file definition for M204 file: {m204_file.m204_file_name}. Returning placeholder FD.")
+    async def _llm_convert_file_definition_to_fd(self, m204_file: M204File) -> Optional[FileDefinitionToCobolFDOutput]:
+        """Convert M204 file definition JSON to COBOL FD using LLM. Returns None if no definition exists."""
+        if not m204_file.file_definition_json:
+            log.info(f"Skipping FD generation for M204 file '{m204_file.m204_file_name}' as it has no file_definition_json.")
+            return None
+
+        if not llm_config._llm:
+            log.warning(f"LLM not available for M204 file: {m204_file.m204_file_name}. Returning placeholder FD because a file definition exists.")
             select_name = (m204_file.m204_logical_dataset_name or m204_file.m204_file_name or f"FILE{m204_file.m204_file_id}").replace("-", "")[:8]
             return FileDefinitionToCobolFDOutput(
                 logical_file_name=select_name,
                 file_control_entry=f"       SELECT {select_name}-FILE ASSIGN TO {select_name}.\n",
                 file_description_entry=f"   FD  {select_name}-FILE.\n"
                                      f"   01  {select_name}-RECORD PIC X(80). *> Placeholder\n",
-                comments="LLM not available or file definition missing. Manual FD creation required."
+                comments="LLM not available. Manual FD creation required."
             )
 
         file_definition = m204_file.file_definition_json
@@ -366,8 +370,8 @@ Ensure the FD record layout (01 and 05 levels) is complete and uses the 'Suggest
                 file_description_entry=f"   FD  {select_name}-FILE. *> ERROR IN CONVERSION\n"
                                      f"   01  {select_name}-RECORD PIC X(80). *> Placeholder due to error\n",
                 comments=f"LLM FD conversion failed: {str(e)}"
-            )
-
+            ) 
+    
     def _clear_existing_artifacts_for_input_source(self, input_source_id: int):
         self.db.query(GeneratedCobolArtifact).filter(GeneratedCobolArtifact.input_source_id == input_source_id).delete(synchronize_session=False)
         self.db.query(GeneratedJclArtifact).filter(GeneratedJclArtifact.input_source_id == input_source_id).delete(synchronize_session=False)
@@ -637,7 +641,8 @@ The `jcl_content` should be the complete JCL.
         input_source_name_for_comments = current_input_source_with_details.original_filename or f"InputSourceID_{current_input_source_with_details.input_source_id}"
         
         # Adjust default prefix for cobol_program_id_base based on source type
-        default_program_prefix = "M204PROG" if current_input_source_with_details.source_type == 'm204' else "PARMLIB"
+        prefix_map = {'m204': 'M204PROG', 'parmlib': 'PARMLIB', 'jcl': 'JCL'}
+        default_program_prefix = prefix_map.get(current_input_source_with_details.source_type, "UNKNOWN")
         cobol_program_id_base = self._sanitize_filename_base(current_input_source_with_details.original_filename, default_prefix=default_program_prefix)
         
         log.info(f"Generating artifacts for InputSource: '{input_source_name_for_comments}' (ID: {current_input_source_with_details.input_source_id}), Program ID base: '{cobol_program_id_base}'")
@@ -701,7 +706,7 @@ The `jcl_content` should be the complete JCL.
                 )
                 main_loop_cobol_block = main_loop_result.cobol_code_block
                 if main_loop_result.comments:
-                    cobol_conversion_comments.append(f"* Main Loop: {main_loop_result.comments}")
+                    cobol_conversion_comments.append(f"Main Loop: {main_loop_result.comments}")
                 main_loop_paragraph = f"MAIN-PROCESSING-LOOP-PARA.\n{main_loop_cobol_block}\n\n"
             elif current_input_source_with_details.main_processing_loop_content:
                 log.warning("Main processing loop found, but LLM is not configured. Skipping conversion.")
@@ -726,7 +731,7 @@ The `jcl_content` should be the complete JCL.
                             procedure_division_main_logic += f"           PERFORM {paragraph_name}.\n"
                         procedure_division_paragraphs += f"{paragraph_name}.\n{result.cobol_code_block}\n\n" 
                         if result.comments:
-                            cobol_conversion_comments.append(f"* Proc {result.m204_procedure_name}: {result.comments}")
+                            cobol_conversion_comments.append(f"Proc {result.m204_procedure_name}: {result.comments}")
                     elif isinstance(result, Exception):
                         log.error(f"Error converting procedure {proc_name_for_log}: {result}", exc_info=True)
                         procedure_division_paragraphs += f"* --- ERROR CONVERTING PROCEDURE {proc_name_for_log} ---\n"
@@ -747,8 +752,11 @@ IDENTIFICATION DIVISION.
 PROGRAM-ID. {cobol_program_id_base}.
 AUTHOR. ArtifactGenerator.
 DATE-WRITTEN. {datetime.date.today().strftime("%Y-%m-%d")}.
+*
 * COBOL program for M204 Input Source: {input_source_name_for_comments}
-{("*" + "\n* ".join(cobol_conversion_comments)) if cobol_conversion_comments else "* No specific conversion comments."}
+*
+{("* " + "\n*\n* ".join(cobol_conversion_comments)) if cobol_conversion_comments else "* No specific conversion comments."}
+*
 ENVIRONMENT DIVISION.
 INPUT-OUTPUT SECTION.
 FILE-CONTROL.
@@ -840,12 +848,12 @@ MAIN-PARAGRAPH.
             db_jcl_artifacts_to_add.append(GeneratedJclArtifact(**jcl_general_schema.model_dump()))
             log.info(f"Generated Run JCL {general_jcl_file_name} for M204 source.")
 
-        elif current_input_source_with_details.source_type == 'parmlib':
-            log.info(f"InputSource type is 'parmlib' ({input_source_name_for_comments}). Skipping COBOL, Unit Test, and Run JCL generation.")
+        elif current_input_source_with_details.source_type in ('parmlib', 'jcl'):
+            log.info(f"InputSource type is '{current_input_source_with_details.source_type}' ({input_source_name_for_comments}). Skipping COBOL, Unit Test, and Run JCL generation.")
         else:
             log.warning(f"Unknown InputSource type: {current_input_source_with_details.source_type} for {input_source_name_for_comments}. Limited artifact generation.")
 
-        # --- VSAM Definition JCL Generation (for 'm204' and 'parmlib' source types) ---
+        # --- VSAM Definition JCL Generation (for 'm204', 'parmlib', and 'jcl' source types) ---
         log.info(f"Starting VSAM definition JCL consideration for InputSource: {input_source_name_for_comments} (Type: {current_input_source_with_details.source_type})")
         vsam_jcls_generated_this_pass = 0
         # m204_files_in_this_source are files *defined by* the current input_source
@@ -857,14 +865,15 @@ MAIN-PARAGRAPH.
                 continue
 
             should_generate_vsam = False
-            if current_input_source_with_details.source_type == 'parmlib':
-                # For PARMLIB sources, assume files it defines are candidates if they have VSAM characteristics
+            source_type = current_input_source_with_details.source_type
+            if source_type in ('parmlib', 'jcl'):
+                # For PARMLIB or JCL sources, assume files it defines are candidates if they have VSAM characteristics
                 if m204_file_obj.target_vsam_dataset_name or m204_file_obj.is_db_file or m204_file_obj.file_definition_json:
                     should_generate_vsam = True
-                    log.info(f"M204File ID {m204_file_obj.m204_file_id} from PARMLIB source '{input_source_name_for_comments}' is candidate for VSAM JCL.")
+                    log.info(f"M204File ID {m204_file_obj.m204_file_id} from {source_type.upper()} source '{input_source_name_for_comments}' is candidate for VSAM JCL.")
                 else:
-                    log.debug(f"M204File ID {m204_file_obj.m204_file_id} from PARMLIB source '{input_source_name_for_comments}' lacks VSAM indicators. Skipping.")
-            elif current_input_source_with_details.source_type == 'm204':
+                    log.debug(f"M204File ID {m204_file_obj.m204_file_id} from {source_type.upper()} source '{input_source_name_for_comments}' lacks VSAM indicators. Skipping.")
+            elif source_type == 'm204':
                 if m204_file_obj.is_db_file: # Only for actual DB files if the source is m204
                     should_generate_vsam = True
                     log.info(f"M204File ID {m204_file_obj.m204_file_id} from M204 source '{input_source_name_for_comments}' is DB file, candidate for VSAM JCL.")
@@ -934,23 +943,23 @@ MAIN-PARAGRAPH.
         )
         log.info(f"Finished artifact generation for InputSource ID: {input_source.input_source_id} ('{input_source_name_for_comments}'). Returning {len(response.cobol_files)} COBOL, {len(response.jcl_files)} JCL, {len(response.unit_test_files)} Unit Test files.")
         return response
-
+        
     async def generate_artifacts_for_project(self, project_id: int) -> List[InputSourceArtifacts]:
         project = self.db.query(Project).filter(Project.project_id == project_id).first()
         if not project:
             log.warning(f"Project with id {project_id} not found for artifact generation.")
             raise HTTPException(status_code=404, detail=f"Project with id {project_id} not found")
 
-        # Fetch both m204 and parmlib InputSources for the project
+        # Fetch m204, parmlib, and jcl InputSources for the project
         input_sources_to_process = self.db.query(InputSource).filter(
             InputSource.project_id == project_id,
-            InputSource.source_type.in_(['m204', 'parmlib'])  # Include parmlib
+            InputSource.source_type.in_(['m204', 'parmlib', 'jcl'])  # Include jcl
         ).options(
             # Eager load existing artifacts for caching check
             joinedload(InputSource.generated_cobol_artifacts),
             joinedload(InputSource.generated_jcl_artifacts),
             joinedload(InputSource.generated_unit_test_artifacts)
-        ).order_by(InputSource.source_type, InputSource.input_source_id).all() # Process m204 first, then parmlib (optional ordering)
+        ).order_by(InputSource.source_type, InputSource.input_source_id).all() # Process m204 first, then parmlib/jcl
 
         all_project_artifacts_content: List[InputSourceArtifacts] = []
         
@@ -960,7 +969,7 @@ MAIN-PARAGRAPH.
 
 
         if not input_sources_to_process:
-            log.info(f"No M204 or PARMLIB type InputSource files found for project id {project_id}. Returning empty list.")
+            log.info(f"No M204, PARMLIB, or JCL type InputSource files found for project id {project_id}. Returning empty list.")
             return []
 
         for input_source_obj in input_sources_to_process:
@@ -975,7 +984,7 @@ MAIN-PARAGRAPH.
             
             # Caching logic:
             # For 'm204', we ideally expect COBOL, JCL (run & VSAM), and Unit Tests.
-            # For 'parmlib', we only expect JCL (VSAM).
+            # For 'parmlib' or 'jcl', we only expect JCL (VSAM).
             # The effectiveness of caching VSAM JCL triggered by one IS but relevant to another is limited by this simple cache check.
             # The primary de-duplication of VSAM JCL content generation happens via the `generated_vsam_jcl_for_m204file_ids_in_project_run` set.
             use_cached_artifacts = False
@@ -987,23 +996,23 @@ MAIN-PARAGRAPH.
                     bool(input_source_obj.generated_unit_test_artifacts)):
                     use_cached_artifacts = True
                     log.info(f"M204 InputSource ID: {input_source_obj.input_source_id} appears to have a full set of cached artifacts.")
-            elif input_source_obj.source_type == 'parmlib':
-                # For parmlib, only check for JCL (VSAM).
+            elif input_source_obj.source_type in ('parmlib', 'jcl'):
+                # For parmlib or jcl, only check for JCL (VSAM).
                 if bool(input_source_obj.generated_jcl_artifacts):
                     use_cached_artifacts = True
-                    log.info(f"PARMLIB InputSource ID: {input_source_obj.input_source_id} has cached JCL artifacts.")
+                    log.info(f"{input_source_obj.source_type.upper()} InputSource ID: {input_source_obj.input_source_id} has cached JCL artifacts.")
 
 
             if use_cached_artifacts:
                 log.info(f"Attempting to use cached artifacts from DB for InputSource ID: {input_source_obj.input_source_id} (Type: {input_source_obj.source_type})")
                 # Load whatever is cached.
-                for cobol_artifact_orm in input_source_obj.generated_cobol_artifacts: # Will be empty for parmlib
+                for cobol_artifact_orm in input_source_obj.generated_cobol_artifacts: # Will be empty for parmlib/jcl
                     current_source_files.append(GeneratedFileContent(file_name=cobol_artifact_orm.file_name, content=cobol_artifact_orm.content, artifact_type=cobol_artifact_orm.artifact_type))
                 for jcl_artifact_orm in input_source_obj.generated_jcl_artifacts:
                     current_source_files.append(GeneratedFileContent(file_name=jcl_artifact_orm.file_name, content=jcl_artifact_orm.content, artifact_type=jcl_artifact_orm.artifact_type))
                     # Note: We don't populate `generated_vsam_jcl_for_m204file_ids_in_project_run` from cache here.
                     # The set is for preventing re-GENERATION in the current run. If cache is used, generation is skipped.
-                for unit_test_artifact_orm in input_source_obj.generated_unit_test_artifacts: # Will be empty for parmlib
+                for unit_test_artifact_orm in input_source_obj.generated_unit_test_artifacts: # Will be empty for parmlib/jcl
                     current_source_files.append(GeneratedFileContent(file_name=unit_test_artifact_orm.file_name, content=unit_test_artifact_orm.content, artifact_type=unit_test_artifact_orm.artifact_type))
                 
                 log.info(f"Loaded {len(current_source_files)} cached files for InputSource ID: {input_source_obj.input_source_id}.")
@@ -1025,11 +1034,11 @@ MAIN-PARAGRAPH.
                         )
                     
                     # Collect files from the response
-                    for cobol_schema in single_source_artifacts_response.cobol_files: # Will be empty if input_source_obj was parmlib
+                    for cobol_schema in single_source_artifacts_response.cobol_files: # Will be empty if input_source_obj was parmlib/jcl
                         current_source_files.append(GeneratedFileContent(file_name=cobol_schema.file_name, content=cobol_schema.content, artifact_type=cobol_schema.artifact_type))
-                    for jcl_schema in single_source_artifacts_response.jcl_files: # Will contain VSAM for parmlib, or run+VSAM for m204
+                    for jcl_schema in single_source_artifacts_response.jcl_files: # Will contain VSAM for parmlib/jcl, or run+VSAM for m204
                         current_source_files.append(GeneratedFileContent(file_name=jcl_schema.file_name, content=jcl_schema.content, artifact_type=jcl_schema.artifact_type))
-                    for unit_test_schema in single_source_artifacts_response.unit_test_files: # Will be empty if input_source_obj was parmlib
+                    for unit_test_schema in single_source_artifacts_response.unit_test_files: # Will be empty if input_source_obj was parmlib/jcl
                         current_source_files.append(GeneratedFileContent(file_name=unit_test_schema.file_name, content=unit_test_schema.content, artifact_type=unit_test_schema.artifact_type))
                     
                     self.db.commit() # Commit after each successful single source generation

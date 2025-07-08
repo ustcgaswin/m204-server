@@ -126,6 +126,7 @@ The generated `cobol_code_block` in your JSON response:
 - MUST NOT start with a paragraph name or section definition itself (e.g., do not include `MY-PARA.` or `MY-SECTION SECTION.` at the beginning of the block, as the surrounding paragraph is already provided).
 - MUST NOT include `IDENTIFICATION DIVISION`, `ENVIRONMENT DIVISION`, `DATA DIVISION`, or the `PROCEDURE DIVISION.` header itself.
 - SHOULD be well-structured, using COBOL paragraphs or sections within the block if appropriate for complex logic, and adhere to the COBOL6 standard.
+- Convert any M204 record loops (such as `FIND ALL RECORDS ... END FIND` or `FOR EACH VALUE ... END FOR`) into COBOL inline loops (e.g., `PERFORM UNTIL ...` or `PERFORM VARYING ...`) with the loop body implemented directly inside the generated code block. Do NOT generate a `PERFORM` that calls another paragraph for the loop body; implement the loop logic inline.
 - MUST assume all required data items (variables, counters, file records, etc.) are already defined in the main program's `DATA DIVISION` (specifically `FILE SECTION` or `WORKING-STORAGE SECTION`). Do not generate any `DATA DIVISION` entries or `FD`s within the `cobol_code_block`. Your code should use variable names as if they exist globally.
 
 Respond with a JSON object structured according to the M204ProcedureToCobolOutput model:
@@ -190,7 +191,7 @@ M204 Main Loop Content:
 ```
 
 Your task is to generate *only* the COBOL statements that represent the logic of this loop.
-- Convert M204 `FOR EACH VALUE...` or `FIND` loops into appropriate COBOL `PERFORM` loops with `READ` statements.
+- Convert M204 `FOR EACH VALUE...` or `FIND` loops into COBOL inline loops (e.g., `PERFORM UNTIL ...` or `PERFORM VARYING ...`) with the loop body implemented directly inside the generated code block. Do NOT generate a `PERFORM` that calls another paragraph for the loop body; implement the loop logic inline.
 - Convert M204 `CALL` statements to COBOL `PERFORM <procedure-name>-PARA` statements.
 - Translate `IF/ELSE`, `PRINT`, and other logic into their COBOL equivalents.
 - The generated `cobol_code_block` MUST NOT include the paragraph name itself (e.g., `MAIN-PROCESSING-LOOP-PARA.`).

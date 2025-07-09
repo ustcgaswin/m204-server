@@ -34,6 +34,20 @@ from pydantic import BaseModel, Field as PydanticField
 
 LLM_API_CALL_BATCH_SIZE = 20
 
+def strip_markdown_code_block(text: str) -> str:
+    """
+    Remove triple backtick code blocks (e.g., ```json ... ```) from LLM output.
+    """
+    text = text.strip()
+    # Remove leading and trailing triple backtick code blocks with optional language
+    match = re.match(r"^```[a-zA-Z]*\n([\s\S]*?)\n```$", text)
+    if match:
+        return match.group(1).strip()
+    # Remove single-line triple backtick blocks
+    match = re.match(r"^```[a-zA-Z]*\s*([\s\S]*?)\s*```$", text)
+    if match:
+        return match.group(1).strip()
+    return text
 
 class TestCase(BaseModel):
     test_case_id: str = PydanticField(description="A unique identifier for the test case (e.g., TC_001, TC_VALID_INPUT).")
@@ -127,6 +141,7 @@ The generated `cobol_code_block` in your JSON response:
 - MUST NOT include `IDENTIFICATION DIVISION`, `ENVIRONMENT DIVISION`, `DATA DIVISION`, or the `PROCEDURE DIVISION.` header itself.
 - SHOULD be well-structured, using COBOL paragraphs or sections within the block if appropriate for complex logic, and adhere to the COBOL6 standard.
 - Convert any M204 record loops (such as `FIND ALL RECORDS ... END FIND` or `FOR EACH VALUE ... END FOR`) into COBOL inline loops (e.g., `PERFORM UNTIL ...` or `PERFORM VARYING ...`) with the loop body implemented directly inside the generated code block. Do NOT generate a `PERFORM` that calls another paragraph for the loop body; implement the loop logic inline.
+- **Any query or data access that would use a database (DB) in M204 must be converted to use VSAM file access logic in COBOL (such as READ, START, READ NEXT, etc. on a VSAM file). Do NOT use DB2 SQL statements or DB2-specific logic anywhere in the generated code.**
 - MUST assume all required data items (variables, counters, file records, etc.) are already defined in the main program's `DATA DIVISION` (specifically `FILE SECTION` or `WORKING-STORAGE SECTION`). Do not generate any `DATA DIVISION` entries or `FD`s within the `cobol_code_block`. Your code should use variable names as if they exist globally.
 
 Respond with a JSON object structured according to the M204ProcedureToCobolOutput model:
@@ -159,6 +174,7 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
                 response = await llm_call.acomplete(prompt=prompt_fstr)
                 json_text_output = response.text
             log.debug(f"LLM call for M204 procedure to COBOL: {proc.m204_proc_name} completed (semaphore released)")
+            json_text_output = strip_markdown_code_block(json_text_output)
             return M204ProcedureToCobolOutput(**json.loads(json_text_output))
         except Exception as e:
             log.error(f"LLM error converting M204 procedure {proc.m204_proc_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
@@ -225,6 +241,7 @@ Example of a valid `cobol_code_block` for a loop:
                 response = await llm_call.acomplete(prompt=prompt_fstr)
                 json_text_output = response.text
             log.debug(f"LLM call for M204 main loop to COBOL from file: {m204_file_name} completed (semaphore released)")
+            json_text_output = strip_markdown_code_block(json_text_output)
             return MainLoopToCobolOutput(**json.loads(json_text_output))
         except Exception as e:
             log.error(f"LLM error converting main loop from file {m204_file_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
@@ -335,7 +352,8 @@ For DB files, create record layouts based on the PARMLIB field definitions and t
 For flat files, use the IMAGE statement field definitions and their 'Suggested COBOL PIC'.
 For mixed files, prioritize the most appropriate definition for COBOL conversion, using 'Suggested COBOL PIC' where available.
 
-The `logical_file_name` in the output JSON should be a COBOL-friendly name derived from the M204 file name (e.g., M204 DDNAME 'MYFILE01' could become 'MYFILE01' or 'MYFILE'). This name will be used in the `SELECT ... ASSIGN TO {{{{logical_file_name}}}}` and `FD  {{{{logical_file_name}}}}-FILE.`
+The `logical_file_name` in the output JSON should be a COBOL-friendly name derived from the M204 file name (e.g., M204 DDNAME 'MYFILE01' could become 'MYFILE01' or 'MYFILE').
+This name will be used in the `SELECT ... ASSIGN TO {{{{logical_file_name}}}}` and `FD  {{{{logical_file_name}}}}-FILE.`
 The `file_control_entry` should be the complete SELECT statement.
 The `file_description_entry` should be the complete FD, including the 01 record level and all 05 field levels with their PICTURE clauses.
 If `working_storage_entries` are needed (e.g., for complex redefines or specific counters related to this FD), include them.
@@ -361,6 +379,7 @@ Ensure the FD record layout (01 and 05 levels) is complete and uses the 'Suggest
                 response = await llm_call.acomplete(prompt=prompt_fstr)
                 json_text_output = response.text
             log.debug(f"LLM call for FD conversion: {m204_file.m204_file_name} completed (semaphore released)")
+            json_text_output = strip_markdown_code_block(json_text_output)
             return FileDefinitionToCobolFDOutput(**json.loads(json_text_output))
         except Exception as e:
             log.error(f"LLM error converting file definition for {m204_file.m204_file_name} to FD: {e}. Raw output: {json_text_output}", exc_info=True)
@@ -489,6 +508,7 @@ The `jcl_content` should be the complete JCL.
                 response = await llm_call.acomplete(prompt=prompt_fstr)
                 json_text_output = response.text
             log.info(f"LLM call for VSAM JCL generation: {m204_file_obj.m204_file_name} completed (semaphore released). Raw output: {json_text_output}")
+            json_text_output = strip_markdown_code_block(json_text_output)
             return VsamJclGenerationOutput(**json.loads(json_text_output))
         except Exception as e:
             log.error(f"LLM error generating VSAM JCL for {m204_file_obj.m204_file_name}: {e}. Raw output: {json_text_output}", exc_info=True)
@@ -746,7 +766,7 @@ The `jcl_content` should be the complete JCL.
             if main_loop_cobol_block:
                 procedure_division_main_logic = "           PERFORM MAIN-PROCESSING-LOOP-PARA.\n"
             elif not procedure_division_main_logic: # No main loop and no procedures
-                procedure_division_main_logic = "           DISPLAY 'No M204 procedures or main loop mapped.'."
+                procedure_division_main_logic = "           DISPLAY 'No M204 procedures or main loop mapped'."
 
             cobol_content = f"""\
 IDENTIFICATION DIVISION.

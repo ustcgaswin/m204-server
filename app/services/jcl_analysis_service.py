@@ -312,12 +312,18 @@ async def generate_and_store_jcl_description(
             file_content,
             input_source.original_filename or f"InputSourceID_{input_source.input_source_id}"
         )
-        input_source.jcl_detailed_description = description
-        db.add(input_source)
-        log.info(f"JCL_SERVICE: Stored JCL description for InputSource ID {input_source.input_source_id} (length: {len(description)}).")
+        # FIX: Re-query InputSource in this session
+        input_source_in_session = db.query(InputSource).filter(
+            InputSource.input_source_id == input_source.input_source_id
+        ).first()
+        if input_source_in_session:
+            input_source_in_session.jcl_detailed_description = description
+            db.add(input_source_in_session)
+            log.info(f"JCL_SERVICE: Stored JCL description for InputSource ID {input_source.input_source_id} (length: {len(description)}).")
+        else:
+            log.error(f"JCL_SERVICE: InputSource ID {input_source.input_source_id} not found in DB session for storing JCL description.")
     except Exception as e:
         log.error(f"JCL_SERVICE: Failed to generate/store JCL description for InputSource ID {input_source.input_source_id}: {e}", exc_info=True)
-
 
 async def process_jcl_analysis(
     db: Session, input_source: InputSource, file_content: str, rag_service: Optional[Any]

@@ -744,7 +744,75 @@ The `jcl_content` should be the complete JCL.
 
 
     
-    
+
+  
+    async def _llm_convert_main_loop_to_cobol(self, main_loop_content: str, m204_file_name: str) -> MainLoopToCobolOutput:
+        """Converts an M204 main processing loop to a COBOL paragraph using an LLM."""
+        if not llm_config._llm:
+            log.warning(f"LLM not available for main loop conversion from file {m204_file_name}. Returning placeholder.")
+            return MainLoopToCobolOutput(
+                cobol_code_block="      * --- Placeholder for Main Processing Loop ---\n"
+                                 "      DISPLAY 'Main processing loop logic to be implemented.'.\n"
+                                 "      * --- End of Placeholder ---",
+                comments="LLM not available. Manual conversion of main loop required."
+            )
+
+        prompt_fstr = f"""
+You are an expert M204 to COBOL migration specialist.
+Convert the following M204 main processing loop, extracted from the M204 file '{m204_file_name}', into a COBOL code block. This block will be placed into its own paragraph named `MAIN-PROCESSING-LOOP-PARA`.
+
+M204 Main Loop Content:
+```m204
+{main_loop_content}
+```
+
+Your task is to generate *only* the COBOL statements that represent the logic of this loop.
+- Convert M204 `FOR EACH VALUE...` or `FIND` loops into COBOL inline loops (e.g., `PERFORM UNTIL ...` or `PERFORM VARYING ...`) with the loop body implemented directly inside the generated code block. Do NOT generate a `PERFORM` that calls another paragraph for the loop body; implement the loop logic inline.
+- Convert M204 `CALL` statements to COBOL `PERFORM <procedure-name>-PARA` statements.
+- Translate `IF/ELSE`, `PRINT`, and other logic into their COBOL equivalents.
+- The generated `cobol_code_block` MUST NOT include the paragraph name itself (e.g., `MAIN-PROCESSING-LOOP-PARA.`).
+- The code should be correctly indented to be placed inside a paragraph (starting in Area B, column 12).
+- Assume all required files are OPEN and will be CLOSED elsewhere. Assume variables are defined in WORKING-STORAGE.
+
+Respond with a JSON object structured according to the MainLoopToCobolOutput model:
+```json
+{{
+  "cobol_code_block": "string",
+  "comments": "string (optional)"
+}}
+```
+Example of a valid `cobol_code_block` for a loop:
+```cobol
+      PERFORM UNTIL END-OF-FILE = 'Y'
+          READ INPUT-FILE
+              AT END
+                  MOVE 'Y' TO END-OF-FILE
+              NOT AT END
+                  PERFORM PROCESS-RECORD-PARA
+          END-READ
+      END-PERFORM.
+```
+"""
+        json_text_output: Optional[str] = None
+        try:
+            async with self.llm_semaphore:
+                log.debug(f"Attempting LLM call for M204 main loop to COBOL from file: {m204_file_name} (semaphore acquired)")
+                llm_call = llm_config._llm.as_structured_llm(MainLoopToCobolOutput)
+                response = await llm_call.acomplete(prompt=prompt_fstr)
+                json_text_output = response.text
+            log.debug(f"LLM call for M204 main loop to COBOL from file: {m204_file_name} completed (semaphore released)")
+            json_text_output = strip_markdown_code_block(json_text_output)
+            return MainLoopToCobolOutput(**json.loads(json_text_output))
+        except Exception as e:
+            log.error(f"LLM error converting main loop from file {m204_file_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
+            return MainLoopToCobolOutput(
+                cobol_code_block="      * --- Error during COBOL conversion for Main Processing Loop ---\n"
+                                 "      DISPLAY 'Error in main loop logic.'.\n"
+                                 "      * --- See logs for details ---",
+                comments=f"LLM conversion failed for main loop: {str(e)}"
+            )
+
+
     async def _generate_and_save_artifacts_for_single_input_source(
         self, 
         input_source: InputSource, 

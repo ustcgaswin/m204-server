@@ -93,6 +93,7 @@ class M204IterativeDescriptionOutput(BaseModel):
 
 LLM_API_CALL_BATCH_SIZE = 20
 
+
 # --- Helper Functions ---
 def _parse_m204_parameters(params_str: Optional[str]) -> Optional[Dict[str, Any]]:
     if not params_str:
@@ -131,6 +132,19 @@ def _parse_m204_parameters(params_str: Optional[str]) -> Optional[Dict[str, Any]
     return parsed_params if parsed_params["parameters"] else None
 
 
+
+def strip_markdown_code_block(text: str) -> str:
+    """
+    Remove triple backtick code blocks (e.g., ```json ... ```) from LLM output.
+    """
+    text = text.strip()
+    match = re.match(r"^```[a-zA-Z]*\n([\s\S]*?)\n```$", text)
+    if match:
+        return match.group(1).strip()
+    match = re.match(r"^```[a-zA-Z]*\s*([\s\S]*?)\s*```$", text)
+    if match:
+        return match.group(1).strip()
+    return text
 
 async def _extract_and_store_m204_open_statements(
     db: Session,
@@ -235,7 +249,7 @@ Respond with a JSON object containing the following keys:
             concept_identifier_llm = llm_config._llm.as_structured_llm(M204ConceptIdentificationOutput)
             completion_response_concept = await concept_identifier_llm.acomplete(prompt=concept_identification_prompt_fstr)
             json_text_output_concept = completion_response_concept.text
-            loaded_concept_data = json.loads(json_text_output_concept)
+            loaded_concept_data = json.loads(strip_markdown_code_block(json_text_output_concept))
             concept_output_model = M204ConceptIdentificationOutput(**loaded_concept_data)
         except Exception as e_concept_llm:
             log.error(f"M204_LLM_TASK: Error during concept identification LLM call for {proc_name}: {e_concept_llm}. Raw output: '{json_text_output_concept}'", exc_info=True)
@@ -299,7 +313,7 @@ Respond with a JSON object containing the following keys:
             summarizer_llm = llm_config._llm.as_structured_llm(ProcedureAnalysisOutput)
             completion_response_summary = await summarizer_llm.acomplete(prompt=summarization_prompt_fstr)
             json_text_output_summary = completion_response_summary.text
-            loaded_summary_data = json.loads(json_text_output_summary)
+            loaded_summary_data = json.loads(strip_markdown_code_block(json_text_output_summary))
             summary_output_model = ProcedureAnalysisOutput(**loaded_summary_data)
         except Exception as e_summary_llm:
             log.error(f"M204_LLM_TASK: Error during summarization LLM call for {proc_name}: {e_summary_llm}. Raw output: '{json_text_output_summary}'", exc_info=True)
@@ -358,7 +372,7 @@ If no specific test cases can be generated (e.g., procedure is too simple or abs
             test_case_generator_llm = llm_config._llm.as_structured_llm(ProcedureTestCaseGenerationOutput)
             completion_response_test_cases = await test_case_generator_llm.acomplete(prompt=test_case_generation_prompt_fstr)
             json_text_output_test_cases = completion_response_test_cases.text
-            loaded_test_case_data = json.loads(json_text_output_test_cases)
+            loaded_test_case_data = json.loads(strip_markdown_code_block(json_text_output_test_cases))
             test_case_output_model = ProcedureTestCaseGenerationOutput(**loaded_test_case_data)
             if test_case_output_model and test_case_output_model.test_cases:
                 suggested_test_cases_json = [tc.model_dump() for tc in test_case_output_model.test_cases] # Store as list of dicts
@@ -486,7 +500,7 @@ class M204IterativeDescriptionOutput(BaseModel):
         try:
             completion_response = await llm_structured_caller.acomplete(prompt)
             if completion_response and completion_response.text:
-                loaded_data = json.loads(completion_response.text)
+                loaded_data = json.loads(strip_markdown_code_block(completion_response.text))
                 response_model = M204IterativeDescriptionOutput(**loaded_data)
                 accumulated_description = response_model.updated_description
                 log.debug(f"M204_SERVICE_LLM_DESC: Chunk {i+1} processed for {original_filename}. Reasoning: {response_model.reasoning_for_update}. Keys: {response_model.key_elements_in_chunk}")
@@ -1154,7 +1168,7 @@ Consider the M204 declared type and attributes for meaningful COBOL suggestions.
                     log.error(f"M204_SERVICE_VAR_LLM: Error suggesting COBOL name/type for variable {variable_name_for_llm}: {result_or_exc}", exc_info=True)
                 elif result_or_exc:
                     try:
-                        loaded_var_data = json.loads(result_or_exc.text)
+                        loaded_var_data = json.loads(strip_markdown_code_block(result_or_exc.text))
                         var_output_model = M204VariableToCobolOutput(**loaded_var_data)
                         if var_output_model.m204_variable_name == variable_name_for_llm:
                             suggested_name = var_output_model.suggested_cobol_variable_name
@@ -1334,180 +1348,6 @@ async def _resolve_procedure_calls(db: Session, project_id: int, calls_in_file: 
             db.add(call)
 
 # --- IMAGE Statement Extraction ---
-# async def _parse_image_definition(image_name_context: str, image_content: str) -> Dict[str, Any]:
-#     """
-#     Parse IMAGE definition content to extract field information for COBOL FDs,
-#     including LLM-suggested COBOL field names (LLM calls made in parallel for fields).
-#     """
-#     parsed_field_details = [] # Stores details of each parsed field before LLM processing
-#     lines = image_content.strip().split('\n')
-#     for line_idx, line in enumerate(lines):
-#         line = line.strip()
-#         if not line or line.upper().startswith('END IMAGE'):
-#             continue
-            
-#         field_match = re.match(
-#             r"([A-Z0-9_.#@$-]+)\s+IS\s+([A-Z]+)(?:\s+LEN\s+(\d+))?(?:\s+DIGITS\s+(\d+))?(?:\s+DP\s+(\d+))?",
-#             line,
-#             re.IGNORECASE
-#         )
-        
-#         if field_match:
-#             m204_field_name_original = field_match.group(1)
-#             m204_type = field_match.group(2).upper()
-#             length = int(field_match.group(3)) if field_match.group(3) else None
-#             digits = int(field_match.group(4)) if field_match.group(4) else None
-#             decimal_places = int(field_match.group(5)) if field_match.group(5) else None
-            
-#             parsed_field_details.append({
-#                 "m204_field_name_original": m204_field_name_original,
-#                 "m204_type": m204_type,
-#                 "length": length,
-#                 "digits": digits,
-#                 "decimal_places": decimal_places,
-#                 "original_index": len(parsed_field_details) # To map LLM results back
-#             })
-
-#     llm_tasks = []
-#     llm_results_map: Dict[int, Any] = {} # Store LLM results by original_index
-
-#     if llm_config._llm and parsed_field_details:
-#         field_namer_llm = llm_config._llm.as_structured_llm(ImageFieldToCobolOutput)
-#         for field_data in parsed_field_details:
-#             field_prompt_fstr = f"""
-# You are an M204 to COBOL migration expert. Suggest a COBOL-compliant field name for the given M204 IMAGE field.
-# M204 IMAGE Name: {image_name_context}
-# M204 Field Name: {field_data['m204_field_name_original']}
-# M204 Field Type (from 'IS' clause): {field_data['m204_type']}
-# M204 Field Length: {field_data['length'] or 'N/A'}
-# M204 Field Digits: {field_data['digits'] or 'N/A'}
-# M204 Field Decimal Places: {field_data['decimal_places'] or 'N/A'}
-
-# Respond with a JSON object structured according to the ImageFieldToCobolOutput model.
-# The COBOL field name should be max 30 chars, alphanumeric, use hyphens, and avoid M204-specific symbols like '.'.
-# It should be suitable for use in a COBOL record description.
-# Consider the M204 field type and attributes for a more meaningful COBOL name.
-# Ensure the output "m204_image_name" is "{image_name_context}" and "m204_field_name" is "{field_data['m204_field_name_original']}".
-# """
-#             # Create a coroutine for each LLM call
-#             llm_tasks.append(
-#                 field_namer_llm.acomplete(prompt=field_prompt_fstr)
-#             )
-        
-#         if llm_tasks:
-#             log.info(f"M204_SERVICE_IMG_FIELD_LLM: Starting {len(llm_tasks)} parallel LLM calls for fields in IMAGE '{image_name_context}'.")
-#             # Gather results from all LLM tasks
-#             llm_raw_results = await asyncio.gather(*llm_tasks, return_exceptions=True)
-#             log.info(f"M204_SERVICE_IMG_FIELD_LLM: Finished {len(llm_tasks)} parallel LLM calls for fields in IMAGE '{image_name_context}'.")
-
-#             for idx, result_or_exc in enumerate(llm_raw_results):
-#                 original_field_data = parsed_field_details[idx] # Match by index
-#                 m204_field_name_original = original_field_data["m204_field_name_original"]
-#                 suggested_cobol_name_for_field = m204_field_name_original.upper().replace('.', '-') # Fallback
-#                 reasoning = None
-
-#                 if isinstance(result_or_exc, Exception):
-#                     log.error(f"M204_SERVICE_IMG_FIELD_LLM: Error suggesting COBOL name for {image_name_context}.{m204_field_name_original} (parallel task): {result_or_exc}. Using fallback.", exc_info=True)
-#                 elif result_or_exc: # It's a completion response
-#                     try:
-#                         loaded_field_data = json.loads(result_or_exc.text)
-#                         field_output_model = ImageFieldToCobolOutput(**loaded_field_data)
-#                         if field_output_model.m204_field_name == m204_field_name_original and \
-#                            field_output_model.m204_image_name == image_name_context:
-#                             suggested_cobol_name_for_field = field_output_model.suggested_cobol_field_name
-#                             reasoning = field_output_model.reasoning
-#                             log.debug(f"M204_SERVICE_IMG_FIELD_LLM: Suggested COBOL name for {image_name_context}.{m204_field_name_original} is '{suggested_cobol_name_for_field}'. Reason: {reasoning or 'N/A'}")
-#                         else:
-#                             log.warning(f"M204_SERVICE_IMG_FIELD_LLM: Mismatched IMAGE/field name from LLM for {image_name_context}.{m204_field_name_original}. LLM response: {result_or_exc.text}. Using fallback.")
-#                     except Exception as e_field_llm_parse:
-#                         log.error(f"M204_SERVICE_IMG_FIELD_LLM: Error parsing LLM response for {image_name_context}.{m204_field_name_original}: {e_field_llm_parse}. Raw: '{result_or_exc.text}'. Using fallback.", exc_info=True)
-                
-#                 llm_results_map[original_field_data["original_index"]] = {
-#                     "suggested_cobol_field_name": suggested_cobol_name_for_field,
-#                     "reasoning": reasoning
-#                 }
-    
-#     final_fields_output = []
-#     for field_data in parsed_field_details:
-#         m204_field_name_original = field_data["m204_field_name_original"]
-#         m204_type = field_data["m204_type"]
-#         length = field_data["length"]
-#         digits = field_data["digits"]
-#         decimal_places = field_data["decimal_places"]
-#         original_idx = field_data["original_index"]
-
-#         llm_suggestion = llm_results_map.get(original_idx)
-#         if llm_suggestion:
-#             suggested_cobol_name_for_field = llm_suggestion["suggested_cobol_field_name"]
-#             # We don't store the reasoning from ImageFieldToCobolOutput in the final field_info directly,
-#             # but it's logged above. The reasoning in "cobol_layout_suggestions" is different.
-#         else: # LLM not configured, or this field somehow missed LLM processing (should not happen if LLM is on)
-#             suggested_cobol_name_for_field = m204_field_name_original.upper().replace('.', '-')
-#             if not llm_config._llm and not llm_tasks: # Only log once if LLM is off
-#                  if original_idx == 0: # Log only for the first field if LLM is off
-#                     log.warning(f"M204_SERVICE_IMG_FIELD_LLM: LLM not configured. Using basic fallback for COBOL field names in IMAGE '{image_name_context}'.")
-
-
-#         data_type_mapping = {
-#             'STRING': {'cobol_type': 'CHARACTER', 'typical_pic': 'PIC X'},
-#             'PACKED': {'cobol_type': 'PACKED_DECIMAL', 'typical_pic': 'PIC 9 COMP-3'},
-#             'BINARY': {'cobol_type': 'BINARY', 'typical_pic': 'PIC 9 COMP'},
-#             'FLOAT': {'cobol_type': 'FLOATING_POINT', 'typical_pic': 'COMP-1'}, 
-#             'DOUBLE': {'cobol_type': 'FLOATING_POINT', 'typical_pic': 'COMP-2'}  
-#         }
-        
-#         type_info = data_type_mapping.get(m204_type, {'cobol_type': m204_type, 'typical_pic': 'PIC X'}) 
-        
-#         suggested_pic = None
-#         actual_field_byte_length = length 
-
-#         if m204_type == 'STRING' and length:
-#             suggested_pic = f"PIC X({length})"
-#         elif m204_type == 'PACKED' and digits:
-#             num_digits = digits
-#             if decimal_places:
-#                 suggested_pic = f"PIC S9({num_digits-decimal_places})V9({decimal_places}) COMP-3"
-#             else:
-#                 suggested_pic = f"PIC S9({num_digits}) COMP-3"
-#             actual_field_byte_length = (digits // 2) + 1
-#         elif m204_type == 'BINARY' and length: 
-#             if length == 2: 
-#                 suggested_pic = "PIC S9(4) COMP"
-#             elif length == 4: 
-#                 suggested_pic = "PIC S9(9) COMP"
-#             elif length == 8: 
-#                 suggested_pic = "PIC S9(18) COMP"
-#             else: 
-#                 suggested_pic = f"PIC S9({length * 2 -1}) COMP" # Approximation
-#             actual_field_byte_length = length
-#         elif m204_type == 'FLOAT' and (length == 4 or length is None): 
-#             suggested_pic = "COMP-1"
-#             actual_field_byte_length = 4
-#         elif m204_type == 'DOUBLE' and (length == 8 or length is None): 
-#             suggested_pic = "COMP-2"
-#             actual_field_byte_length = 8
-        
-#         field_info = {
-#             "field_name": m204_field_name_original,
-#             "suggested_cobol_field_name": suggested_cobol_name_for_field,
-#             "data_type": type_info['cobol_type'], 
-#             "m204_type": m204_type,
-#             "length": length, 
-#             "digits": digits, 
-#             "decimal_places": decimal_places, 
-#             "position": original_idx + 1, # 1-based position in the IMAGE statement
-#             "cobol_layout_suggestions": { 
-#                 "cobol_picture_clause": suggested_pic,
-#                 "field_byte_length": actual_field_byte_length, 
-#                 "reasoning": f"Initial COBOL layout suggestion based on M204 type {m204_type}"
-#             }
-#         }
-#         final_fields_output.append(field_info)
-            
-#     return {
-#         "fields": final_fields_output,
-#         "total_fields": len(final_fields_output)
-#     }
 
 
 async def _parse_image_definition(
@@ -1598,7 +1438,7 @@ Respond with JSON per ImageFieldToCobolOutput.
                 )
             else:
                 try:
-                    data = json.loads(result.text)
+                    data = json.loads(strip_markdown_code_block(result.text))
                     out = ImageFieldToCobolOutput(**data)
                     if (out.m204_image_name == image_name_context
                             and out.m204_field_name == orig):
@@ -2196,7 +2036,7 @@ Your suggestions for fields should be the final determination, considering all a
         completion_response = await vsam_analyzer_llm.acomplete(prompt=prompt_fstr)
         json_text_output = completion_response.text
         
-        loaded_vsam_data = json.loads(json_text_output)
+        loaded_vsam_data = json.loads(strip_markdown_code_block(json_text_output))
         vsam_output = M204FileVsamAnalysisOutput(**loaded_vsam_data)
 
         if vsam_output.m204_file_name != m204_file.m204_file_name:

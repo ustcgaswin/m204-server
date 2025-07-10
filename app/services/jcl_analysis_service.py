@@ -219,7 +219,7 @@ async def _extract_and_store_dd_statements_from_jcl(
                     log.error(f"JCL_SERVICE_DD: Error creating DB entry for DD statement '{dd_name}' at line {line_num}: {e}", exc_info=True)
 
     log.info(f"JCL_SERVICE: Finished extracting {len(dd_statements_processed)} DD statements and identified {len(m204_files_affected_by_jcl)} affected/created M204 files from JCL file ID: {input_source.input_source_id}.")
-
+    return dd_statements_processed, m204_files_affected_by_jcl 
 
 async def _generate_jcl_description_iteratively_with_llm(file_content: str, original_filename: str) -> str:
     """

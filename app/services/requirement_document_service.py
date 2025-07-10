@@ -387,13 +387,15 @@ def _get_sections_config() -> List[Dict[str, str]]:
     """
     return [
         {
-            "id": "program_overview",  # Renamed from "project_overview"
-            "title": "## 1. Program Overview",  # Renamed section title
+            "id": "program_overview",  
+            "title": "## 1. Program Overview", 
             "instructions": """
-(Provide a narrative overview in a paragraph or two based solely on the 'm204_detailed_description' fields from all InputSource records for this project.
-Summarize the system's purpose, main functions, and any notable features as described in these M204 file summaries.
-Do not include project metadata such as project name, description, or creation date.)
-"""
+        (Provide a business-oriented overview of the system in 2-3 paragraphs based on the 'm204_detailed_description' fields from all InputSource records. 
+        Describe the system's primary business purpose, core functionality, and key capabilities in terms of what it does for the organization.
+        Focus on business functions, operational processes, and data handling capabilities rather than technical architecture.
+        Present the information clearly for business users and technical stakeholders, emphasizing the system's role in supporting business operations.
+        Exclude project metadata such as project name, description, or creation date.)
+        """
         },
         {
             "id": "conceptual_data_model",

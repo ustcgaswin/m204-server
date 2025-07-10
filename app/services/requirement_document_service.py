@@ -211,10 +211,20 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
     """
     content_parts = []
 
-    if options.include_project_overview and "project_info" in project_data:
-        pi = project_data["project_info"]
-        content_parts.append(f"Project Information:\n- Name: {pi.get('project_name', 'N/A')}\n- Description: {pi.get('description', 'N/A')}\n- Created: {pi.get('created_at', 'N/A')}\n")
+    # For the Program Overview section: ONLY include M204 detailed descriptions from InputSource
+    if options.include_project_overview and "source_file_llm_summaries" in project_data:
+        m204_descriptions = [
+            s["m204_detailed_description"]
+            for s in project_data["source_file_llm_summaries"]
+            if s.get("m204_detailed_description")
+        ]
+        if m204_descriptions:
+            content_parts.append("M204 Detailed Descriptions from Input Sources:")
+            for desc in m204_descriptions:
+                content_parts.append(f"- {desc}")
+            content_parts.append("\n")
 
+    # For all other sections, include the rest of the data as before
     if "source_file_llm_summaries" in project_data and project_data["source_file_llm_summaries"]:
         content_parts.append("Source File LLM-Generated Summaries:")
         for summary_info in project_data["source_file_llm_summaries"]:
@@ -227,12 +237,11 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                 content_parts.append(f"    M204 Summary: {summary_info['m204_detailed_description']}")
         content_parts.append("\n")
 
-    # Main Processing Loop (now handled at the top level)
+    # Main Processing Loop
     if "main_processing_loop" in project_data and project_data["main_processing_loop"]:
         loop_data = project_data["main_processing_loop"]
         source_file = loop_data.get('source_filename', 'an M204 source file')
         content_parts.append(f"Main Processing Loop (from {source_file}):")
-        
         structured_loop = loop_data.get("structured_logic")
         if structured_loop:
             log.debug("Including structured_loop_logic in prompt.")
@@ -248,7 +257,6 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
             content_parts.append("  ```")
         content_parts.append("\n")
 
-
     if options.include_procedures and "procedures" in project_data and project_data["procedures"]:
         content_parts.append("M204 Procedures Data:")
         for proc in project_data["procedures"]:
@@ -259,19 +267,14 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                 f"    Target COBOL Program: {proc.get('target_cobol_function_name', 'N/A')}",
             ]
             if options.include_procedure_summaries and proc.get('summary'):
-                 proc_details.append(f"    Summary: {proc.get('summary', 'No summary available.')}")
-
+                proc_details.append(f"    Summary: {proc.get('summary', 'No summary available.')}")
             proc_details.append(f"    Content Snippet (first 200 chars): {proc.get('procedure_content', 'N/A')[:200]}...")
-
             if options.include_procedure_variables and proc.get("variables_in_procedure"):
                 proc_details.append("    Variables Defined in Procedure:")
                 for var in proc["variables_in_procedure"]:
                     proc_details.append(f"      - Variable Name: {var.get('variable_name')}, Type: {var.get('variable_type')}, Scope: {var.get('scope')}, COBOL Mapped Name: {var.get('cobol_mapped_variable_name', 'N/A')}")
             content_parts.extend(proc_details)
         content_parts.append("\n")
-
-
-    
 
     if options.include_files and "m204_files" in project_data and project_data["m204_files"]:
         content_parts.append("M204 File Definitions Data:")
@@ -284,15 +287,10 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                 f"    Target VSAM Dataset Name: {f_data.get('target_vsam_dataset_name', 'N/A')}",
                 f"    Target VSAM Type: {f_data.get('target_vsam_type', 'N/A')}"
             ]
-            
-            # The main processing loop content is no longer part of f_data, so the logic here is removed.
-
             file_def_json = f_data.get("file_definition_json")
             has_printed_fields_for_this_file = False 
-
             if file_def_json and isinstance(file_def_json, dict):
                 file_type = file_def_json.get("file_type")
-
                 db_fields_data = None
                 db_header_text = ""
                 if file_type == "db_file":
@@ -303,14 +301,12 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                     if isinstance(db_part, dict):
                         db_fields_data = db_part.get("fields")
                         db_header_text = "    Fields (from DB part of mixed definition):"
-                
                 if isinstance(db_fields_data, dict) and db_fields_data:
                     file_details.append(db_header_text)
                     has_printed_fields_for_this_file = True
                     for field_name, field_attributes in db_fields_data.items():
                         attrs_str = str(field_attributes) if not isinstance(field_attributes, str) else field_attributes
                         file_details.append(f"      - Field Name: {field_name}, Attributes: {attrs_str}")
-
                 image_definitions_list = None
                 image_header_prefix_text = ""
                 if file_type == "flat_file":
@@ -321,14 +317,13 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                     if isinstance(flat_part, dict):
                         image_definitions_list = flat_part.get("image_definitions")
                     image_header_prefix_text = "    Fields (from flat file part of mixed IMAGE"
-
                 if isinstance(image_definitions_list, list):
                     for image_def in image_definitions_list:
                         if isinstance(image_def, dict):
                             image_name = image_def.get('image_name', 'Unnamed')
                             fields_in_image = image_def.get("fields")
                             if isinstance(fields_in_image, list) and fields_in_image:
-                                file_details.append(f"{image_header_prefix_text} '{image_name}'):")
+                                file_details.append(f"{image_header_prefix_text} '{image_name}'):") 
                                 has_printed_fields_for_this_file = True
                                 for field_item in fields_in_image:
                                     if isinstance(field_item, dict):
@@ -336,7 +331,6 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                                     else:
                                         log.warning(f"Item in IMAGE fields list is not a dict for file {f_data.get('m204_file_name')}, image '{image_name}': {type(field_item)}. Data: {str(field_item)[:100]}")
                                         file_details.append(f"      - Field Data (raw): {str(field_item)}")
-                
                 if not has_printed_fields_for_this_file and "fields" in file_def_json:
                     generic_fields = file_def_json.get("fields")
                     if isinstance(generic_fields, list) and generic_fields: 
@@ -355,7 +349,6 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                     elif generic_fields: 
                         log.warning(f"Generic 'fields' in file_definition_json is of unexpected type {type(generic_fields)} for file {f_data.get('m204_file_name')}: {str(generic_fields)[:100]}")
                         file_details.append(f"    Fields Data (raw, unexpected type): {str(generic_fields)}")
-
             content_parts.extend(file_details)
         content_parts.append("\n")
 
@@ -388,18 +381,18 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
 
     return "\n".join(content_parts)
 
-
 def _get_sections_config() -> List[Dict[str, str]]:
     """
     Defines the structure and instructions for each section of the requirements document.
     """
     return [
         {
-            "id": "project_overview",
-            "title": "## 1. Project Overview",
+            "id": "program_overview",  # Renamed from "project_overview"
+            "title": "## 1. Program Overview",  # Renamed section title
             "instructions": """
-   (Provide a narrative overview in a paragraph or two based on the 'Project Information' from the input data. Include project name, description, and creation date.
-    You can also incorporate high-level insights from the 'Source File LLM-Generated Summaries' if they provide a good overview of the system's nature.)
+(Provide a narrative overview in a paragraph or two based solely on the 'm204_detailed_description' fields from all InputSource records for this project.
+Summarize the system's purpose, main functions, and any notable features as described in these M204 file summaries.
+Do not include project metadata such as project name, description, or creation date.)
 """
         },
         {

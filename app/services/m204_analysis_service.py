@@ -14,12 +14,16 @@ from app.models.m204_variable_model import M204Variable
 from app.models.procedure_call_model import ProcedureCall
 from app.models.m204_image_definition_model import M204ImageDefinition
 
+from app.models.m204_open_statement import M204OpenStatement
+
+
 from app.schemas.m204_analysis_schema import (
     M204ProcedureCreateSchema, M204ProcedureResponseSchema,
     M204FileCreateSchema, M204FileResponseSchema,
     M204VariableCreateSchema, M204VariableResponseSchema,
     M204ProcedureCallCreateSchema, M204ProcedureCallResponseSchema,
     M204AnalysisResultDataSchema,
+    M204OpenStatementResponseSchema,
 )
 # Importing M204FieldVsamSuggestion from parmlib_analysis_service to avoid redefinition
 from app.services.parmlib_analysis_service import M204FieldVsamSuggestion
@@ -125,6 +129,47 @@ def _parse_m204_parameters(params_str: Optional[str]) -> Optional[Dict[str, Any]
                 log.debug(f"Could not fully parse parameter: {p_str} in '{params_str}' as a standard M204 parameter. Stored as UNKNOWN_FORMAT.")
             
     return parsed_params if parsed_params["parameters"] else None
+
+
+
+async def _extract_and_store_m204_open_statements(
+    db: Session,
+    input_source: InputSource,
+    file_content: str
+) -> list:
+    """
+    Extracts OPEN {FILENAME} statements from M204 source and stores them in the DB.
+    """
+    open_statements = []
+    open_pattern = re.compile(r"^\s*OPEN\s+([A-Z0-9_#@$-]+)", re.IGNORECASE | re.MULTILINE)
+    lines = file_content.splitlines()
+
+    for i, line in enumerate(lines):
+        match = open_pattern.match(line)
+        if match:
+            m204_file_name = match.group(1).strip().upper()
+            line_number = i + 1
+
+            # Check for existing
+            existing = db.query(M204OpenStatement).filter_by(
+                project_id=input_source.project_id,
+                input_source_id=input_source.input_source_id,
+                m204_file_name=m204_file_name,
+                line_number=line_number
+            ).first()
+            if existing:
+                open_statements.append(existing)
+                continue
+
+            open_stmt = M204OpenStatement(
+                project_id=input_source.project_id,
+                input_source_id=input_source.input_source_id,
+                m204_file_name=m204_file_name,
+                line_number=line_number
+            )
+            db.add(open_stmt)
+            open_statements.append(open_stmt)
+    return open_statements
 
 
 
@@ -1904,6 +1949,9 @@ async def process_m204_analysis(
     """
     log.info(f"M204_SERVICE: Starting M204 structural processing for file: {input_source.original_filename} (ID: {input_source.input_source_id})")
 
+    # --- Extract OPEN statements ---
+    extracted_open_statements = await _extract_and_store_m204_open_statements(db, input_source, file_content)
+
     extracted_procedures = await _extract_and_store_m204_procedures(db, input_source, file_content, rag_service)
     log.debug(f"M204_SERVICE: Flushing session after procedure extraction for {input_source.original_filename} to ensure IDs are available.")
     db.flush()
@@ -1918,7 +1966,7 @@ async def process_m204_analysis(
         m204_files_in_db_before_image = db.query(M204File).filter(M204File.project_id == input_source.project_id).all()
         if m204_files_in_db_before_image:
             log.info(f"M204_SERVICE_PRE_IMG_LOG: Found {len(m204_files_in_db_before_image)} M204File records in project {input_source.project_id} (after potential flush):")
-            for idx, f_db_log in enumerate(m204_files_in_db_before_image): # Renamed f_db to f_db_log
+            for idx, f_db_log in enumerate(m204_files_in_db_before_image):
                 log.info(
                     f"M204_SERVICE_PRE_IMG_LOG: Record {idx + 1}: "
                     f"ID={f_db_log.m204_file_id}, "
@@ -1983,14 +2031,11 @@ async def process_m204_analysis(
     updated_m204_files_from_linking = await _link_images_to_files(db, input_source, file_content)
     log.info(f"M204_SERVICE: Finished IMAGE to FILE linkage analysis. {len(updated_m204_files_from_linking)} files were updated with IMAGE layouts.")
 
-
     # --- Description Generation is now handled by the orchestrator ---
 
     all_m204_files_map: Dict[Any, M204File] = {} 
-    # MODIFIED: The old extracted_image_files is replaced by the new list from the linking function.
     for f_list in [extracted_dataset_files, updated_m204_files_from_linking]:
         for f_obj in f_list:
-            # Use m204_file_id as the key if available to deduplicate objects
             obj_key_for_map = f_obj.m204_file_id if hasattr(f_obj, 'm204_file_id') and f_obj.m204_file_id is not None else id(f_obj)
             if obj_key_for_map not in all_m204_files_map:
                 all_m204_files_map[obj_key_for_map] = f_obj
@@ -2012,9 +2057,8 @@ async def process_m204_analysis(
                 item_id_attr = 'variable_id'
             elif hasattr(item, 'call_id'): 
                 item_id_attr = 'call_id'
-            elif hasattr(item, 'image_definition_id'): # Handle M204ImageDefinition if it were included
+            elif hasattr(item, 'image_definition_id'):
                 item_id_attr = 'image_definition_id'
-
 
             if item not in db and not db.object_session(item): 
                 db.add(item) 
@@ -2049,6 +2093,7 @@ async def process_m204_analysis(
     m204_file_responses = [M204FileResponseSchema.model_validate(df) for df in refreshed_m204_files]
     variable_responses = [M204VariableResponseSchema.model_validate(v) for v in refreshed_variables]
     procedure_call_responses = [M204ProcedureCallResponseSchema.model_validate(pc) for pc in refreshed_procedure_calls]
+    open_statement_responses = [M204OpenStatementResponseSchema.model_validate(o) for o in extracted_open_statements]
     
     m204_db_files_identified = [mf for mf in refreshed_m204_files if mf.is_db_file is True]
 
@@ -2058,11 +2103,11 @@ async def process_m204_analysis(
         defined_fields_found=[], 
         variables_found=variable_responses,
         procedure_calls_found=procedure_call_responses,
+        open_statements_found=open_statement_responses,
     )
 
     log.info(f"M204_SERVICE: Completed M204 analysis for file: {input_source.original_filename}. Identified {len(m204_db_files_identified)} DB files for potential VSAM enhancement.")
     return analysis_result_data, m204_db_files_identified
-
 
 async def enhance_m204_db_file_with_vsam_suggestions(db: Session, m204_file: M204File):
     """

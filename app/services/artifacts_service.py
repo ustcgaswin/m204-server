@@ -13,6 +13,9 @@ from app.models.project_model import Project
 from app.models.procedure_model import Procedure
 from app.models.input_source_model import InputSource
 
+from app.services.m204_analysis_service import M204ConceptIdentificationOutput  # Import the model
+
+
 # Import Pydantic Schemas for artifact data structures
 from app.schemas.artifacts_schema import (
     GeneratedArtifactsResponse,
@@ -103,7 +106,14 @@ class ArtifactsService:
                 cobol_program_id_base = cobol_program_id_base[:8]
         return cobol_program_id_base
 
-    async def _llm_convert_m204_proc_to_cobol(self, proc: Procedure) -> M204ProcedureToCobolOutput:
+    
+    async def _llm_convert_m204_proc_to_cobol(self, proc: Procedure, rag_service=None) -> M204ProcedureToCobolOutput:
+        """
+        Converts an M204 procedure to COBOL using LLM, with RAG context injection.
+        1. Identify M204 concepts in the procedure.
+        2. Fetch RAG context for those concepts.
+        3. Call LLM to convert to COBOL, including RAG context in the prompt.
+        """
         if not llm_config._llm or not proc.procedure_content:
             log.warning(f"LLM not available or no content for M204 procedure: {proc.m204_proc_name}. Returning placeholder COBOL.")
             return M204ProcedureToCobolOutput(
@@ -113,18 +123,60 @@ class ArtifactsService:
                                  f"      * --- End of Placeholder for {proc.m204_proc_name} ---",
                 comments="LLM not available or procedure content missing. Manual conversion required. Ensure COBOL6 standard."
             )
-        
-        # Sanitize procedure name for use in example in prompt
+
+        # --- Step 1: Identify Concepts ---
+        concept_prompt = f"""
+You are an M204 expert. Analyze the following M204 procedure and identify the key M204 commands, keywords, or concepts (e.g., FIND, FOR EACH VALUE, %variables, IMAGE, SCREEN) that are important for understanding its logic and for accurate COBOL conversion.
+
+M204 Procedure Name: {proc.m204_proc_name}
+M204 Procedure Parameters: {proc.m204_parameters_string or "None"}
+
+M204 Procedure Content:
+```m204
+{proc.procedure_content}
+```
+
+Respond with a JSON object with:
+- "procedure_name": string
+- "identified_concepts": list of strings
+- "brief_reasoning": string
+"""
+        identified_concepts = []
+        rag_context = "No RAG context available."
+        try:
+            concept_llm = llm_config._llm.as_structured_llm(M204ConceptIdentificationOutput)
+            concept_resp = await concept_llm.acomplete(prompt=concept_prompt)
+            concept_data = M204ConceptIdentificationOutput(**json.loads(strip_markdown_code_block(concept_resp.text)))
+            identified_concepts = concept_data.identified_concepts
+        except Exception as e:
+            log.error(f"Error identifying concepts for {proc.m204_proc_name}: {e}")
+
+        # --- Step 2: RAG Query ---
+        if rag_service and identified_concepts:
+            try:
+                rag_query = " ".join(identified_concepts)
+                rag_context = await rag_service.aquery(rag_query)
+            except Exception as e:
+                log.error(f"Error fetching RAG context for {proc.m204_proc_name}: {e}")
+                rag_context = "RAG context fetch failed."
+        else:
+            rag_context = "No RAG context available or no concepts identified."
+
+        # --- Step 3: COBOL Conversion ---
         example_proc_name_sanitized = proc.m204_proc_name.upper().replace('%', 'P').replace('$', 'D').replace('_', '-').replace('#','N')
         if not example_proc_name_sanitized or not (example_proc_name_sanitized[0].isalpha() or example_proc_name_sanitized[0].isdigit()):
             example_proc_name_sanitized = "M204PROC" + example_proc_name_sanitized
-        # Further ensure it's a valid COBOL paragraph name start if still problematic after prefix
         if not (example_proc_name_sanitized[0].isalpha() or example_proc_name_sanitized[0].isdigit()):
-             example_proc_name_sanitized = "DEFAULT-" + example_proc_name_sanitized # Add a default prefix if necessary
+            example_proc_name_sanitized = "DEFAULT-" + example_proc_name_sanitized
         example_proc_name_sanitized = re.sub(r'[^A-Z0-9-]', '', example_proc_name_sanitized)[:28]
 
         prompt_fstr = f"""
 You are an expert M204 to COBOL migration specialist.
+You have the following relevant documentation/context for this procedure:
+---
+{rag_context}
+---
+
 Convert the following M204 procedure into a COBOL code block. This block will be inserted directly into the PROCEDURE DIVISION of a larger COBOL program, inside an automatically generated COBOL paragraph (e.g., `{example_proc_name_sanitized}-PARA.`).
 
 M204 Procedure Name: {proc.m204_proc_name}
@@ -186,71 +238,138 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
                 comments=f"LLM conversion failed: {str(e)}"
             )
 
-    async def _llm_convert_main_loop_to_cobol(self, main_loop_content: str, m204_file_name: str) -> MainLoopToCobolOutput:
-        """Converts an M204 main processing loop to a COBOL paragraph using an LLM."""
-        if not llm_config._llm:
-            log.warning(f"LLM not available for main loop conversion from file {m204_file_name}. Returning placeholder.")
-            return MainLoopToCobolOutput(
-                cobol_code_block="      * --- Placeholder for Main Processing Loop ---\n"
-                                 "      DISPLAY 'Main processing loop logic to be implemented.'.\n"
-                                 "      * --- End of Placeholder ---",
-                comments="LLM not available. Manual conversion of main loop required."
+    
+    async def _llm_convert_m204_proc_to_cobol(self, proc: Procedure, rag_service=None) -> M204ProcedureToCobolOutput:
+        """
+        Converts an M204 procedure to COBOL using LLM, with RAG context injection.
+        1. Identify M204 concepts in the procedure.
+        2. Fetch RAG context for those concepts.
+        3. Call LLM to convert to COBOL, including RAG context in the prompt.
+        """
+        if not llm_config._llm or not proc.procedure_content:
+            log.warning(f"LLM not available or no content for M204 procedure: {proc.m204_proc_name}. Returning placeholder COBOL.")
+            return M204ProcedureToCobolOutput(
+                m204_procedure_name=proc.m204_proc_name,
+                cobol_code_block=f"      * --- Placeholder COBOL for M204 Procedure: {proc.m204_proc_name} ---\n"
+                                 f"      DISPLAY 'Executing M204 Procedure Logic for: {proc.m204_proc_name}'.\n"
+                                 f"      * --- End of Placeholder for {proc.m204_proc_name} ---",
+                comments="LLM not available or procedure content missing. Manual conversion required. Ensure COBOL6 standard."
             )
+
+        # --- Step 1: Identify Concepts ---
+        concept_prompt = f"""
+You are an M204 expert. Analyze the following M204 procedure and identify the key M204 commands, keywords, or concepts (e.g., FIND, FOR EACH VALUE, %variables, IMAGE, SCREEN) that are important for understanding its logic and for accurate COBOL conversion.
+
+M204 Procedure Name: {proc.m204_proc_name}
+M204 Procedure Parameters: {proc.m204_parameters_string or "None"}
+
+M204 Procedure Content:
+```m204
+{proc.procedure_content}
+```
+
+Respond with a JSON object with:
+- "procedure_name": string
+- "identified_concepts": list of strings
+- "brief_reasoning": string
+"""
+        identified_concepts = []
+        rag_context = "No RAG context available."
+        try:
+            concept_llm = llm_config._llm.as_structured_llm(M204ConceptIdentificationOutput)
+            concept_resp = await concept_llm.acomplete(prompt=concept_prompt)
+            concept_data = M204ConceptIdentificationOutput(**json.loads(strip_markdown_code_block(concept_resp.text)))
+            identified_concepts = concept_data.identified_concepts
+        except Exception as e:
+            log.error(f"Error identifying concepts for {proc.m204_proc_name}: {e}")
+
+        # --- Step 2: RAG Query ---
+        if rag_service and identified_concepts:
+            try:
+                rag_query = " ".join(identified_concepts)
+                rag_context = await rag_service.aquery(rag_query)
+            except Exception as e:
+                log.error(f"Error fetching RAG context for {proc.m204_proc_name}: {e}")
+                rag_context = "RAG context fetch failed."
+        else:
+            rag_context = "No RAG context available or no concepts identified."
+
+        # --- Step 3: COBOL Conversion ---
+        example_proc_name_sanitized = proc.m204_proc_name.upper().replace('%', 'P').replace('$', 'D').replace('_', '-').replace('#','N')
+        if not example_proc_name_sanitized or not (example_proc_name_sanitized[0].isalpha() or example_proc_name_sanitized[0].isdigit()):
+            example_proc_name_sanitized = "M204PROC" + example_proc_name_sanitized
+        if not (example_proc_name_sanitized[0].isalpha() or example_proc_name_sanitized[0].isdigit()):
+            example_proc_name_sanitized = "DEFAULT-" + example_proc_name_sanitized
+        example_proc_name_sanitized = re.sub(r'[^A-Z0-9-]', '', example_proc_name_sanitized)[:28]
 
         prompt_fstr = f"""
 You are an expert M204 to COBOL migration specialist.
-Convert the following M204 main processing loop, extracted from the M204 file '{m204_file_name}', into a COBOL code block. This block will be placed into its own paragraph named `MAIN-PROCESSING-LOOP-PARA`.
+You have the following relevant documentation/context for this procedure:
+---
+{rag_context}
+---
 
-M204 Main Loop Content:
+Convert the following M204 procedure into a COBOL code block. This block will be inserted directly into the PROCEDURE DIVISION of a larger COBOL program, inside an automatically generated COBOL paragraph (e.g., `{example_proc_name_sanitized}-PARA.`).
+
+M204 Procedure Name: {proc.m204_proc_name}
+M204 Parameters: {proc.m204_parameters_string or "None"}
+M204 Procedure Content:
 ```m204
-{main_loop_content}
+{proc.procedure_content}
 ```
 
-Your task is to generate *only* the COBOL statements that represent the logic of this loop.
-- Convert M204 `FOR EACH VALUE...` or `FIND` loops into COBOL inline loops (e.g., `PERFORM UNTIL ...` or `PERFORM VARYING ...`) with the loop body implemented directly inside the generated code block. Do NOT generate a `PERFORM` that calls another paragraph for the loop body; implement the loop logic inline.
-- Convert M204 `CALL` statements to COBOL `PERFORM <procedure-name>-PARA` statements.
-- Translate `IF/ELSE`, `PRINT`, and other logic into their COBOL equivalents.
-- The generated `cobol_code_block` MUST NOT include the paragraph name itself (e.g., `MAIN-PROCESSING-LOOP-PARA.`).
-- The code should be correctly indented to be placed inside a paragraph (starting in Area B, column 12).
-- Assume all required files are OPEN and will be CLOSED elsewhere. Assume variables are defined in WORKING-STORAGE.
+Your task is to generate *only* the COBOL statements that form the logic of this M204 procedure.
+The generated `cobol_code_block` in your JSON response:
+- MUST be suitable for direct inclusion within such a COBOL paragraph.
+- MUST NOT start with a paragraph name or section definition itself (e.g., do not include `MY-PARA.` or `MY-SECTION SECTION.` at the beginning of the block, as the surrounding paragraph is already provided).
+- MUST NOT include `IDENTIFICATION DIVISION`, `ENVIRONMENT DIVISION`, `DATA DIVISION`, or the `PROCEDURE DIVISION.` header itself.
+- SHOULD be well-structured, using COBOL paragraphs or sections within the block if appropriate for complex logic, and adhere to the COBOL6 standard.
+- Convert any M204 record loops (such as `FIND ALL RECORDS ... END FIND` or `FOR EACH VALUE ... END FOR`) into COBOL inline loops (e.g., `PERFORM UNTIL ...` or `PERFORM VARYING ...`) with the loop body implemented directly inside the generated code block. Do NOT generate a `PERFORM` that calls another paragraph for the loop body; implement the loop logic inline.
+- **Any query or data access that would use a database (DB) in M204 must be converted to use VSAM file access logic in COBOL (such as READ, START, READ NEXT, etc. on a VSAM file). Do NOT use DB2 SQL statements or DB2-specific logic anywhere in the generated code.**
+- MUST assume all required data items (variables, counters, file records, etc.) are already defined in the main program's `DATA DIVISION` (specifically `FILE SECTION` or `WORKING-STORAGE SECTION`). Do not generate any `DATA DIVISION` entries or `FD`s within the `cobol_code_block`. Your code should use variable names as if they exist globally.
 
-Respond with a JSON object structured according to the MainLoopToCobolOutput model:
+Respond with a JSON object structured according to the M204ProcedureToCobolOutput model:
 ```json
 {{
+  "m204_procedure_name": "{proc.m204_proc_name}",
   "cobol_code_block": "string",
   "comments": "string (optional)"
 }}
 ```
-Example of a valid `cobol_code_block` for a loop:
+Example of a valid `cobol_code_block` content (this would be placed inside a paragraph like `{example_proc_name_sanitized}-PARA.`):
 ```cobol
-      PERFORM UNTIL END-OF-FILE = 'Y'
-          READ INPUT-FILE
-              AT END
-                  MOVE 'Y' TO END-OF-FILE
-              NOT AT END
-                  PERFORM PROCESS-RECORD-PARA
-          END-READ
-      END-PERFORM.
+      DISPLAY 'Executing logic for {proc.m204_proc_name}'.
+      MOVE ZEROS TO SOME-COUNTER.
+      ADD 1 TO ANOTHER-VARIABLE.
+      IF SOME-CONDITION PERFORM SOME-OTHER-LOGIC-PARA.
+      IF ANOTHER-CONDITION
+          MOVE 'X' TO SOME-FLAG
+      ELSE
+          MOVE 'Y' TO SOME-FLAG
+      END-IF.
 ```
+Ensure the `cobol_code_block` contains only the procedural COBOL statements, correctly indented for inclusion within a paragraph (typically starting in Area B, column 12 or further).
 """
         json_text_output: Optional[str] = None
         try:
             async with self.llm_semaphore:
-                log.debug(f"Attempting LLM call for M204 main loop to COBOL from file: {m204_file_name} (semaphore acquired)")
-                llm_call = llm_config._llm.as_structured_llm(MainLoopToCobolOutput)
+                log.debug(f"Attempting LLM call for M204 procedure to COBOL: {proc.m204_proc_name} (semaphore acquired)")
+                llm_call = llm_config._llm.as_structured_llm(M204ProcedureToCobolOutput)
                 response = await llm_call.acomplete(prompt=prompt_fstr)
                 json_text_output = response.text
-            log.debug(f"LLM call for M204 main loop to COBOL from file: {m204_file_name} completed (semaphore released)")
+            log.debug(f"LLM call for M204 procedure to COBOL: {proc.m204_proc_name} completed (semaphore released)")
             json_text_output = strip_markdown_code_block(json_text_output)
-            return MainLoopToCobolOutput(**json.loads(json_text_output))
+            return M204ProcedureToCobolOutput(**json.loads(json_text_output))
         except Exception as e:
-            log.error(f"LLM error converting main loop from file {m204_file_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
-            return MainLoopToCobolOutput(
-                cobol_code_block="      * --- Error during COBOL conversion for Main Processing Loop ---\n"
-                                 "      DISPLAY 'Error in main loop logic.'.\n"
-                                 "      * --- See logs for details ---",
-                comments=f"LLM conversion failed for main loop: {str(e)}"
+            log.error(f"LLM error converting M204 procedure {proc.m204_proc_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
+            return M204ProcedureToCobolOutput(
+                m204_procedure_name=proc.m204_proc_name,
+                cobol_code_block=f"      * --- Error during COBOL conversion for M204 Procedure: {proc.m204_proc_name} ---\n"
+                                 f"      DISPLAY 'Error in logic for: {proc.m204_proc_name}'.\n"
+                                 f"      * --- See logs for details ---",
+                comments=f"LLM conversion failed: {str(e)}"
             )
+
 
     async def _llm_convert_file_definition_to_fd(self, m204_file: M204File) -> Optional[FileDefinitionToCobolFDOutput]:
         """Convert M204 file definition JSON to COBOL FD using LLM. Returns None if no definition exists."""

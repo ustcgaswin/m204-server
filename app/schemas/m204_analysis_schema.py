@@ -23,7 +23,6 @@ class M204VariableBaseSchema(BaseModel):
     cobol_variable_type: Optional[str] = None # e.g., PIC X(10), PIC 9(5)V99
     # is_explicitly_defined: Optional[bool] = None # Removed as it's not in the model and context implies true
 
-
 class M204VariableResponseSchema(M204VariableBaseSchema):
     variable_id: int # Changed from m204_variable_id
     project_id: int
@@ -136,7 +135,6 @@ class M204VariableUpdateSchema(BaseModel):
     attributes: Optional[Dict[str, Any]] = None
     # is_explicitly_defined: Optional[bool] = None # Removed
 
-
 # --- M204 Procedure Call Schemas ---
 class M204ProcedureCallBaseSchema(BaseModel):
     called_procedure_name: str
@@ -162,6 +160,23 @@ class M204ProcedureCallResponseSchema(M204ProcedureCallBaseSchema):
     class Config:
         from_attributes = True
 
+# --- M204 OPEN Statement Schemas ---
+class M204OpenStatementBaseSchema(BaseModel):
+    m204_file_name: str
+    line_number: Optional[int] = None
+
+class M204OpenStatementCreateSchema(M204OpenStatementBaseSchema):
+    project_id: int
+    input_source_id: int
+
+class M204OpenStatementResponseSchema(M204OpenStatementBaseSchema):
+    open_statement_id: int
+    project_id: int
+    input_source_id: int
+    # Add created_at/updated_at if you add them to the model
+    class Config:
+        from_attributes = True
+
 # --- M204 Analysis Result Data Schema ---
 class M204AnalysisResultDataSchema(BaseModel):
     procedures_found: List[M204ProcedureResponseSchema] = Field(default_factory=list)
@@ -169,6 +184,7 @@ class M204AnalysisResultDataSchema(BaseModel):
     # defined_fields_found: List[M204FieldResponseSchema] = Field(default_factory=list) # Removed
     variables_found: List[M204VariableResponseSchema] = Field(default_factory=list)
     procedure_calls_found: List[M204ProcedureCallResponseSchema] = Field(default_factory=list)
+    open_statements_found: List[M204OpenStatementResponseSchema] = Field(default_factory=list)
 
 class M204AnalysisResponseSchema(BaseModel):
     input_source_id: int

@@ -486,19 +486,27 @@ def _get_sections_config() -> List[Dict[str, str]]:
 """
         },
         {
-            "id": "m204_file_definitions",
-            "title": "## 4. M204 File Definitions",
-            "instructions": """
-   (Based on 'M204 File Definitions and Main Processing Loops Data' and relevant 'Source File LLM-Generated Summaries' for M204 files:
-    - For each M204 file, write a descriptive paragraph. This paragraph should cover its name, M204 attributes, whether it's a database file, and its target VSAM dataset name and type. Use the LLM-generated summary for the M204 source file where this file definition might be elaborated if available.
-    - If field information is available within the `file_definition_json` attribute of a file, list those fields using bullet points. Each bullet point should detail the field's name and its M204 attributes. For example:
-      "The M204 file **CUSTFILE** is defined with attributes `(attribute_list)`. It is flagged as a database file and maps to the target VSAM dataset **PROD.CUSTOMER.MASTER** of type `KSDS`. The M204 source summary for `MAINCUST.M204` indicates this file is central to customer data management. This file appears to store core customer master data.
-      * Fields (from JSON definition, if available):
-        * `CUST_ID` (Attributes: `KEY, NUMERIC, ...`)
-        * `CUST_NAME` (Attributes: `TEXT, ...`)"
-    - If no detailed field information is available in `file_definition_json`, state that "Detailed field structure not available in the provided data for this file."
-    - Conclude with a summary paragraph about the general categories or types of data managed by these files based on their names, attributes, and the overall M204 source file summaries.)
-"""
+        "id": "m204_file_definitions",
+        "title": "## 4. M204 File Definitions",
+        "instructions": """
+        Based on the 'M204 File Definitions and Main Processing Loops Data' and any relevant 'Source File LLM-Generated Summaries' for M204 files:
+
+        1. For each M204 file, write a descriptive paragraph covering:
+        - File name in **bold**.
+        - The exact DEFINE statement or M204 attributes (e.g. `(attribute_list)`).
+        - Whether it is flagged as a database file under Model 204.
+        - Its target VSAM dataset name in **bold** and type (e.g. `KSDS`, `RRDS`), or `N/A` if none.
+        - A brief note on its purpose or role, drawing on any available LLM-generated summary.
+
+        2. If `file_definition_json` includes field definitions, list them as bullet points under “Fields:”:
+        * `FIELD_NAME` (Attributes: `attr1, attr2, …`)
+        Otherwise, state:
+        “Detailed field structure not available in the provided data for this file.”
+
+        3. After all files, conclude with a summary paragraph that:
+        - Groups the files into general categories (e.g., master/reference data, transactional staging, system/utility datasets, control/audit logs).
+        - Highlights the types of data each category manages, inferred from file names, attributes, and source summaries.
+        """
         },
         {
             "id": "m204_file_vsam_jcl_diagram",

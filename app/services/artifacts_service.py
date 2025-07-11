@@ -401,6 +401,146 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
             )
 
 
+#     async def _llm_convert_file_definition_to_fd(self, m204_file: M204File) -> Optional[FileDefinitionToCobolFDOutput]:
+#         """Convert M204 file definition JSON to COBOL FD using LLM. Returns None if no definition exists."""
+#         if not m204_file.file_definition_json:
+#             log.info(f"Skipping FD generation for M204 file '{m204_file.m204_file_name}' as it has no file_definition_json.")
+#             return None
+
+#         if not llm_config._llm:
+#             log.warning(f"LLM not available for M204 file: {m204_file.m204_file_name}. Returning placeholder FD because a file definition exists.")
+#             select_name = (m204_file.m204_logical_dataset_name or m204_file.m204_file_name or f"FILE{m204_file.m204_file_id}").replace("-", "")[:8]
+#             return FileDefinitionToCobolFDOutput(
+#                 logical_file_name=select_name,
+#                 file_control_entry=f"       SELECT {select_name}-FILE ASSIGN TO {select_name}.\n",
+#                 file_description_entry=f"   FD  {select_name}-FILE.\n"
+#                                      f"   01  {select_name}-RECORD PIC X(80). *> Placeholder\n",
+#                 comments="LLM not available. Manual FD creation required."
+#             )
+
+#         file_definition = m204_file.file_definition_json
+#         file_type = file_definition.get('file_type', 'unknown')
+        
+#         # Build field information string from JSON
+#         field_info_parts = []
+#         if file_type == "db_file":
+#             # DB file with PARMLIB field definitions
+#             fields = file_definition.get('fields', {})
+#             for field_name, field_data in fields.items():
+#                 attributes = field_data.get('attributes', [])
+#                 vsam_suggestions = field_data.get('vsam_suggestions', {})
+#                 field_info = f"- Field: {field_name}, Attributes: {', '.join(attributes)}"
+#                 if vsam_suggestions.get('cobol_picture_clause'): # MODIFIED HERE
+#                     field_info += f", Suggested COBOL PIC: {vsam_suggestions['cobol_picture_clause']}" # MODIFIED HERE
+#                 field_info_parts.append(field_info)
+#         elif file_type == "flat_file":
+#             # Flat file with IMAGE definitions
+#             image_definitions = file_definition.get('image_definitions', [])
+#             for image_def in image_definitions:
+#                 image_name = image_def.get('image_name', 'UNKNOWN')
+#                 fields = image_def.get('fields', [])
+#                 field_info_parts.append(f"- IMAGE: {image_name}")
+#                 for field in fields:
+#                     field_name = field.get('field_name', 'UNKNOWN')
+#                     data_type = field.get('data_type', 'UNKNOWN')
+#                     length = field.get('length', '')
+#                     # If IMAGE fields also have 'cobol_picture_clause' in their 'cobol_layout_suggestions'
+#                     # you might want to include it here too.
+#                     # For now, sticking to the original structure for flat_file IMAGE fields.
+#                     suggested_cobol_pic = field.get('cobol_layout_suggestions', {}).get('cobol_picture_clause')
+#                     field_info_parts.append(f"  - Field: {field_name}, Type: {data_type}, Length: {length}{f', Suggested COBOL PIC: {suggested_cobol_pic}' if suggested_cobol_pic else ''}")
+#         elif file_type == "mixed":
+#             # Combined DB and flat file definitions
+#             field_info_parts.append("- Mixed file type with both DB and flat definitions")
+#             db_def = file_definition.get('db_file_definition', {})
+#             flat_def = file_definition.get('flat_file_definition', {})
+#             # Process both definitions
+#             if db_def.get('fields'):
+#                 field_info_parts.append("  DB Fields:")
+#                 for field_name, field_data in db_def['fields'].items():
+#                     attributes = field_data.get('attributes', [])
+#                     vsam_suggestions = field_data.get('vsam_suggestions', {})
+#                     field_info = f"    - {field_name}: {', '.join(attributes)}"
+#                     if vsam_suggestions.get('cobol_picture_clause'): # MODIFIED HERE
+#                         field_info += f", Suggested COBOL PIC: {vsam_suggestions['cobol_picture_clause']}" # MODIFIED HERE
+#                     field_info_parts.append(field_info)
+
+#             if flat_def.get('image_definitions'):
+#                 field_info_parts.append("  IMAGE Definitions:")
+#                 for image_def in flat_def['image_definitions']:
+#                     image_name = image_def.get('image_name', 'UNKNOWN')
+#                     field_info_parts.append(f"    - IMAGE: {image_name}")
+#                     for field in image_def.get('fields', []):
+#                         field_name = field.get('field_name', 'UNKNOWN')
+#                         data_type = field.get('data_type', 'UNKNOWN')
+#                         length = field.get('length', '')
+#                         suggested_cobol_pic = field.get('cobol_layout_suggestions', {}).get('cobol_picture_clause')
+#                         field_info_parts.append(f"      - Field: {field_name}, Type: {data_type}, Length: {length}{f', Suggested COBOL PIC: {suggested_cobol_pic}' if suggested_cobol_pic else ''}")
+
+
+#         field_info_str = "\n".join(field_info_parts) if field_info_parts else "No field information available."
+
+#         prompt_fstr = f"""
+# You are an expert M204 to COBOL migration specialist.
+# Convert the following M204 file definition into COBOL FILE-CONTROL (SELECT) and FILE SECTION (FD) entries.
+
+# M204 File Information:
+# - File Name (DDNAME): {m204_file.m204_file_name or 'UNKNOWN'}
+# - Logical Dataset Name: {m204_file.m204_logical_dataset_name or 'Not specified'}
+# - File Type: {file_type}
+# - Is DB File: {m204_file.is_db_file}
+
+# Field/Layout Information:
+# {field_info_str}
+
+# File Definition JSON (for detailed structure if needed by LLM):
+# {json.dumps(file_definition, indent=2)}
+
+# Generate appropriate COBOL FILE-CONTROL and FD entries based on this M204 file definition.
+# For DB files, create record layouts based on the PARMLIB field definitions and their 'Suggested COBOL PIC'.
+# For flat files, use the IMAGE statement field definitions and their 'Suggested COBOL PIC'.
+# For mixed files, prioritize the most appropriate definition for COBOL conversion, using 'Suggested COBOL PIC' where available.
+
+# The `logical_file_name` in the output JSON should be a COBOL-friendly name derived from the M204 file name (e.g., M204 DDNAME 'MYFILE01' could become 'MYFILE01' or 'MYFILE').
+# This name will be used in the `SELECT ... ASSIGN TO {{{{logical_file_name}}}}` and `FD  {{{{logical_file_name}}}}-FILE.`
+# The `file_control_entry` should be the complete SELECT statement.
+# The `file_description_entry` should be the complete FD, including the 01 record level and all 05 field levels with their PICTURE clauses.
+# If `working_storage_entries` are needed (e.g., for complex redefines or specific counters related to this FD), include them.
+
+# Respond with a JSON object structured according to the FileDefinitionToCobolFDOutput model:
+# ```json
+# {{
+#   "logical_file_name": "string",
+#   "file_control_entry": "string",
+#   "file_description_entry": "string",
+#   "working_storage_entries": "string (optional)",
+#   "comments": "string (optional)"
+# }}
+# ```
+# Ensure the FD record layout (01 and 05 levels) is complete and uses the 'Suggested COBOL PIC' from the field information provided.
+# """
+
+#         json_text_output: Optional[str] = None
+#         try:
+#             async with self.llm_semaphore:
+#                 log.debug(f"Attempting LLM call for FD conversion: {m204_file.m204_file_name} (semaphore acquired)")
+#                 llm_call = llm_config._llm.as_structured_llm(FileDefinitionToCobolFDOutput)
+#                 response = await llm_call.acomplete(prompt=prompt_fstr)
+#                 json_text_output = response.text
+#             log.debug(f"LLM call for FD conversion: {m204_file.m204_file_name} completed (semaphore released)")
+#             json_text_output = strip_markdown_code_block(json_text_output)
+#             return FileDefinitionToCobolFDOutput(**json.loads(json_text_output))
+#         except Exception as e:
+#             log.error(f"LLM error converting file definition for {m204_file.m204_file_name} to FD: {e}. Raw output: {json_text_output}", exc_info=True)
+#             select_name = (m204_file.m204_logical_dataset_name or m204_file.m204_file_name or f"FILE{m204_file.m204_file_id}").replace("-", "")[:8]
+#             return FileDefinitionToCobolFDOutput(
+#                 logical_file_name=select_name,
+#                 file_control_entry=f"       SELECT {select_name}-FILE ASSIGN TO {select_name}. *> ERROR IN CONVERSION\n",
+#                 file_description_entry=f"   FD  {select_name}-FILE. *> ERROR IN CONVERSION\n"
+#                                      f"   01  {select_name}-RECORD PIC X(80). *> Placeholder due to error\n",
+#                 comments=f"LLM FD conversion failed: {str(e)}"
+#             ) 
+
     async def _llm_convert_file_definition_to_fd(self, m204_file: M204File) -> Optional[FileDefinitionToCobolFDOutput]:
         """Convert M204 file definition JSON to COBOL FD using LLM. Returns None if no definition exists."""
         if not m204_file.file_definition_json:
@@ -420,9 +560,11 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
 
         file_definition = m204_file.file_definition_json
         file_type = file_definition.get('file_type', 'unknown')
-        
+
         # Build field information string from JSON
         field_info_parts = []
+        vsam_key_fields = []
+        vsam_key_info_str = ""
         if file_type == "db_file":
             # DB file with PARMLIB field definitions
             fields = file_definition.get('fields', {})
@@ -430,8 +572,11 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
                 attributes = field_data.get('attributes', [])
                 vsam_suggestions = field_data.get('vsam_suggestions', {})
                 field_info = f"- Field: {field_name}, Attributes: {', '.join(attributes)}"
-                if vsam_suggestions.get('cobol_picture_clause'): # MODIFIED HERE
-                    field_info += f", Suggested COBOL PIC: {vsam_suggestions['cobol_picture_clause']}" # MODIFIED HERE
+                if vsam_suggestions.get('cobol_picture_clause'):
+                    field_info += f", Suggested COBOL PIC: {vsam_suggestions['cobol_picture_clause']}"
+                if vsam_suggestions.get('is_key_component'):
+                    key_order = vsam_suggestions.get('key_order', 999)
+                    vsam_key_fields.append((key_order, field_name))
                 field_info_parts.append(field_info)
         elif file_type == "flat_file":
             # Flat file with IMAGE definitions
@@ -444,9 +589,6 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
                     field_name = field.get('field_name', 'UNKNOWN')
                     data_type = field.get('data_type', 'UNKNOWN')
                     length = field.get('length', '')
-                    # If IMAGE fields also have 'cobol_picture_clause' in their 'cobol_layout_suggestions'
-                    # you might want to include it here too.
-                    # For now, sticking to the original structure for flat_file IMAGE fields.
                     suggested_cobol_pic = field.get('cobol_layout_suggestions', {}).get('cobol_picture_clause')
                     field_info_parts.append(f"  - Field: {field_name}, Type: {data_type}, Length: {length}{f', Suggested COBOL PIC: {suggested_cobol_pic}' if suggested_cobol_pic else ''}")
         elif file_type == "mixed":
@@ -461,10 +603,12 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
                     attributes = field_data.get('attributes', [])
                     vsam_suggestions = field_data.get('vsam_suggestions', {})
                     field_info = f"    - {field_name}: {', '.join(attributes)}"
-                    if vsam_suggestions.get('cobol_picture_clause'): # MODIFIED HERE
-                        field_info += f", Suggested COBOL PIC: {vsam_suggestions['cobol_picture_clause']}" # MODIFIED HERE
+                    if vsam_suggestions.get('cobol_picture_clause'):
+                        field_info += f", Suggested COBOL PIC: {vsam_suggestions['cobol_picture_clause']}"
+                    if vsam_suggestions.get('is_key_component'):
+                        key_order = vsam_suggestions.get('key_order', 999)
+                        vsam_key_fields.append((key_order, field_name))
                     field_info_parts.append(field_info)
-
             if flat_def.get('image_definitions'):
                 field_info_parts.append("  IMAGE Definitions:")
                 for image_def in flat_def['image_definitions']:
@@ -477,6 +621,14 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
                         suggested_cobol_pic = field.get('cobol_layout_suggestions', {}).get('cobol_picture_clause')
                         field_info_parts.append(f"      - Field: {field_name}, Type: {data_type}, Length: {length}{f', Suggested COBOL PIC: {suggested_cobol_pic}' if suggested_cobol_pic else ''}")
 
+        # Compose VSAM key info for DB files
+        if m204_file.is_db_file:
+            if vsam_key_fields:
+                vsam_key_fields.sort()
+                key_names = [f[1] for f in vsam_key_fields]
+                vsam_key_info_str = f"RECORD KEY IS {', '.join(key_names)}."
+            elif m204_file.primary_key_field_name:
+                vsam_key_info_str = f"RECORD KEY IS {m204_file.primary_key_field_name}."
 
         field_info_str = "\n".join(field_info_parts) if field_info_parts else "No field information available."
 
@@ -489,6 +641,7 @@ M204 File Information:
 - Logical Dataset Name: {m204_file.m204_logical_dataset_name or 'Not specified'}
 - File Type: {file_type}
 - Is DB File: {m204_file.is_db_file}
+{"- VSAM Key Info: " + vsam_key_info_str if vsam_key_info_str else ""}
 
 Field/Layout Information:
 {field_info_str}
@@ -498,6 +651,7 @@ File Definition JSON (for detailed structure if needed by LLM):
 
 Generate appropriate COBOL FILE-CONTROL and FD entries based on this M204 file definition.
 For DB files, create record layouts based on the PARMLIB field definitions and their 'Suggested COBOL PIC'.
+For DB files, if VSAM Key Info is provided above, you MUST include the RECORD KEY clause in the FD using the key field(s) listed.
 For flat files, use the IMAGE statement field definitions and their 'Suggested COBOL PIC'.
 For mixed files, prioritize the most appropriate definition for COBOL conversion, using 'Suggested COBOL PIC' where available.
 
@@ -539,8 +693,8 @@ Ensure the FD record layout (01 and 05 levels) is complete and uses the 'Suggest
                 file_description_entry=f"   FD  {select_name}-FILE. *> ERROR IN CONVERSION\n"
                                      f"   01  {select_name}-RECORD PIC X(80). *> Placeholder due to error\n",
                 comments=f"LLM FD conversion failed: {str(e)}"
-            ) 
-    
+            )
+        
     def _clear_existing_artifacts_for_input_source(self, input_source_id: int):
         self.db.query(GeneratedCobolArtifact).filter(GeneratedCobolArtifact.input_source_id == input_source_id).delete(synchronize_session=False)
         self.db.query(GeneratedJclArtifact).filter(GeneratedJclArtifact.input_source_id == input_source_id).delete(synchronize_session=False)
@@ -1453,7 +1607,6 @@ The `jcl_content` should be the complete JCL.
             *
             * COBOL program for M204 Input Source: {input_source_name_for_comments}
             *
-            {("* " + "\n*\n* ".join(cobol_conversion_comments)) if cobol_conversion_comments else "* No specific conversion comments."}
             *
             ENVIRONMENT DIVISION.
             INPUT-OUTPUT SECTION.

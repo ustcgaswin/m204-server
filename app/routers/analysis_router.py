@@ -3,10 +3,13 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from app.config.db_config import get_db
-from app.services import analysis_service # Updated import
+from app.services import analysis_service,m204_analysis_service
 from app.schemas.analysis_schema import UnifiedAnalysisReportSchema
 from app.utils.logger import log
 from app.models.input_source_model import InputSource
+from app.models.m204_file_model import M204File
+from app.config.llm_config import llm_config
+import asyncio
 
 router = APIRouter(
     prefix="/analysis",
@@ -125,4 +128,25 @@ async def trigger_project_ordered_analysis(
             # Continue with other files
 
     log.info(f"ANALYSIS_ROUTER: Completed ordered analysis for project_id: {project_id}. Generated {len(analysis_reports)} reports.")
+
+    # --- VSAM enhancement for all DB files after all analysis ---
+    db.commit()  # Ensure all is_db_file flags are up to date
+
+    if llm_config._llm:
+        db_files = db.query(M204File).filter(
+            M204File.project_id == project_id,
+            M204File.is_db_file
+        ).all()
+        log.info(f"ANALYSIS_ROUTER: Starting VSAM enhancement for {len(db_files)} DB files in project {project_id}.")
+        vsam_tasks = [
+            m204_analysis_service.enhance_m204_db_file_with_vsam_suggestions(db, m204_file)
+            for m204_file in db_files
+        ]
+        await asyncio.gather(*vsam_tasks, return_exceptions=True)
+        db.commit()
+        log.info(f"ANALYSIS_ROUTER: Completed VSAM enhancement for all DB files in project {project_id}.")
+    else:
+        log.warning(f"ANALYSIS_ROUTER: LLM not configured. Skipping VSAM enhancement for project {project_id}.")
+    # --- End VSAM enhancement ---
+
     return analysis_reports

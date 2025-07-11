@@ -795,104 +795,53 @@ async def extract_and_store_main_loop(db: Session, input_source_id: int, file_co
         raise
 
 
-# def _extract_main_loop_content(file_content: str) -> Optional[str]:
-#     """Extracts content between the first top-level REPEAT and its corresponding END REPEAT."""
-#     if not file_content:
-#         return None
-    
-#     # Case-insensitive search for REPEAT and END REPEAT at the start of a line (or with leading whitespace)
-#     # This helps avoid capturing loops inside procedures if we only care about the main one.
-#     repeat_match = re.search(r'^\s*REPEAT\b', file_content, re.IGNORECASE | re.MULTILINE)
-#     if not repeat_match:
-#         return None
 
-#     start_index = repeat_match.end()
-    
-#     # Find corresponding END REPEAT, handling nested loops
-#     end_repeat_pattern = re.compile(r'^\s*END\s+REPEAT\b', re.IGNORECASE | re.MULTILINE)
-#     repeat_pattern = re.compile(r'^\s*REPEAT\b', re.IGNORECASE | re.MULTILINE)
-    
-#     nesting_level = 1
-#     search_offset = start_index
-    
-#     content_substring = file_content[search_offset:]
-    
-#     while nesting_level > 0:
-#         # We need to find the relative positions of the next REPEAT and END REPEAT
-#         next_end_repeat_match = end_repeat_pattern.search(content_substring)
-#         next_repeat_match = repeat_pattern.search(content_substring)
-
-#         if next_end_repeat_match is None:
-#             # No matching END REPEAT found, malformed loop
-#             return None
-
-#         # If a nested REPEAT appears before the next END REPEAT
-#         if next_repeat_match and next_repeat_match.start() < next_end_repeat_match.start():
-#             nesting_level += 1
-#             # Move the search position past the start of the nested REPEAT
-#             search_offset += next_repeat_match.end()
-#         else:
-#             nesting_level -= 1
-#             if nesting_level == 0:
-#                 # Found the matching END REPEAT
-#                 end_index = search_offset + next_end_repeat_match.start()
-#                 return file_content[start_index:end_index].strip()
-#             else:
-#                 # This was a nested END REPEAT, move search position past it
-#                 search_offset += next_end_repeat_match.end()
-        
-#         content_substring = file_content[search_offset:]
-
-#     return None # Should not be reached if loops are well-formed
 
 
 def _extract_main_loop_content(file_content: str) -> Optional[str]:
     """
     Extracts the main processing logic from an M204 procedure file.
 
-    This function implements a stateful parsing approach. It defines the
-    "main processing logic" as all executable statements that appear before
-    the first SUBROUTINE or PROCEDURE definition, while explicitly skipping
-    IMAGE blocks, variable declarations, and root-level comments.
+    This function defines the main logic block as the content between the
+    first line containing 'B' or 'BEGIN' and the last line containing 'END'.
 
-    By design, this function correctly captures all standard M204 control
-    structures like IF/END IF, FOR/END FOR, REPEAT/END REPEAT, and
-    FIND/END FIND, as they do not match any of the skip/stop patterns.
+    Within this block, it filters out and skips over the entirety of:
+    - IMAGE ... END IMAGE blocks
+    - SUBROUTINE ... END SUBROUTINE blocks
+    - PROCEDURE ... END PROCEDURE blocks
+    - Single-line variable declarations (%VAR IS ...)
+
+    All other content, including comments, is preserved.
 
     Args:
         file_content: The string content of the M204 procedure file.
 
     Returns:
-        A string containing the extracted main processing logic, or None if
-        no such logic is found.
+        A string containing the extracted and filtered main logic, or None if
+        a valid BEGIN...END block is not found.
     """
     if not file_content:
         return None
 
     # --- Regular Expression Definitions ---
-    # All patterns are compiled here to be self-contained.
+    begin_pattern = re.compile(r"^\s*(B|BEGIN)\s*$", re.IGNORECASE | re.MULTILINE)
+    end_pattern = re.compile(r"^\s*END\s*$", re.IGNORECASE | re.MULTILINE)
 
-    # Skips full-line comments (e.g., "* THIS IS A COMMENT")
-    comment_pattern = re.compile(r"^\s*\*.*", re.MULTILINE)
-
-    # Skips variable declarations (e.g., "%MYVAR IS STRING LEN 10")
     m204_var_declaration_pattern = re.compile(
         r"^\s*(?:(PUBLIC|PRIVATE)\s+)?(%[A-Z0-9_#@$-]+)\s+IS\s+(.*)",
         re.IGNORECASE | re.MULTILINE,
     )
-
-    # Finds procedure definitions (e.g., "SUBROUTINE FOO" or "BAR: PROCEDURE")
-    # These act as the stop signal for the main logic block.
     proc_pattern_keyword_first = re.compile(
-        r"^\s*(?:(PUBLIC|PRIVATE)\s+)?(SUBROUTINE|PROCEDURE)\s+([A-Z0-9_#@$-]{1,32})(?:\s*\(([^)]*)\))?",
+        r"^\s*(?:(PUBLIC|PRIVATE)\s+)?(SUBROUTINE|PROCEDURE)\s+([A-Z0-9_#@$-]{1,32})",
         re.IGNORECASE | re.MULTILINE,
     )
     proc_pattern_name_first = re.compile(
-        r"^\s*([A-Z0-9_#@$-]{1,32})\s*:\s*(PUBLIC\s+|PRIVATE\s+)?(SUBROUTINE|PROCEDURE)(?:\s*\(([^)]*)\))?",
+        r"^\s*([A-Z0-9_#@$-]{1,32})\s*:\s*(PUBLIC\s+|PRIVATE\s+)?(SUBROUTINE|PROCEDURE)",
         re.IGNORECASE | re.MULTILINE,
     )
-
-    # Finds IMAGE blocks to skip them entirely.
+    end_proc_pattern = re.compile(
+        r"^\s*END\s+(SUBROUTINE|PROCEDURE)\b", re.IGNORECASE | re.MULTILINE
+    )
     image_start_pattern = re.compile(
         r"^\s*IMAGE\s+([A-Z0-9_.#@$-]+)", re.IGNORECASE | re.MULTILINE
     )
@@ -900,73 +849,67 @@ def _extract_main_loop_content(file_content: str) -> Optional[str]:
         r"^\s*END\s+IMAGE\b", re.IGNORECASE | re.MULTILINE
     )
 
-    # --- Parsing Logic ---
+    # --- Phase 1: Find the overall boundaries ---
+    first_begin_match = begin_pattern.search(file_content)
+    if not first_begin_match:
+        return None
 
+    end_matches = list(end_pattern.finditer(file_content))
+    if not end_matches:
+        return None
+    last_end_match = end_matches[-1]
+
+    start_boundary = first_begin_match.start()
+    end_boundary = last_end_match.end()
+
+    if start_boundary >= last_end_match.start():
+        return None  # Invalid if last END is before first BEGIN
+
+    # --- Phase 2: Parse content within boundaries, skipping blocks ---
     main_content_parts: List[str] = []
-    search_pos = 0
+    search_pos = start_boundary
 
-    while search_pos < len(file_content):
-        remaining_content = file_content[search_pos:]
-
-        # Find the next occurrence of any significant statement.
+    while search_pos < end_boundary:
+        # We only search within the content before the final END
+        content_slice = file_content[search_pos:end_boundary]
         found_matches: List[Tuple[Match, str]] = []
 
-        # Find procedures (our stop condition)
-        if m := proc_pattern_keyword_first.search(remaining_content):
-            found_matches.append((m, "proc"))
-        if m := proc_pattern_name_first.search(remaining_content):
-            found_matches.append((m, "proc"))
-
-        # Find things to skip
-        if m := image_start_pattern.search(remaining_content):
+        # Find the next block to potentially skip
+        if m := image_start_pattern.search(content_slice):
             found_matches.append((m, "image"))
-        if m := m204_var_declaration_pattern.search(remaining_content):
+        if m := proc_pattern_keyword_first.search(content_slice):
+            found_matches.append((m, "proc"))
+        if m := proc_pattern_name_first.search(content_slice):
+            found_matches.append((m, "proc"))
+        if m := m204_var_declaration_pattern.search(content_slice):
             found_matches.append((m, "var"))
-        if m := comment_pattern.search(remaining_content):
-            found_matches.append((m, "comment"))
 
-        # If no more significant tokens are found, the rest is main logic.
         if not found_matches:
-            main_content_parts.append(remaining_content)
+            # No more blocks to skip, append the rest of the content
+            main_content_parts.append(content_slice)
             break
 
-        # Determine which token appears first
-        first_match, match_type = min(
-            found_matches, key=lambda m: m[0].start()
-        )
-        match_start_pos = search_pos + first_match.start()
-        match_end_pos = search_pos + first_match.end()
+        first_match, match_type = min(found_matches, key=lambda m: m[0].start())
+        match_start_in_file = search_pos + first_match.start()
+        match_end_in_file = search_pos + first_match.end()
 
-        # Add the content between our last position and this new token
-        main_content_parts.append(file_content[search_pos:match_start_pos])
+        # Add the content from our last position up to the start of this block
+        main_content_parts.append(file_content[search_pos:match_start_in_file])
 
-        # --- Decision Logic ---
-
-        # A subroutine definition ends the main logic block.
-        if match_type == "proc":
-            search_pos = len(file_content)  # End the loop
-            continue
-
-        # An IMAGE block must be skipped entirely.
+        # --- Decision Logic to skip the block ---
         if match_type == "image":
-            end_image_match = image_end_pattern.search(
-                file_content, pos=match_end_pos
-            )
-            if end_image_match:
-                search_pos = end_image_match.end()
-            else:
-                break  # Malformed IMAGE block, stop here.
-            continue
+            end_image_match = image_end_pattern.search(file_content, pos=match_end_in_file)
+            search_pos = end_image_match.end() if end_image_match else end_boundary
+        elif match_type == "proc":
+            end_proc_match = end_proc_pattern.search(file_content, pos=match_end_in_file)
+            search_pos = end_proc_match.end() if end_proc_match else end_boundary
+        elif match_type == "var":
+            # Variable declarations are single-line, so just skip the match
+            search_pos = match_end_in_file
 
-        # A variable declaration or a comment is simply skipped.
-        if match_type in ("var", "comment"):
-            search_pos = match_end_pos
-            continue
-
-    # Join all the collected parts and clean up whitespace
     result = "".join(main_content_parts).strip()
-
     return result if result else None
+
 
 async def _extract_and_store_m204_datasets(
     db: Session, input_source: InputSource, file_content: str

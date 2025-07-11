@@ -281,19 +281,19 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
             analysis_status_val = "completed"
             message = f"Analysis for {input_source.original_filename} (Type: {file_type}) completed. No specific details extracted for this type."
 
-        if m204_db_files_for_vsam_enhancement and llm_config._llm:
-            log.info(f"ORCHESTRATOR: Starting VSAM enhancement for {len(m204_db_files_for_vsam_enhancement)} M204 DB files related to {input_source.original_filename}.")
-            vsam_enhancement_tasks = []
-            for m204_db_file in m204_db_files_for_vsam_enhancement:
-                db.refresh(m204_db_file) 
-                vsam_enhancement_tasks.append(
-                    m204_analysis_service.enhance_m204_db_file_with_vsam_suggestions(db, m204_db_file)
-                )
-            await asyncio.gather(*vsam_enhancement_tasks, return_exceptions=True) 
-            log.info(f"ORCHESTRATOR: Completed VSAM enhancement tasks for M204 DB files related to {input_source.original_filename}.")
+        # if m204_db_files_for_vsam_enhancement and llm_config._llm:
+        #     log.info(f"ORCHESTRATOR: Starting VSAM enhancement for {len(m204_db_files_for_vsam_enhancement)} M204 DB files related to {input_source.original_filename}.")
+        #     vsam_enhancement_tasks = []
+        #     for m204_db_file in m204_db_files_for_vsam_enhancement:
+        #         db.refresh(m204_db_file) 
+        #         vsam_enhancement_tasks.append(
+        #             m204_analysis_service.enhance_m204_db_file_with_vsam_suggestions(db, m204_db_file)
+        #         )
+        #     await asyncio.gather(*vsam_enhancement_tasks, return_exceptions=True) 
+        #     log.info(f"ORCHESTRATOR: Completed VSAM enhancement tasks for M204 DB files related to {input_source.original_filename}.")
 
-        elif m204_db_files_for_vsam_enhancement and not llm_config._llm:
-            log.warning(f"ORCHESTRATOR: LLM not configured. Skipping VSAM enhancement for {len(m204_db_files_for_vsam_enhancement)} M204 DB files.")
+        # elif m204_db_files_for_vsam_enhancement and not llm_config._llm:
+        #     log.warning(f"ORCHESTRATOR: LLM not configured. Skipping VSAM enhancement for {len(m204_db_files_for_vsam_enhancement)} M204 DB files.")
 
         db.commit()
         log.info(f"ORCHESTRATOR: Successfully committed all analysis changes for InputSource ID: {input_source_id}, File: {input_source.original_filename}")

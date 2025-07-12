@@ -797,7 +797,6 @@ async def extract_and_store_main_loop(db: Session, input_source_id: int, file_co
 
 
 
-
 def _extract_main_loop_content(file_content: str) -> Optional[str]:
     """
     Extracts the main processing logic from an M204 procedure file.
@@ -810,8 +809,9 @@ def _extract_main_loop_content(file_content: str) -> Optional[str]:
     - SUBROUTINE ... END SUBROUTINE blocks
     - PROCEDURE ... END PROCEDURE blocks
     - Single-line variable declarations (%VAR IS ...)
+    - Root-level comments (lines starting with *)
 
-    All other content, including comments, is preserved.
+    All other content is preserved.
 
     Args:
         file_content: The string content of the M204 procedure file.
@@ -826,6 +826,7 @@ def _extract_main_loop_content(file_content: str) -> Optional[str]:
     # --- Regular Expression Definitions ---
     begin_pattern = re.compile(r"^\s*(B|BEGIN)\s*$", re.IGNORECASE | re.MULTILINE)
     end_pattern = re.compile(r"^\s*END\s*$", re.IGNORECASE | re.MULTILINE)
+    comment_pattern = re.compile(r"^\s*\*.*", re.MULTILINE)
 
     m204_var_declaration_pattern = re.compile(
         r"^\s*(?:(PUBLIC|PRIVATE)\s+)?(%[A-Z0-9_#@$-]+)\s+IS\s+(.*)",
@@ -870,7 +871,6 @@ def _extract_main_loop_content(file_content: str) -> Optional[str]:
     search_pos = start_boundary
 
     while search_pos < end_boundary:
-        # We only search within the content before the final END
         content_slice = file_content[search_pos:end_boundary]
         found_matches: List[Tuple[Match, str]] = []
 
@@ -883,9 +883,10 @@ def _extract_main_loop_content(file_content: str) -> Optional[str]:
             found_matches.append((m, "proc"))
         if m := m204_var_declaration_pattern.search(content_slice):
             found_matches.append((m, "var"))
+        if m := comment_pattern.search(content_slice):
+            found_matches.append((m, "comment"))
 
         if not found_matches:
-            # No more blocks to skip, append the rest of the content
             main_content_parts.append(content_slice)
             break
 
@@ -893,7 +894,6 @@ def _extract_main_loop_content(file_content: str) -> Optional[str]:
         match_start_in_file = search_pos + first_match.start()
         match_end_in_file = search_pos + first_match.end()
 
-        # Add the content from our last position up to the start of this block
         main_content_parts.append(file_content[search_pos:match_start_in_file])
 
         # --- Decision Logic to skip the block ---
@@ -903,12 +903,13 @@ def _extract_main_loop_content(file_content: str) -> Optional[str]:
         elif match_type == "proc":
             end_proc_match = end_proc_pattern.search(file_content, pos=match_end_in_file)
             search_pos = end_proc_match.end() if end_proc_match else end_boundary
-        elif match_type == "var":
-            # Variable declarations are single-line, so just skip the match
+        elif match_type in ("var", "comment"):
+            # Variable declarations and comments are single-line, so just skip the match
             search_pos = match_end_in_file
 
     result = "".join(main_content_parts).strip()
     return result if result else None
+
 
 
 async def _extract_and_store_m204_datasets(

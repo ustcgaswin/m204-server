@@ -68,6 +68,9 @@ Respond with a JSON object structured according to the M204FieldVsamSuggestion m
         field_vsam_suggester_llm = llm_config._llm.as_structured_llm(M204FieldVsamSuggestion)
         completion_response = await field_vsam_suggester_llm.acomplete(prompt=prompt_fstr)
         json_text_output = completion_response.text
+
+        log.info(f"PARMLIB_LLM_FIELD: Raw LLM JSON response for field '{field_name}': {json_text_output}")
+
         
         loaded_suggestion_data = json.loads(json_text_output)
         field_suggestion = M204FieldVsamSuggestion(**loaded_suggestion_data)
@@ -167,137 +170,54 @@ async def _populate_vsam_suggestions_for_all_fields_parallel(
             field_info_to_update["vsam_suggestions"] = {"error": "Unexpected result type from LLM task.", "m204_field_name": original_field_name}
 
 
-# async def _extract_m204_files_from_parmlib(
-#     db: Session, input_source: InputSource, file_content: str
-# ) -> List[M204File]:
-#     """Extract and store PARMLIB data in JSON format, with parallel LLM calls for field suggestions."""
-#     log.info(f"PARMLIB_PARSE: Starting extraction from PARMLIB file ID: {input_source.input_source_id} ({input_source.original_filename})")
-    
-#     lines = file_content.splitlines()
-    
-#     all_parsed_file_contexts: List[Dict[str, Any]] = []
-#     current_file_data: Optional[Dict[str, Any]] = None
-    
-#     file_context_pattern = re.compile(r"^\s*(?:FILE|M204FILE)\s*=?\s*([A-Z0-9_#@$-]+)", re.IGNORECASE)
-#     field_def_pattern = re.compile(r"^\s*DEFINE\s+FIELD\s+([A-Z0-9_#@$-]+)", re.IGNORECASE)
-    
-#     i = 0
-#     while i < len(lines):
-#         line_content_original = lines[i]
-#         # Capture the 1-based line number for the start of the current statement/definition
-#         start_line_of_statement = i + 1 
-
-#         line_content_for_parsing = line_content_original
-#         # Handle line continuation: combines current line with next if current ends with '-'
-#         current_line_idx_for_continuation = i # Use a separate index for continuation logic
-#         while line_content_for_parsing.rstrip().endswith('-') and current_line_idx_for_continuation + 1 < len(lines):
-#             current_line_idx_for_continuation += 1 
-#             line_content_for_parsing = line_content_for_parsing.rstrip()[:-1] + ' ' + lines[current_line_idx_for_continuation].strip()
-        
-#         line_stripped = line_content_for_parsing.strip()
-
-#         if not line_stripped or line_stripped.startswith(('*', '#', ';')):
-#             i = current_line_idx_for_continuation + 1 # Advance main loop index past all continued lines
-#             continue
-
-#         file_context_match = file_context_pattern.match(line_stripped)
-#         if file_context_match:
-#             if current_file_data: # Save previous file context if exists
-#                 all_parsed_file_contexts.append(current_file_data)
-            
-#             file_name = file_context_match.group(1).upper()
-#             current_file_data = {
-#                 "file_type": "db_file", 
-#                 "source": "parmlib",
-#                 "file_name": file_name,
-#                 "definition_start_line": start_line_of_statement, # Line where FILE/M204FILE was found
-#                 "root_level_commands": [],
-#                 "fields": {} 
-#             }
-#             log.info(f"PARMLIB_PARSE: Started new DB file context: {file_name} at line {start_line_of_statement}")
-#             i = current_line_idx_for_continuation + 1
-#             continue
-
-#         if not current_file_data: # If no file context is active, skip parsing for commands/fields
-#             i = current_line_idx_for_continuation + 1
-#             continue
-            
-#         if re.match(r'^\s*(RESET|SET|PARAMETER)', line_stripped, re.IGNORECASE):
-#             current_file_data["root_level_commands"].append({
-#                 "command_text": line_stripped,
-#                 "line_number": start_line_of_statement # Line where this command started
-#             })
-#             log.debug(f"PARMLIB_PARSE: Added root-level command: '{line_stripped}' for file {current_file_data['file_name']} at line {start_line_of_statement}")
-#             i = current_line_idx_for_continuation + 1
-#             continue
-
-#         field_match = field_def_pattern.match(line_stripped)
-#         if field_match: 
-#             field_name = field_match.group(1) # Original case from pattern
-            
-#             attributes_list = []
-#             # Use line_content_for_parsing for attribute extraction as it has continuations resolved
-#             paren_match = re.search(r'\((.*?)\)', line_content_for_parsing) 
-#             if paren_match:
-#                 attrs_text = paren_match.group(1)
-#                 attrs_cleaned = re.sub(r'\s+', ' ', attrs_text).strip()
-#                 for attr in attrs_cleaned.split(','):
-#                     attr_stripped = attr.strip()
-#                     if attr_stripped:
-#                         attributes_list.append(attr_stripped)
-            
-#             current_file_data["fields"][field_name] = {
-#                 "attributes": attributes_list,
-#                 "line_number": start_line_of_statement, # Line where DEFINE FIELD started
-#                 "vsam_suggestions": {"m204_field_name": field_name} # Placeholder, ensure field name is present
-#             }
-#             log.debug(f"PARMLIB_PARSE: Staged field '{field_name}' for file {current_file_data['file_name']} from line {start_line_of_statement} with {len(attributes_list)} attributes.")
-        
-#         i = current_line_idx_for_continuation + 1 # Move to the next original line index
-
-#     if current_file_data: # Add the last processed file context
-#         all_parsed_file_contexts.append(current_file_data)
-
-#     log.info(f"PARMLIB_PARSE: Initial parsing complete. Found {len(all_parsed_file_contexts)} potential file contexts.")
-
-#     if all_parsed_file_contexts:
-#         await _populate_vsam_suggestions_for_all_fields_parallel(all_parsed_file_contexts)
-#         log.info("PARMLIB_PARSE: Parallel LLM processing for field suggestions complete.")
-#     else:
-#         log.info("PARMLIB_PARSE: No file contexts found to process with LLM.")
-
-#     processed_db_files: List[M204File] = []
-#     for file_data_with_suggestions in all_parsed_file_contexts:
-#         saved_m204_file = await _save_parmlib_file(db, input_source, file_data_with_suggestions)
-#         if saved_m204_file:
-#             processed_db_files.append(saved_m204_file)
-            
-#     log.info(f"PARMLIB_PARSE: Finished processing and saving {len(processed_db_files)} M204 DB files from PARMLIB for input source {input_source.input_source_id}.")
-#     return processed_db_files
 
 async def _extract_m204_files_from_parmlib(
     db: Session, input_source: InputSource, file_content: str
 ) -> List[M204File]:
-    """Extract and store PARMLIB data in JSON format, with parallel LLM calls."""
+    """
+    Extracts PARMLIB data for a single M204 file, using the user-provided association.
+    The entire PARMLIB file content is treated as the definition for the single
+    M204 DB file name stored in `input_source.m204_db_file_name_association`.
+    """
     log.info(
         f"PARMLIB_PARSE: Starting extraction from PARMLIB file ID "
-        f"{input_source.input_source_id} "
-        f"({input_source.original_filename})"
+        f"{input_source.input_source_id} ({input_source.original_filename})"
     )
-    lines = file_content.splitlines()
-    all_parsed_file_contexts: List[Dict[str, Any]] = []
-    current_file_data: Optional[Dict[str, Any]] = None
 
-    file_context_pattern = re.compile(
-        r"^\s*(?:FILE|M204FILE)\s*=?\s*([A-Z0-9_#@$-]+)",
-        re.IGNORECASE
+    # --- New logic: Rely on user-provided association ---
+    m204_db_file_name = input_source.m204_db_file_name_association
+    if not m204_db_file_name:
+        log.error(
+            f"PARMLIB_PARSE: Aborting analysis for InputSource ID "
+            f"{input_source.input_source_id}. No M204 DB file name association was "
+            f"provided for this PARMLIB file."
+        )
+        # This is a critical failure for the new workflow.
+        # We could raise an exception or return an empty list with a clear log message.
+        return []
+
+    log.info(
+        f"PARMLIB_PARSE: Associating this PARMLIB content with the user-specified "
+        f"M204 DB file: '{m204_db_file_name}'"
     )
+
+    # Initialize a single file context for the entire file.
+    file_data: Dict[str, Any] = {
+        "file_type": "db_file",
+        "source": "parmlib",
+        "file_name": m204_db_file_name.upper(),
+        "definition_start_line": 1, # The definition is the whole file
+        "root_level_commands": [],
+        "fields": {}
+    }
+
+    lines = file_content.splitlines()
     field_def_pattern = re.compile(
         r"^\s*DEFINE\s+FIELD\s+([A-Z0-9_#@$-]+)",
         re.IGNORECASE
     )
     root_cmd_pattern = re.compile(
-        r"^\s*(RESET|SET|PARAMETER)",
+        r"^\s*(RESET|SET|PARAMETER|FILE|M204FILE)", # Also capture FILE/M204FILE as a root command now
         re.IGNORECASE
     )
 
@@ -327,46 +247,17 @@ async def _extract_m204_files_from_parmlib(
             i = logical_idx + 1
             continue
 
-        # Detect new file context
-        m_file = file_context_pattern.match(line_stripped)
-        if m_file:
-            if current_file_data:
-                all_parsed_file_contexts.append(current_file_data)
-            file_name = m_file.group(1).upper()
-            current_file_data = {
-                "file_type": "db_file",
-                "source": "parmlib",
-                "file_name": file_name,
-                "definition_start_line": start_line,
-                "root_level_commands": [],
-                "fields": {}
-            }
-            log.info(
-                f"PARMLIB_PARSE: Started new DB file context: "
-                f"{file_name} at line {start_line}"
-            )
-            i = logical_idx + 1
-            continue
-
-        # If no file context active, skip
-        if not current_file_data:
-            log.debug(
-                f"Line {start_line}: no active file context, skipping"
-            )
-            i = logical_idx + 1
-            continue
-
-        # Detect root-level commands
+        # Detect root-level commands (now includes FILE/M204FILE)
         m_root = root_cmd_pattern.match(line_stripped)
         if m_root:
-            current_file_data["root_level_commands"].append({
+            file_data["root_level_commands"].append({
                 "command_text": line_stripped,
                 "line_number": start_line
             })
             log.debug(
-                "PARMLIB_PARSE: Added root-level command: "
+                f"PARMLIB_PARSE: Added root-level command: "
                 f"'{line_stripped}' for file "
-                f"{current_file_data['file_name']} at line {start_line}"
+                f"{file_data['file_name']} at line {start_line}"
             )
             i = logical_idx + 1
             continue
@@ -380,7 +271,6 @@ async def _extract_m204_files_from_parmlib(
                 f"{line_for_parsing!r}"
             )
 
-            # Extract attributes inside parentheses
             attributes_list: List[str] = []
             m_paren = re.search(r"\((.*?)\)", line_for_parsing)
             if m_paren:
@@ -400,7 +290,7 @@ async def _extract_m204_files_from_parmlib(
                     f"'{field_name}'"
                 )
 
-            current_file_data["fields"][field_name] = {
+            file_data["fields"][field_name] = {
                 "attributes": attributes_list,
                 "line_number": start_line,
                 "vsam_suggestions": {"m204_field_name": field_name}
@@ -408,51 +298,42 @@ async def _extract_m204_files_from_parmlib(
             log.debug(
                 "PARMLIB_PARSE: Staged field "
                 f"'{field_name}' for file "
-                f"{current_file_data['file_name']} from line "
+                f"{file_data['file_name']} from line "
                 f"{start_line}"
             )
             i = logical_idx + 1
             continue
 
-        # Line did not match any known pattern
         log.debug(
-            f"Line {start_line}: did not match any pattern, skipping"
+            f"Line {start_line}: did not match any known pattern, skipping"
         )
         i = logical_idx + 1
 
-    # Append the last file context if present
-    if current_file_data:
-        all_parsed_file_contexts.append(current_file_data)
-
+    # The single file context is now fully populated.
+    all_parsed_file_contexts = [file_data]
     log.info(
         "PARMLIB_PARSE: Initial parsing complete. "
-        f"Found {len(all_parsed_file_contexts)} file contexts."
+        f"Processed content for M204 DB file '{m204_db_file_name}'."
     )
 
     # Enrich field suggestions via parallel LLM calls
-    if all_parsed_file_contexts:
-        await _populate_vsam_suggestions_for_all_fields_parallel(
-            all_parsed_file_contexts
-        )
-        log.info(
-            "PARMLIB_PARSE: Parallel LLM processing for field "
-            "suggestions complete."
-        )
-    else:
-        log.info(
-            "PARMLIB_PARSE: No file contexts found to process with LLM."
-        )
+    await _populate_vsam_suggestions_for_all_fields_parallel(
+        all_parsed_file_contexts
+    )
+    log.info(
+        "PARMLIB_PARSE: Parallel LLM processing for field "
+        "suggestions complete."
+    )
 
-    # Persist each parsed context
+    # Persist the single parsed context
     processed_db_files: List[M204File] = []
-    for ctx in all_parsed_file_contexts:
-        saved = await _save_parmlib_file(db, input_source, ctx)
-        if saved:
-            processed_db_files.append(saved)
+    saved = await _save_parmlib_file(db, input_source, file_data)
+    if saved:
+        processed_db_files.append(saved)
 
     log.info(
-        "PARMLIB_PARSE: Finished processing and saving "
-        f"{len(processed_db_files)} M204 DB files from PARMLIB for "
+        "PARMLIB_PARSE: Finished processing and saving M204 DB file "
+        f"'{m204_db_file_name}' from PARMLIB for "
         f"input source {input_source.input_source_id}."
     )
     return processed_db_files
@@ -526,7 +407,7 @@ async def _save_parmlib_file(db: Session, input_source: InputSource, file_data: 
     return m204_file
 
 
-async def process_parmlib_analysis(db: Session, input_source: InputSource, file_content: str) -> Tuple[M204AnalysisResultDataSchema, List[M204File]]:
+async def process_parmlib_analysis(db: Session, input_source: InputSource, file_content: str) -> Tuple[M204AnalysisResultDataSchema, List[int]]:
     """
     Main function to process PARMLIB file content with simplified JSON storage.
     """
@@ -565,6 +446,7 @@ async def process_parmlib_analysis(db: Session, input_source: InputSource, file_
 
 
     file_responses = [M204FileResponseSchema.model_validate(f) for f in refreshed_files]
+    m204_db_file_ids_identified = [f.m204_file_id for f in refreshed_files if f.is_db_file and f.m204_file_id is not None]
 
     analysis_result = M204AnalysisResultDataSchema(
         procedures_found=[],
@@ -574,4 +456,4 @@ async def process_parmlib_analysis(db: Session, input_source: InputSource, file_
         procedure_calls_found=[]
     )
     log.info(f"PARMLIB_PROCESS: Completed PARMLIB analysis for file: {input_source.original_filename}. Found {len(file_responses)} defined files.")
-    return analysis_result, refreshed_files
+    return analysis_result, m204_db_file_ids_identified

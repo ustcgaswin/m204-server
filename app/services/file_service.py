@@ -14,8 +14,9 @@ async def save_uploaded_file_and_create_db_entry(
     db: Session,
     project_id: int,
     file: UploadFile,
-    user_defined_path_segment_for_file: str, # Changed parameter name for clarity
-    source_type: str  # Added source_type parameter
+    user_defined_path_segment_for_file: str,
+    source_type: str,
+    m204_db_file_name: Optional[str] = None
 ) -> InputSource:
     db_project = await project_service.get_project_by_id(db, project_id=project_id)
     if not db_project:
@@ -51,12 +52,12 @@ async def save_uploaded_file_and_create_db_entry(
         )
 
     original_file_name = file.filename
-    # Removed file extension extraction, source_type is now provided
 
     db_input_source = InputSource(
         project_id=project_id,
         original_filename=original_file_name,
-        source_type=source_type.lower() if source_type else "unknown", # Use provided source_type
+        source_type=source_type.lower() if source_type else "unknown",
+        m204_db_file_name_association=m204_db_file_name if m204_db_file_name else None,
         file_path_or_identifier=actual_saved_path,
         analysis_status="uploaded" 
     )

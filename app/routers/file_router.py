@@ -19,28 +19,32 @@ router = APIRouter(
     },
 )
 
+
 @router.post("/{project_id}/upload_source_files/", response_model=ListResponse[InputSourceResponseSchema])
 async def upload_source_files(
     project_id: int,
     files: List[UploadFile] = File(...), 
-    source_types: List[str] = Form(...), # Added source_types as a form parameter
+    source_types: List[str] = Form(...),
+    m204_db_file_names: List[str] = Form(...), # New: For PARMLIB to M204 DB file mapping
     db: Session = Depends(get_db)
 ):
     if not files:
         log.warning(f"Upload attempt for project {project_id} with no files provided.")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files provided for upload.")
 
-    if len(files) != len(source_types):
-        log.warning(f"Upload attempt for project {project_id}: Mismatch between number of files ({len(files)}) and source_types ({len(source_types)}).")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The number of files must match the number of source types provided.")
+    if not (len(files) == len(source_types) == len(m204_db_file_names)):
+        log.warning(f"Upload attempt for project {project_id}: Mismatch between number of files ({len(files)}), source_types ({len(source_types)}), and m204_db_file_names ({len(m204_db_file_names)}).")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The number of files, source types, and M204 DB file names must all match.")
 
-    log.info(f"Received {len(files)} files and {len(source_types)} source types for upload request for project_id: {project_id}.")
+    log.info(f"Received {len(files)} files, {len(source_types)} source types, and {len(m204_db_file_names)} M204 DB file names for upload to project_id: {project_id}.")
     
     successful_uploads_data: List[InputSourceResponseSchema] = []
     errors_occurred: List[str] = []
 
     for i, single_file in enumerate(files):
         current_source_type = source_types[i]
+        current_m204_db_name = m204_db_file_names[i]
+
         if not single_file.filename:
             log.warning(f"Upload attempt for project {project_id} included a file with no filename (source type provided: '{current_source_type}').")
             errors_occurred.append(f"A file (intended type: '{current_source_type}') was provided without a filename and was skipped.")
@@ -55,13 +59,14 @@ async def upload_source_files(
         file_path_segment_from_filename = single_file.filename
             
         try:
-            log.info(f"Processing file: '{single_file.filename}' (type: '{current_source_type}') for project_id: {project_id} (using filename as path segment: '{file_path_segment_from_filename}')")
+            log.info(f"Processing file: '{single_file.filename}' (type: '{current_source_type}', M204 DB Name: '{current_m204_db_name or 'N/A'}') for project_id: {project_id}")
             db_input_source_model = await file_service.save_uploaded_file_and_create_db_entry(
                 db=db, 
                 project_id=project_id, 
                 file=single_file,
                 user_defined_path_segment_for_file=file_path_segment_from_filename,
-                source_type=current_source_type 
+                source_type=current_source_type,
+                m204_db_file_name=current_m204_db_name
             )
             input_source_data = InputSourceResponseSchema.model_validate(db_input_source_model)
             successful_uploads_data.append(input_source_data)
@@ -89,6 +94,7 @@ async def upload_source_files(
         skip=0, 
         limit=len(files) 
     )
+
 
 
 @router.delete("/source_files/{input_source_id}", response_model=Response[InputSourceResponseSchema])

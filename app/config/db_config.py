@@ -25,3 +25,8 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def get_new_db():
+    """Returns a new database session instance, not managed by FastAPI's dependency injection."""
+    return SessionLocal()

@@ -274,6 +274,7 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
             )
 
     
+
     async def _llm_convert_file_definition_to_fd(self, m204_file: M204File) -> Optional[FileDefinitionToCobolFDOutput]:
         """Convert M204 file definition JSON to COBOL FD using LLM. Returns None if no definition exists."""
         if not m204_file.file_definition_json:
@@ -297,7 +298,7 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
         # Build field information string from JSON
         field_info_parts = []
         vsam_key_fields = []
-        vsam_key_info_str = ""
+        
         if file_type == "db_file":
             # DB file with PARMLIB field definitions
             fields = file_definition.get('fields', {})
@@ -355,13 +356,15 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
                         field_info_parts.append(f"      - Field: {field_name}, Type: {data_type}, Length: {length}{f', Suggested COBOL PIC: {suggested_cobol_pic}' if suggested_cobol_pic else ''}")
 
         # Compose VSAM key info for DB files
+        key_field_name_for_prompt = "N/A"
         if m204_file.is_db_file:
             if vsam_key_fields:
                 vsam_key_fields.sort()
-                key_names = [f[1] for f in vsam_key_fields]
-                vsam_key_info_str = f"RECORD KEY IS {', '.join(key_names)}."
+                # Get the primary key field name, making it COBOL-friendly
+                key_names = [f[1].replace("_", "-").upper() for f in vsam_key_fields] 
+                key_field_name_for_prompt = key_names[0] if key_names else "N/A"
             elif m204_file.primary_key_field_name:
-                vsam_key_info_str = f"RECORD KEY IS {m204_file.primary_key_field_name}."
+                key_field_name_for_prompt = m204_file.primary_key_field_name.replace("_", "-").upper()
 
         field_info_str = "\n".join(field_info_parts) if field_info_parts else "No field information available."
 
@@ -374,7 +377,8 @@ M204 File Information:
 - Logical Dataset Name: {m204_file.m204_logical_dataset_name or 'Not specified'}
 - File Type: {file_type}
 - Is DB File: {m204_file.is_db_file}
-{"- VSAM Key Info: " + vsam_key_info_str if vsam_key_info_str else ""}
+- Target VSAM Type: {m204_file.target_vsam_type or 'Not specified'}
+- Primary Key Field Name: {key_field_name_for_prompt}
 
 Field/Layout Information:
 {field_info_str}
@@ -382,21 +386,30 @@ Field/Layout Information:
 File Definition JSON (for detailed structure if needed by LLM):
 {json.dumps(file_definition, indent=2)}
 
-Generate appropriate COBOL FILE-CONTROL and FD entries based on this M204 file definition.
-For DB files, create record layouts based on the PARMLIB field definitions and their 'Suggested COBOL PIC'.
-For DB files, if VSAM Key Info is provided above, you MUST include the RECORD KEY clause in the FD using the key field(s) listed.
-For flat files, use the IMAGE statement field definitions and their 'Suggested COBOL PIC'.
-For mixed files, prioritize the most appropriate definition for COBOL conversion, using 'Suggested COBOL PIC' where available.
+**Conversion Instructions:**
 
-**If any field or group in the M204 definition uses OCCURS (e.g., OCCURS 5 TIMES), generate the corresponding COBOL field/group with OCCURS n TIMES in the FD or WORKING-STORAGE SECTION.**
+1.  **FILE-CONTROL Entry (SELECT Statement):**
+    - Create a `SELECT` statement for the file.
+    - **For DB files with a Target VSAM Type of 'KSDS' (or if it's an indexed file):** You MUST include the following clauses in the `SELECT` statement:
+      - `ORGANIZATION IS INDEXED`
+      - `ACCESS MODE IS DYNAMIC` (or SEQUENTIAL/RANDOM as appropriate)
+      - `RECORD KEY IS <key-field-name>` where `<key-field-name>` is the 'Primary Key Field Name' provided above. This field must also be defined in the FD.
+    - For other file types (like ESDS or flat files), generate a standard `SELECT` statement without the INDEXED/KEY clauses.
 
-**Add appropriate comments in the COBOL FD wherever necessary, especially for OCCURS arrays, redefines, or any non-obvious mapping.**
+2.  **FILE SECTION Entry (FD):**
+    - Create a complete `FD` entry.
+    - For DB files, create record layouts based on the PARMLIB field definitions and their 'Suggested COBOL PIC'.
+    - For flat files, use the IMAGE statement field definitions and their 'Suggested COBOL PIC'.
+    - If any field or group in the M204 definition uses `OCCURS`, generate the corresponding COBOL field/group with `OCCURS n TIMES`.
+    - **DO NOT include the `RECORD KEY` clause in the FD.** This clause belongs only in the `SELECT` statement.
+    - Add appropriate comments in the COBOL FD wherever necessary, especially for `OCCURS` arrays, `REDEFINES`, or any non-obvious mapping.
 
-The `logical_file_name` in the output JSON should be a COBOL-friendly name derived from the M204 file name (e.g., M204 DDNAME 'MYFILE01' could become 'MYFILE01' or 'MYFILE').
-This name will be used in the `SELECT ... ASSIGN TO {{{{logical_file_name}}}}` and `FD  {{{{logical_file_name}}}}-FILE.`
+**Output Format:**
+
+The `logical_file_name` in the output JSON should be a COBOL-friendly name derived from the M204 file name.
 The `file_control_entry` should be the complete SELECT statement.
 The `file_description_entry` should be the complete FD, including the 01 record level and all 05 field levels with their PICTURE clauses.
-If `working_storage_entries` are needed (e.g., for complex redefines or specific counters related to this FD), include them.
+If `working_storage_entries` are needed, include them.
 
 Respond with a JSON object structured according to the FileDefinitionToCobolFDOutput model:
 ```json
@@ -431,6 +444,8 @@ Ensure the FD record layout (01 and 05 levels) is complete and uses the 'Suggest
                                      f"   01  {select_name}-RECORD PIC X(80). *> Placeholder due to error\n",
                 comments=f"LLM FD conversion failed: {str(e)}"
             )
+    
+
 
     def _clear_existing_artifacts_for_input_source(self, input_source_id: int):
         self.db.query(GeneratedCobolArtifact).filter(GeneratedCobolArtifact.input_source_id == input_source_id).delete(synchronize_session=False)
@@ -699,53 +714,91 @@ The `jcl_content` should be the complete JCL.
 
     **Core Instructions:**
 
-    1.  **Modularity is Key:** The provided M204 logic may be large. If it is complex, you MUST break it down into smaller, cohesive COBOL paragraphs.
-        - The primary entry point paragraph MUST be named `MAIN-PROCESSING-LOOP-PARA`.
-        - Any additional paragraphs you create for modularity should be given meaningful, hyphenated names (e.g., `PROCESS-CUSTOMER-RECORDS-PARA`, `VALIDATE-INPUT-DATA-PARA`).
-        - These additional paragraphs should be called from `MAIN-PROCESSING-LOOP-PARA` (or other generated paragraphs) using `PERFORM` statements.
+    1.  **Modularity Requirements:**
+        - The M204 logic must be broken into cohesive COBOL paragraphs.
+        - The main entry point MUST be named 'MAIN-PROCESSING-LOOP-PARA'.
+        - Additional paragraphs for complex logic should use descriptive names (e.g., 'PROCESS-CUSTOMER-PARA').
+        - Use 'PERFORM' statements to call these paragraphs.
 
-    2.  **Specific Conversion Patterns:**
-        - **`FR` (Find Record) Statements:** This is a critical instruction.
-        - Any M204 statement starting with `FR` (e.g., `FR`, `FR ALL RECORDS`, `FIND`) is a record-finding loop.
-        - **Requirement:** You MUST convert these into a standard COBOL loop that reads records from a file, assuming a VSAM file structure.
-        - **Implementation:** Use `PERFORM UNTIL` loops combined with `READ` or `READ NEXT` operations.
-        - **Crucial Constraint:** DO NOT generate any DB2 `SELECT` statements or other database-specific SQL. The logic must be standard file I/O.
-        - **`ONEOF` Statements:** Convert M204 `ONEOF ... IS ... ELSE ... END ONEOF` blocks into COBOL `EVALUATE` statements. This is strongly preferred over complex nested `IF` statements.
-        - **`FOR` Loops:** Convert M204 `FOR` loops into COBOL `PERFORM VARYING` loops. If the loop body is complex, extract it into its own paragraph and `PERFORM` it.
-        - **Subroutine Calls:** Convert M204 `CALL` statements to COBOL `PERFORM <procedure-name>-PARA`.
-        - **Basic Logic:** Translate `IF/ELSE`, `PRINT`, assignments, and other standard logic into their direct COBOL equivalents.
+    2.  **Specific Conversion Patterns (MANDATORY):**
+        - **FR/FIND Statements:** Convert any 'FR', 'FR ALL RECORDS', or 'FIND' to COBOL file I/O loops:
+        ```cobol
+        PERFORM UNTIL END-OF-FILE = 'Y'
+            READ INPUT-FILE
+                AT END
+                    MOVE 'Y' TO END-OF-FILE
+                NOT AT END
+                    PERFORM PROCESS-RECORD-PARA
+            END-READ
+        END-PERFORM
+        ```
+        - **ONEOF Blocks:** Convert to COBOL EVALUATE:
+        ```cobol
+        EVALUATE TRUE
+            WHEN condition-1
+                statements-1
+            WHEN condition-2
+                statements-2
+            WHEN OTHER
+                statements-3
+        END-EVALUATE
+        ```
+        - **FOR Loops:** Convert to PERFORM VARYING:
+        ```cobol
+        PERFORM VARYING index FROM 1 BY 1 UNTIL index > max
+            statements
+        END-PERFORM
+        ```
+        - **Basic Statements:**
+        - Convert IF/ELSE to COBOL IF
+        - Convert PRINT to DISPLAY
+        - Convert assignments to MOVE
+        - Convert subroutine CALL to PERFORM
 
-    3.  **Output Format:**
-        - You MUST respond with a single JSON object structured according to the `MainLoopToCobolOutput` model.
-        - The `paragraphs` field must be a list, with the `MAIN-PROCESSING-LOOP-PARA` object appearing first.
-        - The `cobol_code` within each paragraph object MUST NOT include the paragraph name itself (e.g., `MAIN-PROCESSING-LOOP-PARA.`). That is handled by the `paragraph_name` field.
-        - All COBOL code must be correctly indented for Area B (starting in column 12).
+    3.  **Critical Rules:**
+        - DO NOT generate DB2 SQL or database calls
+        - Use only standard COBOL file I/O
+        - Maintain COBOL 6 standards
+        - Add clear comments for complex logic
+        - Format for Area B (column 12+)
 
-    **Assumptions:**
-    - Assume all required files are OPEN and will be CLOSED elsewhere.
-    - Assume all variables are already defined in the `WORKING-STORAGE SECTION`.
+    4.  **Response Format:**
+        Return a JSON object with this EXACT structure:
+        ```json
+        {
+            "paragraphs": [
+                {
+                    "paragraph_name": "MAIN-PROCESSING-LOOP-PARA",
+                    "cobol_code": "      statement-1\n      statement-2"
+                },
+                {
+                    "paragraph_name": "ANOTHER-PARA",
+                    "cobol_code": "      statement-3\n      statement-4"
+                }
+            ],
+            "comments": "Optional conversion notes"
+        }
+        ```
 
-    **Example JSON Output Structure:**
+    5.  **Validation Requirements:**
+        - Each paragraph MUST have a valid COBOL paragraph name
+        - Paragraph names MUST be unique
+        - All COBOL code MUST be properly indented
+        - First paragraph MUST be MAIN-PROCESSING-LOOP-PARA
+        - No paragraph name in the cobol_code field
+        - No PROCEDURE DIVISION or SECTION headers
+
+    Example of Valid Paragraph:
     ```json
-    {{
-    "paragraphs": [
-        {{
+    {
         "paragraph_name": "MAIN-PROCESSING-LOOP-PARA",
-        "cobol_code": "      PERFORM INITIALIZE-VARIABLES-PARA.\\n      PERFORM PROCESS-ALL-RECORDS-PARA UNTIL END-OF-FILE = 'Y'.\\n      PERFORM CLEANUP-PARA."
-        }},
-        {{
-        "paragraph_name": "PROCESS-ALL-RECORDS-PARA",
-        "cobol_code": "      READ INPUT-FILE\\n          AT END\\n              MOVE 'Y' TO END-OF-FILE\\n          NOT AT END\\n              PERFORM VALIDATE-RECORD-PARA\\n      END-READ."
-        }},
-        {{
-        "paragraph_name": "VALIDATE-RECORD-PARA",
-        "cobol_code": "      EVALUATE RECORD-TYPE\\n          WHEN 'A'\\n              MOVE 'TYPE-A' TO WS-DESC\\n          WHEN 'B'\\n              MOVE 'TYPE-B' TO WS-DESC\\n          WHEN OTHER\\n              MOVE 'UNKNOWN' TO WS-DESC\\n      END-EVALUATE."
-        }}
-    ],
-    "comments": "The original M204 loop was broken down into three paragraphs for better readability and maintenance. The ONEOF statement was converted to an EVALUATE block as requested."
-    }}
+        "cobol_code": "      PERFORM UNTIL END-OF-FILE = 'Y'\n          READ INPUT-FILE\n              AT END\n                  MOVE 'Y' TO END-OF-FILE\n              NOT AT END\n                  PERFORM PROCESS-RECORD-PARA\n          END-READ\n      END-PERFORM."
+    }
     ```
+
+    Generate the COBOL conversion maintaining exact JSON structure and following all rules above.
     """
+
         json_text_output: Optional[str] = None
         try:
             async with self.llm_semaphore:
@@ -753,25 +806,80 @@ The `jcl_content` should be the complete JCL.
                 llm_call = llm_config._llm.as_structured_llm(MainLoopToCobolOutput)
                 response = await llm_call.acomplete(prompt=prompt_fstr)
                 json_text_output = response.text
-            log.debug(f"LLM call for M204 main loop to COBOL from file: {m204_file_name} completed (semaphore released)")
-            json_text_output = strip_markdown_code_block(json_text_output)
-            return MainLoopToCobolOutput(**json.loads(json_text_output))
+                
+                # Clean and validate JSON
+                if json_text_output:
+                    json_text_output = strip_markdown_code_block(json_text_output)
+                    
+                    try:
+                        import json
+                        parsed_json = json.loads(json_text_output)
+                        
+                        # Validate structure
+                        if not isinstance(parsed_json, dict):
+                            raise ValueError("Response must be a JSON object")
+                        
+                        if "paragraphs" not in parsed_json:
+                            raise ValueError("Missing 'paragraphs' key in response")
+                            
+                        if not isinstance(parsed_json["paragraphs"], list):
+                            raise ValueError("'paragraphs' must be a list")
+                            
+                        if not parsed_json["paragraphs"]:
+                            raise ValueError("'paragraphs' list cannot be empty")
+                            
+                        # Validate first paragraph is main entry point
+                        if parsed_json["paragraphs"][0]["paragraph_name"] != "MAIN-PROCESSING-LOOP-PARA":
+                            raise ValueError("First paragraph must be 'MAIN-PROCESSING-LOOP-PARA'")
+                            
+                        # Check paragraph uniqueness
+                        para_names = set()
+                        for para in parsed_json["paragraphs"]:
+                            if para["paragraph_name"] in para_names:
+                                raise ValueError(f"Duplicate paragraph name: {para['paragraph_name']}")
+                            para_names.add(para["paragraph_name"])
+                            
+                            # Validate paragraph structure
+                            if not isinstance(para, dict):
+                                raise ValueError("Each paragraph must be a dictionary")
+                            if "paragraph_name" not in para or "cobol_code" not in para:
+                                raise ValueError("Paragraph missing required fields")
+                            if not isinstance(para["paragraph_name"], str) or not isinstance(para["cobol_code"], str):
+                                raise ValueError("Invalid types for paragraph fields")
+                            
+                            # Validate COBOL formatting
+                            if not all(line.startswith(" ") for line in para["cobol_code"].splitlines()):
+                                raise ValueError("COBOL code must be properly indented")
+                                
+                        return MainLoopToCobolOutput(**parsed_json)
+                        
+                    except json.JSONDecodeError as je:
+                        raise ValueError(f"Invalid JSON format: {je}")
+                    except Exception as e:
+                        raise ValueError(f"Validation error: {str(e)}")
+                else:
+                    raise ValueError("Empty response from LLM")
+                    
         except Exception as e:
             log.error(f"LLM error converting main loop from file {m204_file_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
+            
+            # Return error-indicating response
             return MainLoopToCobolOutput(
                 paragraphs=[
                     CobolParagraph(
                         paragraph_name="MAIN-PROCESSING-LOOP-PARA",
                         cobol_code=(
                             "      * --- Error during COBOL conversion for Main Processing Loop ---\n"
-                            "      DISPLAY 'Error in main loop logic. Check application logs.'.\n"
-                            "      * --- See logs for details ---"
+                            f"      * Error: {str(e)}\n"
+                            "      DISPLAY 'Error in main loop conversion - see logs'.\n"
+                            "      * --- Manual review required ---\n"
+                            "      * Original M204 content preserved in comments:\n"
+                            "      * " + "\n      * ".join(main_loop_content.split('\n'))
                         )
                     )
                 ],
-                comments=f"LLM conversion failed for main loop: {str(e)}"
+                comments=f"LLM conversion failed: {str(e)}. Manual review required."
             )
-
 
     async def _generate_and_save_artifacts_for_single_input_source(
         self, 
@@ -1054,23 +1162,11 @@ MAIN-PARAGRAPH.
                 log.info(f"VSAM JCL for M204File ID {m204_file_obj.m204_file_id} ('{m204_file_obj.m204_file_name}') already generated in this project run. Skipping for this pass with source: {input_source_name_for_comments}.")
                 continue
 
-            should_generate_vsam = False
-            source_type = current_input_source_with_details.source_type
-            if source_type in ('parmlib', 'jcl'):
-                # For PARMLIB or JCL sources, assume files it defines are candidates if they have VSAM characteristics
-                if m204_file_obj.target_vsam_dataset_name or m204_file_obj.is_db_file or m204_file_obj.file_definition_json:
-                    should_generate_vsam = True
-                    log.info(f"M204File ID {m204_file_obj.m204_file_id} from {source_type.upper()} source '{input_source_name_for_comments}' is candidate for VSAM JCL.")
-                else:
-                    log.debug(f"M204File ID {m204_file_obj.m204_file_id} from {source_type.upper()} source '{input_source_name_for_comments}' lacks VSAM indicators. Skipping.")
-            elif source_type == 'm204':
-                if m204_file_obj.is_db_file: # Only for actual DB files if the source is m204
-                    should_generate_vsam = True
-                    log.info(f"M204File ID {m204_file_obj.m204_file_id} from M204 source '{input_source_name_for_comments}' is DB file, candidate for VSAM JCL.")
-                else:
-                    log.debug(f"M204File ID {m204_file_obj.m204_file_id} from M204 source '{input_source_name_for_comments}' is not DB file. Skipping VSAM JCL.")
+            # VSAM JCL is only generated for files explicitly marked as M204 database files.
+            should_generate_vsam = m204_file_obj.is_db_file is True
             
             if should_generate_vsam:
+                log.info(f"M204File ID {m204_file_obj.m204_file_id} ('{m204_file_obj.m204_file_name}') is a DB file. Generating VSAM JCL.")
                 m204_name_part_raw = m204_file_obj.m204_file_name or f"FILE{m204_file_obj.m204_file_id}"
                 m204_name_part = re.sub(r'[^A-Z0-9]', '', m204_name_part_raw.upper())[:8]
                 if not m204_name_part:
@@ -1109,7 +1205,7 @@ MAIN-PARAGRAPH.
                 log.info(f"Marked M204File ID {m204_file_obj.m204_file_id} ('{m204_file_obj.m204_file_name}') as processed for VSAM JCL in this project run.")
                 vsam_jcls_generated_this_pass += 1
             else:
-                log.debug(f"Skipping VSAM JCL for M204File ID {m204_file_obj.m204_file_id} ('{m204_file_obj.m204_file_name}') as it did not meet generation criteria for source '{input_source_name_for_comments}'.")
+                log.debug(f"Skipping VSAM JCL for M204File ID {m204_file_obj.m204_file_id} ('{m204_file_obj.m204_file_name}') as it is not a DB file (is_db_file is not True).")
 
         if vsam_jcls_generated_this_pass == 0:
             log.info(f"No new VSAM definition JCLs were generated by InputSource '{input_source_name_for_comments}' in this pass.")
@@ -1132,8 +1228,8 @@ MAIN-PARAGRAPH.
             unit_test_files=unit_test_output_schemas
         )
         log.info(f"Finished artifact generation for InputSource ID: {input_source.input_source_id} ('{input_source_name_for_comments}'). Returning {len(response.cobol_files)} COBOL, {len(response.jcl_files)} JCL, {len(response.unit_test_files)} Unit Test files.")
-        return response
-        
+        return response 
+
 
     async def generate_artifacts_for_project(self, project_id: int) -> List[InputSourceArtifacts]:
         project = self.db.query(Project).filter(Project.project_id == project_id).first()

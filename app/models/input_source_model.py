@@ -14,6 +14,9 @@ class InputSource(Base):
     source_type = Column(String(100), nullable=True)
     file_path_or_identifier = Column(String(1024), nullable=False, unique=True) 
     analysis_status = Column(String(50), default="pending")
+
+    m204_db_file_name_association = Column(String(255), nullable=True)
+
     
     last_analyzed_timestamp = Column(DateTime(timezone=True), nullable=True)
     error_message = Column(Text, nullable=True)

@@ -302,31 +302,29 @@ class JCLIterativeDescriptionOutput(BaseModel):
 
 
 async def generate_and_store_jcl_description(
-    db: Session, input_source: InputSource, file_content: str
+    db: Session, input_source_id: int, file_content: str
 ) -> None:
     """
     Generates a detailed JCL description using the LLM and stores it in the InputSource.
     """
+    input_source = db.query(InputSource).filter(InputSource.input_source_id == input_source_id).first()
+    if not input_source:
+        log.error(f"JCL_SERVICE: InputSource with ID {input_source_id} not found in the database for JCL description generation.")
+        return
+
     try:
         description = await _generate_jcl_description_iteratively_with_llm(
             file_content,
             input_source.original_filename or f"InputSourceID_{input_source.input_source_id}"
         )
-        # FIX: Re-query InputSource in this session
-        input_source_in_session = db.query(InputSource).filter(
-            InputSource.input_source_id == input_source.input_source_id
-        ).first()
-        if input_source_in_session:
-            input_source_in_session.jcl_detailed_description = description
-            db.add(input_source_in_session)
-            log.info(f"JCL_SERVICE: Stored JCL description for InputSource ID {input_source.input_source_id} (length: {len(description)}).")
-        else:
-            log.error(f"JCL_SERVICE: InputSource ID {input_source.input_source_id} not found in DB session for storing JCL description.")
+        input_source.jcl_detailed_description = description
+        db.add(input_source)
+        log.info(f"JCL_SERVICE: Stored JCL description for InputSource ID {input_source.input_source_id} (length: {len(description)}).")
     except Exception as e:
         log.error(f"JCL_SERVICE: Failed to generate/store JCL description for InputSource ID {input_source.input_source_id}: {e}", exc_info=True)
 
 async def process_jcl_analysis(
-    db: Session, input_source: InputSource, file_content: str, rag_service: Optional[Any]
+    db: Session, input_source_id: int, file_content: str, rag_service: Optional[Any]
 ) -> Tuple[GenericAnalysisResultDataSchema, List[int]]:
     """
     Main function to process JCL file content.
@@ -335,6 +333,14 @@ async def process_jcl_analysis(
         - GenericAnalysisResultDataSchema (analysis summary)
         - List of M204File IDs (not ORM objects, to avoid DetachedInstanceError)
     """
+    input_source = db.query(InputSource).filter(InputSource.input_source_id == input_source_id).first()
+    if not input_source:
+        log.error(f"JCL_SERVICE: InputSource with ID {input_source_id} not found in the database for JCL analysis.")
+        return GenericAnalysisResultDataSchema(
+            dd_statements_found=[],
+            summary=f"Failed to find InputSource with ID {input_source_id}."
+        ), []
+
     log.info(f"JCL_SERVICE: Starting JCL analysis for file: {input_source.original_filename} (ID: {input_source.input_source_id})")
     
     extracted_dd_statements, m204_files_from_jcl = await _extract_and_store_dd_statements_from_jcl(db, input_source, file_content)
@@ -372,7 +378,7 @@ async def process_jcl_analysis(
     )
     
     # Return only the IDs of the M204File objects to avoid DetachedInstanceError
-    m204_file_ids = [mfile.m204_file_id for mfile in refreshed_m204_files]
+    m204_file_ids = [mfile.m204_file_id for mfile in refreshed_m204_files if mfile.m204_file_id is not None]
 
     log.info(f"JCL_SERVICE: Completed JCL analysis for file: {input_source.original_filename}. Summary: {summary_msg}")
     return schema_result, m204_file_ids

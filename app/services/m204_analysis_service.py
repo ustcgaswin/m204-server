@@ -447,7 +447,7 @@ async def _generate_m204_description_iteratively_with_llm(file_content: str, ori
 
     try:
         # Adjust chunk_size for M204 code. M204 lines can be dense.
-        text_splitter = SentenceSplitter(chunk_size=300, chunk_overlap=30)
+        text_splitter = SentenceSplitter(chunk_size=1024,chunk_overlap=500)
         m204_chunks = text_splitter.split_text(file_content)
     except Exception as e_splitter:
         log.error(f"M204_SERVICE_LLM_DESC: Error splitting M204 content for {original_filename}: {e_splitter}", exc_info=True)
@@ -1621,80 +1621,6 @@ Respond with JSON per ImageFieldToCobolOutput.
 
 
 
-# async def _extract_and_store_m204_image_statements(
-#     db: Session, input_source: InputSource, file_content: str
-# ) -> List[M204ImageDefinition]:
-#     """
-#     REFACTORED: Extracts IMAGE statements from M204 source and stores them as
-#     independent M204ImageDefinition records. It no longer tries to link them
-#     to M204File records directly.
-#     """
-#     log.info(f"M204_SERVICE: Extracting IMAGE statements as definitions for file ID: {input_source.input_source_id} ({input_source.original_filename})")
-#     m204_images_created = []
-#     lines = file_content.splitlines()
-#     image_start_pattern = re.compile(r"^\s*IMAGE\s+([A-Z0-9_.#@$-]+)", re.IGNORECASE)
-    
-#     i = 0
-#     while i < len(lines):
-#         line_content_for_match = lines[i] 
-#         current_line_num_for_start = i + 1
-        
-#         image_match = image_start_pattern.match(line_content_for_match.strip())
-#         if image_match:
-#             image_name_from_statement = image_match.group(1)
-#             log.debug(f"M204_SERVICE_IMG: Found IMAGE statement start: '{image_name_from_statement}' at line {current_line_num_for_start} in file '{input_source.original_filename}'.")
-            
-#             temp_image_content_lines = []
-#             found_end_image = False
-#             image_content_end_line_idx = i
-            
-#             for j in range(i + 1, len(lines)):
-#                 if lines[j].strip().upper() == 'END IMAGE':
-#                     image_content_end_line_idx = j
-#                     found_end_image = True
-#                     break
-#                 temp_image_content_lines.append(lines[j])
-            
-#             if not found_end_image:
-#                 log.warning(f"M204_SERVICE_IMG: IMAGE '{image_name_from_statement}' at line {current_line_num_for_start} did not have a corresponding 'END IMAGE'. Skipping.")
-#                 i += 1
-#                 continue
-
-#             image_block_content_for_parse = "\n".join(temp_image_content_lines)
-#             parsed_image_fields_data = await _parse_image_definition(image_name_from_statement, image_block_content_for_parse)
-            
-#             if parsed_image_fields_data and parsed_image_fields_data.get("fields"):
-#                 existing_image_def = db.query(M204ImageDefinition).filter(
-#                     M204ImageDefinition.project_id == input_source.project_id,
-#                     M204ImageDefinition.image_name == image_name_from_statement,
-#                     M204ImageDefinition.input_source_id == input_source.input_source_id
-#                 ).first()
-
-#                 if not existing_image_def:
-#                     new_image_def = M204ImageDefinition(
-#                         project_id=input_source.project_id,
-#                         input_source_id=input_source.input_source_id,
-#                         image_name=image_name_from_statement,
-#                         start_line_number=current_line_num_for_start,
-#                         end_line_number=image_content_end_line_idx + 1,
-#                         fields_json=parsed_image_fields_data
-#                     )
-#                     db.add(new_image_def)
-#                     m204_images_created.append(new_image_def)
-#                     log.info(f"M204_SERVICE_IMG: Created new M204ImageDefinition for '{image_name_from_statement}'.")
-#                 else:
-#                     existing_image_def.fields_json = parsed_image_fields_data
-#                     db.add(existing_image_def)
-#                     m204_images_created.append(existing_image_def)
-#                     log.info(f"M204_SERVICE_IMG: Updated existing M204ImageDefinition for '{image_name_from_statement}'.")
-            
-#             i = image_content_end_line_idx + 1
-#             continue
-        
-#         i += 1
-#     log.info(f"M204_SERVICE: Finished extracting {len(m204_images_created)} IMAGE definitions for file ID: {input_source.input_source_id}.")
-#     return m204_images_created
-
 
 async def _extract_and_store_m204_image_statements(
     db: Session,
@@ -1864,18 +1790,32 @@ async def _link_images_to_files(db: Session, input_source: InputSource, file_con
 # --- Main Processing Function ---
 
 
+
 async def process_m204_analysis(
     db: Session, 
-    input_source: InputSource, 
+    input_source_id: int, 
     file_content: str, 
     rag_service: Optional[RagService]
-) -> Tuple[M204AnalysisResultDataSchema, List[M204File]]:
+) -> Tuple[M204AnalysisResultDataSchema, List[int]]:
     """
     Main function to process M204 source file content for structural analysis.
     The function will only return after all analysis is complete.
-    Returns the analysis results and a list of M204File objects identified as DB files.
+    Returns the analysis results and a list of M204File IDs identified as DB files.
     Main loop and description generation are handled separately by the orchestrator.
     """
+    input_source = db.query(InputSource).filter(InputSource.input_source_id == input_source_id).first()
+    if not input_source:
+        log.error(f"M204_SERVICE: InputSource with ID {input_source_id} not found in the database for M204 analysis.")
+        # Return a default empty response to avoid crashing the orchestrator
+        return M204AnalysisResultDataSchema(
+            procedures_found=[],
+            defined_files_found=[],
+            defined_fields_found=[],
+            variables_found=[],
+            procedure_calls_found=[],
+            open_statements_found=[]
+        ), []
+
     log.info(f"M204_SERVICE: Starting M204 structural processing for file: {input_source.original_filename} (ID: {input_source.input_source_id})")
 
     # --- Extract OPEN statements ---
@@ -2024,7 +1964,7 @@ async def process_m204_analysis(
     procedure_call_responses = [M204ProcedureCallResponseSchema.model_validate(pc) for pc in refreshed_procedure_calls]
     open_statement_responses = [M204OpenStatementResponseSchema.model_validate(o) for o in extracted_open_statements]
     
-    m204_db_files_identified = [mf for mf in refreshed_m204_files if mf.is_db_file is True]
+    m204_db_file_ids_identified = [mf.m204_file_id for mf in refreshed_m204_files if mf.is_db_file is True and mf.m204_file_id is not None]
 
     analysis_result_data = M204AnalysisResultDataSchema(
         procedures_found=procedure_responses,
@@ -2035,31 +1975,47 @@ async def process_m204_analysis(
         open_statements_found=open_statement_responses,
     )
 
-    log.info(f"M204_SERVICE: Completed M204 analysis for file: {input_source.original_filename}. Identified {len(m204_db_files_identified)} DB files for potential VSAM enhancement.")
-    return analysis_result_data, m204_db_files_identified
+    log.info(f"M204_SERVICE: Completed M204 analysis for file: {input_source.original_filename}. Identified {len(m204_db_file_ids_identified)} DB file IDs for potential VSAM enhancement.")
+    return analysis_result_data, m204_db_file_ids_identified
+
+
 
 async def enhance_m204_db_file_with_vsam_suggestions(db: Session, m204_file: M204File):
     """
     Updates an M204File (only if is_db_file is True) and its JSON field definitions with VSAM suggestions.
+    This process is idempotent and will skip files that have already been enhanced, unless the source is PARMLIB.
     """
     if not llm_config._llm:
         log.warning(f"M204_VSAM_ENHANCE: LLM not available. Skipping VSAM enhancement for M204 file: {m204_file.m204_file_name}")
         return
     
-    # This function should ONLY operate on files confirmed to be M204 Database Files
     if not m204_file.is_db_file:
-        log.debug(f"M204_VSAM_ENHANCE: M204 file {m204_file.m204_file_name} (ID: {m204_file.m204_file_id}) is not a DB file (is_db_file is False or None). Skipping VSAM enhancement.")
+        log.debug(f"M204_VSAM_ENHANCE: M204 file {m204_file.m204_file_name} (ID: {m204_file.m204_file_id}) is not a DB file. Skipping VSAM enhancement.")
         return
 
-    log.info(f"M204_VSAM_ENHANCE: Attempting LLM-based VSAM enhancement for M204 DB file: {m204_file.m204_file_name} (ID: {m204_file.m204_file_id})")
+    # --- Idempotency Check ---
+    db.refresh(m204_file)
     
-    db.refresh(m204_file) # Get latest state
+    # Check if the file definition source is PARMLIB
+    is_parmlib_source = False
+    if m204_file.file_definition_json and m204_file.file_definition_json.get('source') == 'parmlib':
+        is_parmlib_source = True
+
+    # If the source is PARMLIB, we re-run enhancement to ensure it's authoritative.
+    # Otherwise, we skip if it has already been enhanced.
+    if m204_file.target_vsam_type and not is_parmlib_source:
+        log.info(f"M204_VSAM_ENHANCE: M204 file '{m204_file.m204_file_name}' has already been enhanced (VSAM Type: {m204_file.target_vsam_type}) and is not from PARMLIB. Skipping.")
+        return
+    elif m204_file.target_vsam_type and is_parmlib_source:
+        log.info(f"M204_VSAM_ENHANCE: M204 file '{m204_file.m204_file_name}' is from PARMLIB. Re-running VSAM enhancement to ensure authoritative analysis.")
+    # --- End Idempotency Check ---
+
+    log.info(f"M204_VSAM_ENHANCE: Attempting LLM-based VSAM enhancement for M204 DB file: {m204_file.m204_file_name} (ID: {m204_file.m204_file_id})")
     
     file_attributes_from_define_dataset = m204_file.m204_attributes or "Not defined via DEFINE DATASET."
     
     fields_context_list = []
     if m204_file.file_definition_json:
-        # Check for image definitions first, as they are more likely for non-parmlib files
         if "image_definitions" in m204_file.file_definition_json:
             for image_def in m204_file.file_definition_json.get("image_definitions", []):
                 for field in image_def.get("fields", []):
@@ -2069,8 +2025,7 @@ async def enhance_m204_db_file_with_vsam_suggestions(db: Session, m204_file: M20
                         "current_cobol_picture_clause": field.get("cobol_layout_suggestions", {}).get("cobol_picture_clause"),
                         "current_vsam_length": field.get("cobol_layout_suggestions", {}).get("field_byte_length")
                     })
-        # Then check for parmlib structure
-        elif m204_file.file_definition_json.get('file_type') == "db_file" and m204_file.file_definition_json.get('source') == "parmlib":
+        elif m204_file.file_definition_json.get('source') == 'parmlib':
             fields = m204_file.file_definition_json.get('fields', {})
             for field_name, field_data in fields.items():
                 vsam_suggestions = field_data.get('vsam_suggestions', {}) 
@@ -2083,41 +2038,36 @@ async def enhance_m204_db_file_with_vsam_suggestions(db: Session, m204_file: M20
                     "current_vsam_length": vsam_suggestions.get('vsam_length')
                 })
         else:
-            log.warning(f"M204_VSAM_ENHANCE: M204File '{m204_file.m204_file_name}' is_db_file=True, but its file_definition_json does not match known structures (parmlib or image). JSON: {m204_file.file_definition_json}. Skipping VSAM field analysis.")
+            log.warning(f"M204_VSAM_ENHANCE: M204File '{m204_file.m204_file_name}' is_db_file=True, but its file_definition_json does not match known structures. Skipping VSAM field analysis.")
     
-    fields_context_str = json.dumps(fields_context_list, indent=2) if fields_context_list else "No PARMLIB or IMAGE fields defined or found for this file."
+    fields_context_str = json.dumps(fields_context_list, indent=2) if fields_context_list else "No PARMLIB or IMAGE fields defined for this file."
     
     prompt_fstr = f"""
 You are an expert Mainframe M204 to COBOL/VSAM migration specialist.
-Analyze the following M204 database file information.
-Your goal is to suggest its VSAM organization and refine key structure and field attributes for VSAM.
+Analyze the following M204 database file information to suggest its VSAM organization and refine its key structure.
 
 M204 File Name (DDNAME): {m204_file.m204_file_name}
-M204 Logical Dataset Name (if from DEFINE DATASET): {m204_file.m204_logical_dataset_name or "N/A"}
-M204 File 'DEFINE DATASET' Attributes (if available):
+M204 Logical Dataset Name: {m204_file.m204_logical_dataset_name or "N/A"}
+M204 File 'DEFINE DATASET' Attributes:
 {file_attributes_from_define_dataset}
 
-Defined Fields (from PARMLIB or IMAGE definitions), including any current VSAM-related suggestions:
+Defined Fields (from PARMLIB or IMAGE definitions):
 ```json
 {fields_context_str}
 ```
 
-Based on this information, considering both the original M204 field attributes and any 'current_is_key_component', 'current_key_order', 'current_cobol_picture_clause', 'current_vsam_length' suggestions from the input JSON:
-
-1.  Suggest the most appropriate VSAM file organization (KSDS, ESDS, RRDS, or LDS) for this M204 database file.
-2.  For each field listed in the input `Defined Fields` JSON, provide refined suggestions for its role in a VSAM structure:
-    *   `m204_field_name`: string (Must match one of the input field names from the "name" key in the `Defined Fields` JSON)
-    *   `is_key_component`: boolean (true if this field should be part of the primary key for KSDS/RRDS)
-    *   `key_order`: integer (1-based order if it's a key component. Null if not a key component.)
-    *   `cobol_picture_clause`: string (suggest/confirm a COBOL PICTURE clause like "PIC X(10)", "PIC 9(7) COMP-3". Null if not applicable.)
-    *   `vsam_length`: integer (suggest/confirm length in bytes for VSAM. Null if not applicable.)
-    *   `reasoning`: string (briefly why you made these suggestions for this field, especially if refining previous suggestions)
+Based on all this information:
+1.  Suggest the most appropriate VSAM file organization (KSDS, ESDS, RRDS, or LDS).
+2.  For each field, provide refined suggestions for its role in a VSAM structure. Your suggestions should be the final determination.
+    *   `is_key_component`: boolean (true if this field should be part of the primary key).
+    *   `key_order`: integer (1-based order if it's a key component).
+    *   `suggested_cobol_field_name`: string (A suitable COBOL field name).
+    *   `cobol_picture_clause`: string (A suitable COBOL PICTURE clause).
+    *   `vsam_length`: integer (The length in bytes for VSAM).
+    *   `reasoning`: string (Briefly why you made these suggestions).
 
 Respond with a JSON object structured according to the M204FileVsamAnalysisOutput model.
-Ensure `m204_field_name` in `field_specific_suggestions` matches one of the input field names.
-If no fields are provided or applicable for key structure (e.g., for ESDS), `field_specific_suggestions` can be an empty list.
 For KSDS, identify the primary key field(s).
-Your suggestions for fields should be the final determination, considering all available information.
 """
     json_text_output: Optional[str] = None
     try:
@@ -2125,67 +2075,75 @@ Your suggestions for fields should be the final determination, considering all a
         completion_response = await vsam_analyzer_llm.acomplete(prompt=prompt_fstr)
         json_text_output = completion_response.text
         
+        log.info(f"M204_VSAM_ENHANCE: Raw LLM JSON response for file '{m204_file.m204_file_name}': {json_text_output}")
+
         loaded_vsam_data = json.loads(strip_markdown_code_block(json_text_output))
         vsam_output = M204FileVsamAnalysisOutput(**loaded_vsam_data)
 
         if vsam_output.m204_file_name != m204_file.m204_file_name:
-            log.warning(f"M204_VSAM_ENHANCE: LLM returned VSAM data for '{vsam_output.m204_file_name}' but expected '{m204_file.m204_file_name}'. Skipping update for this file.")
+            log.warning(f"M204_VSAM_ENHANCE: LLM returned VSAM data for '{vsam_output.m204_file_name}' but expected '{m204_file.m204_file_name}'. Skipping update.")
             return
 
         m204_file.target_vsam_type = vsam_output.suggested_vsam_type
+        if m204_file.target_vsam_type:
+            m204_file.target_vsam_dataset_name = f"{m204_file.m204_file_name}.{vsam_output.suggested_vsam_type}"
+        else:
+            m204_file.target_vsam_dataset_name = m204_file.m204_file_name
+
         log.info(f"M204_VSAM_ENHANCE: LLM suggested VSAM type for {m204_file.m204_file_name}: {m204_file.target_vsam_type}. Reasoning: {vsam_output.overall_reasoning or 'N/A'}")
 
         if m204_file.file_definition_json and vsam_output.field_specific_suggestions:
             file_definition = m204_file.file_definition_json
             primary_key_components = []
             
-            # Handle PARMLIB structure
             if file_definition.get('source') == 'parmlib':
                 parmlib_fields = file_definition.get('fields', {})
                 for field_suggestion in vsam_output.field_specific_suggestions:
-                    field_name_from_llm = field_suggestion.m204_field_name
-                    if field_name_from_llm in parmlib_fields:
-                        if 'vsam_suggestions' not in parmlib_fields[field_name_from_llm]:
-                            parmlib_fields[field_name_from_llm]['vsam_suggestions'] = {}
+                    field_name = field_suggestion.m204_field_name
+                    if field_name in parmlib_fields:
+                        parmlib_fields[field_name]['vsam_suggestions'] = field_suggestion.model_dump()
                         
-                        parmlib_fields[field_name_from_llm]['vsam_suggestions'].update(field_suggestion.model_dump())
-                        log.info(f"M204_VSAM_ENHANCE: Updated VSAM suggestions for PARMLIB field '{field_name_from_llm}' in {m204_file.m204_file_name}.")
+                        # Synchronize attributes with the final suggestion
+                        field_attributes = parmlib_fields[field_name].get('attributes', [])
+                        if field_suggestion.is_key_component:
+                            if "NON-KEY" in field_attributes:
+                                field_attributes.remove("NON-KEY")
+                            if "KEY" not in field_attributes:
+                                field_attributes.append("KEY")
+                        else:
+                            if "KEY" in field_attributes:
+                                field_attributes.remove("KEY")
+                            if "NON-KEY" not in field_attributes:
+                                field_attributes.append("NON-KEY")
                         
                         if field_suggestion.is_key_component and field_suggestion.key_order is not None:
-                            primary_key_components.append({"name": field_name_from_llm, "order": field_suggestion.key_order})
+                            primary_key_components.append({"name": field_suggestion.m204_field_name, "order": field_suggestion.key_order})
             
-            # Handle IMAGE structure
             elif 'image_definitions' in file_definition:
                 for image_def in file_definition.get("image_definitions", []):
                     for field in image_def.get("fields", []):
                         for field_suggestion in vsam_output.field_specific_suggestions:
                             if field.get("field_name") == field_suggestion.m204_field_name:
-                                if 'vsam_suggestions' not in field:
-                                    field['vsam_suggestions'] = {}
-                                field['vsam_suggestions'].update(field_suggestion.model_dump())
-                                log.info(f"M204_VSAM_ENHANCE: Updated VSAM suggestions for IMAGE field '{field_suggestion.m204_field_name}' in {m204_file.m204_file_name}.")
-                                
+                                field['vsam_suggestions'] = field_suggestion.model_dump()
                                 if field_suggestion.is_key_component and field_suggestion.key_order is not None:
                                     primary_key_components.append({"name": field_suggestion.m204_field_name, "order": field_suggestion.key_order})
 
             if primary_key_components:
                 primary_key_components.sort(key=lambda x: x["order"])
                 m204_file.primary_key_field_name = ", ".join([comp["name"] for comp in primary_key_components])
-                log.info(f"M204_VSAM_ENHANCE: Updated primary key for {m204_file.m204_file_name}: {m204_file.primary_key_field_name}")
+                log.info(f"M204_VSAM_ENHANCE: Set primary key for {m204_file.m204_file_name}: {m204_file.primary_key_field_name}")
             else:
-                if m204_file.primary_key_field_name is not None:
-                    log.info(f"M204_VSAM_ENHANCE: No primary key components identified. Clearing existing PK '{m204_file.primary_key_field_name}'.")
                 m204_file.primary_key_field_name = None
 
-            # Notify SQLAlchemy that the JSON has been modified in-place
             from sqlalchemy.orm.attributes import flag_modified
             flag_modified(m204_file, "file_definition_json")
 
-        db.add(m204_file) # Add to session for commit
+        db.add(m204_file)
 
     except json.JSONDecodeError as e_json:
-        log.error(f"M204_VSAM_ENHANCE: LLM VSAM enhancement for {m204_file.m204_file_name}: JSON parsing error. Raw output: '{json_text_output if json_text_output else 'N/A'}'. Error: {e_json}", exc_info=True)
+        log.error(f"M204_VSAM_ENHANCE: JSON parsing error for {m204_file.m204_file_name}. Raw output: '{json_text_output or 'N/A'}'. Error: {e_json}", exc_info=True)
     except Exception as e_llm:
-        log.error(f"M204_VSAM_ENHANCE: LLM VSAM enhancement for {m204_file.m204_file_name}: Error during LLM call or processing. Error: {e_llm}", exc_info=True)
+        log.error(f"M204_VSAM_ENHANCE: Error during LLM call for {m204_file.m204_file_name}. Error: {e_llm}", exc_info=True)
         if json_text_output:
-            log.error(f"M204_VSAM_ENHANCE: LLM raw output during error for {m204_file.m204_file_name}: {json_text_output}")
+            log.error(f"M204_VSAM_ENHANCE: LLM raw output during error: {json_text_output}")
+    

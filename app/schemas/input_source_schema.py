@@ -10,6 +10,7 @@ class InputSourceBaseSchema(BaseModel):
     project_id: int
     original_filename: Optional[str] = None
     source_type: Optional[str] = None
+    m204_db_file_name_association: Optional[str] = None
     file_path_or_identifier: str 
     analysis_status: Optional[str] = Field(default="pending")
     jcl_detailed_description: Optional[str] = None 
@@ -25,6 +26,7 @@ class InputSourceCreateSchema(InputSourceBaseSchema):
 class InputSourceUpdateSchema(BaseModel):
     original_filename: Optional[str] = None
     source_type: Optional[str] = None
+    m204_db_file_name_association: Optional[str] = None
     file_path_or_identifier: Optional[str] = None 
     analysis_status: Optional[str] = None
     last_analyzed_timestamp: Optional[datetime] = None
@@ -42,6 +44,7 @@ class InputSourceResponseSchema(BaseModel):
     project_id: int
     original_filename: Optional[str] = None
     source_type: Optional[str] = None
+    m204_db_file_name_association: Optional[str] = None
     file_path_or_identifier: str 
     analysis_status: Optional[str] = None
     last_analyzed_timestamp: Optional[datetime] = None
@@ -60,6 +63,7 @@ class InputSourceMinimalResponseSchema(BaseModel):
     project_id: int
     original_filename: Optional[str] = None
     source_type: Optional[str] = None
+    m204_db_file_name_association: Optional[str] = None
     file_path_or_identifier: str 
     analysis_status: Optional[str] = None
     jcl_detailed_description: Optional[str] = None 

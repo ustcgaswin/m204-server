@@ -7,6 +7,10 @@ from app.routers import project_router, file_router,analysis_router,metadata_rou
 from app.services.rag_service import RagService, set_global_rag_service, get_global_rag_service
 import asyncio 
 from contextlib import asynccontextmanager
+import sys
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI): # Renamed 'app' to 'app_instance' to avoid conflict

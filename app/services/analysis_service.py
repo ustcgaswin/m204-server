@@ -64,7 +64,7 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
     message = f"Analysis initiated for {input_source.original_filename} (Type: {file_type})."
     errors: List[str] = []
     
-    m204_db_files_for_vsam_enhancement: List[M204File] = []
+    m204_db_file_ids_for_vsam_enhancement: List[int] = []
 
     current_rag_service_instance = get_global_rag_service()
     if current_rag_service_instance:
@@ -87,13 +87,13 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
         log.info(f"ORCHESTRATOR: Starting analysis for InputSource ID: {input_source_id}, File: {input_source.original_filename}, Type: {file_type}")
 
         if file_type == "parmlib":
-            analysis_details, m204_files_from_parmlib = await parmlib_analysis_service.process_parmlib_analysis(db, input_source, file_content)
+            # PARMLIB analysis is simpler and doesn't use concurrent sub-tasks, so passing the object is safe.
+            analysis_details, m204_file_ids_from_parmlib = await parmlib_analysis_service.process_parmlib_analysis(db, input_source, file_content)
             message = f"PARMLIB analysis completed for {input_source.original_filename}."
             
-            for m204_file_obj in m204_files_from_parmlib:
-                if m204_file_obj.is_db_file:
-                    if m204_file_obj not in m204_db_files_for_vsam_enhancement:
-                         m204_db_files_for_vsam_enhancement.append(m204_file_obj)
+            for m204_file_id in m204_file_ids_from_parmlib:
+                if m204_file_id not in m204_db_file_ids_for_vsam_enhancement:
+                     m204_db_file_ids_for_vsam_enhancement.append(m204_file_id)
             
             total_parmlib_fields_found = 0
             num_parmlib_files_processed = 0
@@ -114,10 +114,9 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
                             if isinstance(fields_to_count, dict):
                                 total_parmlib_fields_found += len(fields_to_count)
             
-            log.info(f"ORCHESTRATOR: PARMLIB analysis for {input_source.original_filename} processed {num_parmlib_files_processed} file definitions, finding {total_parmlib_fields_found} fields. {len(m204_db_files_for_vsam_enhancement)} DB files identified for VSAM enhancement.")
+            log.info(f"ORCHESTRATOR: PARMLIB analysis for {input_source.original_filename} processed {num_parmlib_files_processed} file definitions, finding {total_parmlib_fields_found} fields. {len(m204_db_file_ids_for_vsam_enhancement)} DB files identified for VSAM enhancement.")
 
         elif file_type == "jcl":
-            # --- Parallel JCL analysis and description generation ---
             db_analysis = get_new_db()
             db_desc = get_new_db() if llm_config._llm else None
 
@@ -129,7 +128,7 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
                 db_analysis,
                 jcl_analysis_service.process_jcl_analysis(
                     db_analysis,
-                    input_source,
+                    input_source.input_source_id,
                     file_content,
                     current_rag_service_instance
                 )
@@ -142,7 +141,7 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
                     db_desc,
                     jcl_analysis_service.generate_and_store_jcl_description(
                         db_desc,
-                        input_source,
+                        input_source.input_source_id,
                         file_content
                     )
                 ))
@@ -172,18 +171,16 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
                         if name == "analysis":
                             analysis_details, m204_file_ids_from_jcl = result
                 finally:
-                    session.close()
+                    if session:
+                        session.close()
 
             message = f"JCL analysis completed for {input_source.original_filename}."
             for m204_file_id in m204_file_ids_from_jcl:
-                m204_file_obj = db.query(M204File).get(m204_file_id)
-                if m204_file_obj and m204_file_obj.is_db_file: 
-                    if m204_file_obj not in m204_db_files_for_vsam_enhancement:
-                        m204_db_files_for_vsam_enhancement.append(m204_file_obj)
-            log.info(f"ORCHESTRATOR: JCL analysis for {input_source.original_filename} found {len(analysis_details.dd_statements_found if analysis_details and hasattr(analysis_details, 'dd_statements_found') else [])} DD statements. {len(m204_db_files_for_vsam_enhancement)} DB files identified/updated for VSAM enhancement.")
+                if m204_file_id not in m204_db_file_ids_for_vsam_enhancement:
+                    m204_db_file_ids_for_vsam_enhancement.append(m204_file_id)
+            log.info(f"ORCHESTRATOR: JCL analysis for {input_source.original_filename} found {len(analysis_details.dd_statements_found if analysis_details and hasattr(analysis_details, 'dd_statements_found') else [])} DD statements. {len(m204_db_file_ids_for_vsam_enhancement)} DB files identified/updated for VSAM enhancement.")
 
-        elif file_type in ["m204", "online", "batch", "include", "screen", "map", "subroutine", "userlanguage"]:
-            # --- Parallel/concurrent M204 analysis, description, and main loop extraction ---
+        elif file_type in ["m204", "online", "batch", "include", "screen", "map", "subroutine", "userlanguage", "src", "s", "user", "proc"]:
             db_analysis = get_new_db()
             db_desc     = get_new_db() if llm_config._llm else None
             db_loop     = get_new_db()
@@ -196,7 +193,7 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
                 db_analysis,
                 m204_analysis_service.process_m204_analysis(
                     db_analysis,
-                    input_source,
+                    input_source.input_source_id,
                     file_content,
                     current_rag_service_instance
                 )
@@ -231,7 +228,7 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
             tasks = [asyncio.create_task(coro) for (_, _, coro) in task_defs]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            m204_db_files_from_m204_service = []
+            m204_file_ids_from_m204_service = []
             for (name, session, _), result in zip(task_defs, results):
                 try:
                     if isinstance(result, Exception):
@@ -249,22 +246,23 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
                         )
                         session.commit()
                         if name == "analysis":
-                            analysis_details, m204_db_files_from_m204_service = result
+                            analysis_details, m204_file_ids_from_m204_service = result
                 finally:
-                    session.close()
+                    if session:
+                        session.close()
 
             message = (
                 f"M204 source code analysis completed for "
                 f"{input_source.original_filename}."
             )
-            for obj in m204_db_files_from_m204_service:
-                if obj.is_db_file and obj not in m204_db_files_for_vsam_enhancement:
-                    m204_db_files_for_vsam_enhancement.append(obj)
+            for m204_file_id in m204_file_ids_from_m204_service:
+                if m204_file_id not in m204_db_file_ids_for_vsam_enhancement:
+                    m204_db_file_ids_for_vsam_enhancement.append(m204_file_id)
 
             log.info(
                 f"ORCHESTRATOR: M204 source analysis for "
                 f"{input_source.original_filename} completed; "
-                f"{len(m204_db_files_for_vsam_enhancement)} DB files identified for VSAM enhancement."
+                f"{len(m204_db_file_ids_for_vsam_enhancement)} DB files identified for VSAM enhancement."
             )
 
         else:
@@ -281,22 +279,37 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
             analysis_status_val = "completed"
             message = f"Analysis for {input_source.original_filename} (Type: {file_type}) completed. No specific details extracted for this type."
 
-        # if m204_db_files_for_vsam_enhancement and llm_config._llm:
-        #     log.info(f"ORCHESTRATOR: Starting VSAM enhancement for {len(m204_db_files_for_vsam_enhancement)} M204 DB files related to {input_source.original_filename}.")
-        #     vsam_enhancement_tasks = []
-        #     for m204_db_file in m204_db_files_for_vsam_enhancement:
-        #         db.refresh(m204_db_file) 
-        #         vsam_enhancement_tasks.append(
-        #             m204_analysis_service.enhance_m204_db_file_with_vsam_suggestions(db, m204_db_file)
-        #         )
-        #     await asyncio.gather(*vsam_enhancement_tasks, return_exceptions=True) 
-        #     log.info(f"ORCHESTRATOR: Completed VSAM enhancement tasks for M204 DB files related to {input_source.original_filename}.")
+        if m204_db_file_ids_for_vsam_enhancement and llm_config._llm:
+            log.info(f"ORCHESTRATOR: Starting VSAM enhancement for {len(m204_db_file_ids_for_vsam_enhancement)} M204 DB files related to {input_source.original_filename}.")
+            
+            async def enhance_and_commit(m204_file_id: int):
+                db_vsam = get_new_db()
+                try:
+                    m204_db_file = db_vsam.query(M204File).get(m204_file_id)
+                    if m204_db_file and m204_db_file.is_db_file:
+                        await m204_analysis_service.enhance_m204_db_file_with_vsam_suggestions(db_vsam, m204_db_file)
+                        db_vsam.commit()
+                        log.info(f"ORCHESTRATOR_VSAM: Successfully enhanced and committed file ID {m204_file_id}.")
+                    else:
+                        log.warning(f"ORCHESTRATOR_VSAM: Could not find M204File with ID {m204_file_id} for enhancement or it is not a DB file.")
+                except Exception as e_vsam:
+                    log.error(f"ORCHESTRATOR_VSAM: VSAM enhancement task failed for file ID {m204_file_id}: {e_vsam}", exc_info=True)
+                    errors.append(f"Failed VSAM enhancement for file ID {m204_file_id}")
+                    db_vsam.rollback()
+                finally:
+                    db_vsam.close()
 
-        # elif m204_db_files_for_vsam_enhancement and not llm_config._llm:
-        #     log.warning(f"ORCHESTRATOR: LLM not configured. Skipping VSAM enhancement for {len(m204_db_files_for_vsam_enhancement)} M204 DB files.")
+            vsam_enhancement_tasks = [enhance_and_commit(file_id) for file_id in m204_db_file_ids_for_vsam_enhancement]
+            await asyncio.gather(*vsam_enhancement_tasks)
+            log.info(f"ORCHESTRATOR: Completed VSAM enhancement tasks for M204 DB files related to {input_source.original_filename}.")
 
+        elif m204_db_file_ids_for_vsam_enhancement and not llm_config._llm:
+            log.warning(f"ORCHESTRATOR: LLM not configured. Skipping VSAM enhancement for {len(m204_db_file_ids_for_vsam_enhancement)} M204 DB files.")
+
+        # This commit is for the main session, which might not have changes if all work was done in sub-tasks.
+        # It's generally safe but might be redundant. The final status commit is more critical.
         db.commit()
-        log.info(f"ORCHESTRATOR: Successfully committed all analysis changes for InputSource ID: {input_source_id}, File: {input_source.original_filename}")
+        log.info(f"ORCHESTRATOR: Main session commit after analysis tasks for InputSource ID: {input_source_id}")
         analysis_status_val = "completed" if not errors else "completed_with_warnings"
 
     except HTTPException as he:
@@ -312,6 +325,7 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
         message = f"Unexpected error during analysis of {input_source.original_filename}."
         analysis_status_val = "failed"
     
+    # Final status update in the main session
     input_source.analysis_status = analysis_status_val
     if errors:
         input_source.error_message = "; ".join(list(set(errors))) 
@@ -326,6 +340,7 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
         db.rollback() 
         log.error(f"ORCHESTRATOR: Failed to commit final InputSource status for ID {input_source_id}: {e_commit_final}", exc_info=True)
 
+    # Refresh M204File objects in the main session to get the latest data after VSAM enhancement
     if analysis_status_val.startswith("completed") and analysis_details:
         if isinstance(analysis_details, M204AnalysisResultDataSchema):
             refreshed_defined_files = []
@@ -345,5 +360,3 @@ async def perform_source_file_analysis(db: Session, input_source_id: int) -> Uni
         errors=list(set(errors)),
         details=analysis_details
     )
-    
-           

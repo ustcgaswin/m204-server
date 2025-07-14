@@ -1,15 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import List
 
 from app.config.db_config import get_db
-from app.services import analysis_service,m204_analysis_service
+from app.services import analysis_service, file_service
 from app.schemas.analysis_schema import UnifiedAnalysisReportSchema
 from app.utils.logger import log
 from app.models.input_source_model import InputSource
-from app.models.m204_file_model import M204File
-from app.config.llm_config import llm_config
-import asyncio
 
 router = APIRouter(
     prefix="/analysis",
@@ -30,22 +27,83 @@ async def trigger_source_file_detailed_analysis(
     """
     Triggers a detailed analysis of a source file identified by its input_source_id.
     The type of analysis performed depends on the file's extension/type.
+    This process is self-contained and includes VSAM enhancement where applicable.
     """
     log.info(f"ANALYSIS_ROUTER: Received request for detailed analysis of input_source_id: {input_source_id}")
     try:
-        # Call the new analysis service
         analysis_report = await analysis_service.perform_source_file_analysis(db, input_source_id)
         return analysis_report
     except HTTPException as he:
-        # Service layer should ideally log specific errors. Router can re-raise.
         log.warning(f"ANALYSIS_ROUTER: HTTPException for input_source_id {input_source_id}: {he.detail}")
         raise he
     except Exception as e:
-        # Catch-all for unexpected errors not converted to HTTPException by the service
         log.error(f"ANALYSIS_ROUTER: Unexpected error in analysis router for {input_source_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected server error occurred while processing the analysis request."
+        )
+
+@router.post("/project/{project_id}/upload_and_analyze_parmlib", response_model=UnifiedAnalysisReportSchema, tags=["Project Analysis"])
+async def upload_and_analyze_parmlib_file(
+    project_id: int,
+    m204_db_file_name: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Uploads a single PARMLIB file, associates it with a project and an M204 DB file name,
+    and immediately performs a detailed analysis, which includes VSAM enhancement.
+    """
+    log.info(
+        f"ANALYSIS_ROUTER: Received request to upload and analyze PARMLIB file "
+        f"'{file.filename}' for project {project_id}, associating with DB file "
+        f"'{m204_db_file_name}'."
+    )
+
+    if not file.filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A file with a filename must be provided.")
+
+    try:
+        # Step 1: Save the file and create the InputSource entry.
+        input_source = await file_service.save_uploaded_file_and_create_db_entry(
+            db=db,
+            project_id=project_id,
+            file=file,
+            user_defined_path_segment_for_file=file.filename,
+            source_type="parmlib",
+            m204_db_file_name=m204_db_file_name
+        )
+        log.info(
+            f"ANALYSIS_ROUTER: PARMLIB file '{file.filename}' saved as InputSource ID "
+            f"{input_source.input_source_id}. Proceeding to analysis."
+        )
+
+        # Step 2: Trigger the detailed analysis using the main orchestrator.
+        # This service now handles the entire pipeline, including VSAM enhancement.
+        analysis_report = await analysis_service.perform_source_file_analysis(
+            db, input_source.input_source_id
+        )
+        
+        log.info(
+            f"ANALYSIS_ROUTER: Successfully completed analysis for uploaded PARMLIB "
+            f"file '{file.filename}' (InputSource ID: {input_source.input_source_id})."
+        )
+        return analysis_report
+
+    except HTTPException as he:
+        log.warning(
+            f"ANALYSIS_ROUTER: HTTPException during PARMLIB upload/analysis for "
+            f"project {project_id}: {he.detail}"
+        )
+        raise he
+    except Exception as e:
+        log.error(
+            f"ANALYSIS_ROUTER: Unexpected error during PARMLIB upload/analysis for "
+            f"project {project_id}: {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected server error occurred during the PARMLIB upload and analysis process."
         )
 
 # --- Project Level Ordered Analysis ---
@@ -53,13 +111,13 @@ async def trigger_source_file_detailed_analysis(
 def get_analysis_order_key(input_source: InputSource):
     """Helper function to determine the sort order for analysis based on source type."""
     source_type = input_source.source_type.lower() if input_source.source_type else "unknown"
-    # Order: M204 source types -> PARMLIB -> JCL -> Others
-    if source_type in ["m204", "online", "batch", "include", "screen", "map", "subroutine", "userlanguage", "src", "s", "user", "proc"]:
-        return 0  # M204 source files and similar types first
-    elif source_type == "parmlib":
-        return 1  # Then PARMLIB files
+    # Order: PARMLIB -> M204 source types -> JCL -> Others
+    if source_type == "parmlib":
+        return 0  # First, process PARMLIB files for base file definitions.
+    elif source_type in ["m204", "online", "batch", "include", "screen", "map", "subroutine", "userlanguage", "src", "s", "user", "proc"]:
+        return 1  # Second, process all M204 source to find OPEN statements and IMAGEs.
     elif source_type == "jcl":
-        return 2  # Then JCL files
+        return 2  # Third, process JCL to link physical DSNs using the now-existing OPEN statements.
     else:
         return 3  # Other types last
 
@@ -71,7 +129,8 @@ async def trigger_project_ordered_analysis(
 ):
     """
     Triggers a detailed analysis of all source files within a given project,
-    processed in a dependency-aware order (e.g., M204 source -> PARMLIB -> JCL).
+    processed in a dependency-aware order. Each file's analysis pipeline includes
+    VSAM enhancement for any DB files it defines or references.
     """
     log.info(f"ANALYSIS_ROUTER: Received request for ordered analysis of project_id: {project_id}")
 
@@ -96,7 +155,7 @@ async def trigger_project_ordered_analysis(
     for input_source_to_analyze in sorted_input_sources:
         try:
             log.info(f"ANALYSIS_ROUTER: Starting analysis for input_source_id: {input_source_to_analyze.input_source_id} ({input_source_to_analyze.original_filename}) in project {project_id}")
-            # Call the new analysis service
+            # The service call is self-contained and will handle its own transactions and VSAM enhancement.
             report = await analysis_service.perform_source_file_analysis(db, input_source_to_analyze.input_source_id)
             analysis_reports.append(report)
             log.info(f"ANALYSIS_ROUTER: Finished analysis for input_source_id: {input_source_to_analyze.input_source_id}, Status: {report.analysis_status}")
@@ -106,13 +165,12 @@ async def trigger_project_ordered_analysis(
                 input_source_id=input_source_to_analyze.input_source_id,
                 original_filename=input_source_to_analyze.original_filename,
                 file_type_processed=input_source_to_analyze.source_type.lower() if input_source_to_analyze.source_type else "unknown",
-                analysis_status="analysis_failed", # Reflects the outcome of this specific file's analysis attempt
+                analysis_status="analysis_failed",
                 message=f"Analysis failed: {he.detail}",
                 details=None,
                 errors=[str(he.detail)]
             )
             analysis_reports.append(error_report)
-            # Continue with other files
         except Exception as e:
             log.error(f"ANALYSIS_ROUTER: Unexpected error during analysis of input_source_id {input_source_to_analyze.input_source_id} in project {project_id}: {e}", exc_info=True)
             unexpected_error_report = UnifiedAnalysisReportSchema(
@@ -125,28 +183,10 @@ async def trigger_project_ordered_analysis(
                 errors=[str(e)]
             )
             analysis_reports.append(unexpected_error_report)
-            # Continue with other files
 
     log.info(f"ANALYSIS_ROUTER: Completed ordered analysis for project_id: {project_id}. Generated {len(analysis_reports)} reports.")
 
-    # --- VSAM enhancement for all DB files after all analysis ---
-    db.commit()  # Ensure all is_db_file flags are up to date
-
-    if llm_config._llm:
-        db_files = db.query(M204File).filter(
-            M204File.project_id == project_id,
-            M204File.is_db_file
-        ).all()
-        log.info(f"ANALYSIS_ROUTER: Starting VSAM enhancement for {len(db_files)} DB files in project {project_id}.")
-        vsam_tasks = [
-            m204_analysis_service.enhance_m204_db_file_with_vsam_suggestions(db, m204_file)
-            for m204_file in db_files
-        ]
-        await asyncio.gather(*vsam_tasks, return_exceptions=True)
-        db.commit()
-        log.info(f"ANALYSIS_ROUTER: Completed VSAM enhancement for all DB files in project {project_id}.")
-    else:
-        log.warning(f"ANALYSIS_ROUTER: LLM not configured. Skipping VSAM enhancement for project {project_id}.")
-    # --- End VSAM enhancement ---
+    # The final, project-wide VSAM enhancement step is no longer needed here.
+    # It is now handled within each call to perform_source_file_analysis.
 
     return analysis_reports

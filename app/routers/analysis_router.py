@@ -25,9 +25,10 @@ async def trigger_source_file_detailed_analysis(
     db: Session = Depends(get_db)
 ):
     """
-    Triggers a detailed analysis of a source file identified by its input_source_id.
-    The type of analysis performed depends on the file's extension/type.
-    This process is self-contained and includes VSAM enhancement where applicable.
+    Triggers a detailed analysis of a single source file.
+    The type of analysis performed depends on the file's type.
+    Note: This performs analysis in isolation. For complete, cross-file context
+    (like VSAM enhancement), use the project-level ordered analysis endpoint.
     """
     log.info(f"ANALYSIS_ROUTER: Received request for detailed analysis of input_source_id: {input_source_id}")
     try:
@@ -52,7 +53,8 @@ async def upload_and_analyze_parmlib_file(
 ):
     """
     Uploads a single PARMLIB file, associates it with a project and an M204 DB file name,
-    and immediately performs a detailed analysis, which includes VSAM enhancement.
+    and immediately performs a detailed analysis.
+    Note: For full VSAM enhancement, run the project-level analysis afterwards.
     """
     log.info(
         f"ANALYSIS_ROUTER: Received request to upload and analyze PARMLIB file "
@@ -79,7 +81,6 @@ async def upload_and_analyze_parmlib_file(
         )
 
         # Step 2: Trigger the detailed analysis using the main orchestrator.
-        # This service now handles the entire pipeline, including VSAM enhancement.
         analysis_report = await analysis_service.perform_source_file_analysis(
             db, input_source.input_source_id
         )
@@ -129,8 +130,8 @@ async def trigger_project_ordered_analysis(
 ):
     """
     Triggers a detailed analysis of all source files within a given project,
-    processed in a dependency-aware order. Each file's analysis pipeline includes
-    VSAM enhancement for any DB files it defines or references.
+    processed in a dependency-aware order. After all files are analyzed, a
+    final project-wide VSAM enhancement step is performed on all identified DB files.
     """
     log.info(f"ANALYSIS_ROUTER: Received request for ordered analysis of project_id: {project_id}")
 
@@ -155,7 +156,6 @@ async def trigger_project_ordered_analysis(
     for input_source_to_analyze in sorted_input_sources:
         try:
             log.info(f"ANALYSIS_ROUTER: Starting analysis for input_source_id: {input_source_to_analyze.input_source_id} ({input_source_to_analyze.original_filename}) in project {project_id}")
-            # The service call is self-contained and will handle its own transactions and VSAM enhancement.
             report = await analysis_service.perform_source_file_analysis(db, input_source_to_analyze.input_source_id)
             analysis_reports.append(report)
             log.info(f"ANALYSIS_ROUTER: Finished analysis for input_source_id: {input_source_to_analyze.input_source_id}, Status: {report.analysis_status}")
@@ -186,7 +186,14 @@ async def trigger_project_ordered_analysis(
 
     log.info(f"ANALYSIS_ROUTER: Completed ordered analysis for project_id: {project_id}. Generated {len(analysis_reports)} reports.")
 
-    # The final, project-wide VSAM enhancement step is no longer needed here.
-    # It is now handled within each call to perform_source_file_analysis.
+    # --- NEW: Final, project-wide VSAM enhancement step ---
+    log.info(f"ANALYSIS_ROUTER: Initiating final project-wide VSAM enhancement for project {project_id}.")
+    try:
+        await analysis_service.enhance_project_vsam_suggestions(project_id)
+        log.info(f"ANALYSIS_ROUTER: Successfully completed project-wide VSAM enhancement for project {project_id}.")
+    except Exception as e_vsam_enhance:
+        log.error(f"ANAL.YSIS_ROUTER: Project-wide VSAM enhancement step failed for project {project_id}: {e_vsam_enhance}", exc_info=True)
+        # This error occurs after individual file reports are generated, so we log it
+        # but don't alter the reports. A separate status endpoint could reflect this.
 
     return analysis_reports

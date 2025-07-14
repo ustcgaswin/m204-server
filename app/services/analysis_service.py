@@ -1,6 +1,7 @@
 import os
 import asyncio
 from sqlalchemy.orm import Session
+import json
 from typing import List, Optional, Union
 
 from app.models.input_source_model import InputSource
@@ -10,7 +11,7 @@ from fastapi import HTTPException, status
 
 from app.schemas.m204_analysis_schema import M204AnalysisResultDataSchema, M204FileResponseSchema
 from app.schemas.generic_analysis_schema import GenericAnalysisResultDataSchema
-from app.schemas.analysis_schema import UnifiedAnalysisReportSchema
+from app.schemas.analysis_schema import UnifiedAnalysisReportSchema,MermaidFixRequestSchema
 
 from app.utils.logger import log
 from app.config.llm_config import llm_config
@@ -22,9 +23,16 @@ from app.services import jcl_analysis_service
 from app.services import m204_analysis_service
 
 from app.config.db_config import SessionLocal
+from pydantic import BaseModel, Field
 
 def get_new_db():
     return SessionLocal()
+
+
+class MermaidCorrectionResponse(BaseModel):
+    """Structured output for a corrected Mermaid diagram."""
+    fixed_mermaid_code: str = Field(description="The complete and corrected Mermaid diagram code, ready for rendering. The code should not be wrapped in markdown backticks.")
+
 
 
 async def _get_input_source_for_analysis(db: Session, input_source_id: int) -> InputSource:
@@ -325,3 +333,77 @@ async def enhance_project_vsam_suggestions(project_id: int):
         log.error(f"ORCHESTRATOR_VSAM: Failed to run project-wide VSAM enhancement for project {project_id}: {e}", exc_info=True)
     finally:
         db_main.close()
+
+
+
+async def fix_mermaid_diagram(request: MermaidFixRequestSchema) -> str:
+    """
+    Uses an LLM to fix a Mermaid diagram based on the provided code and error message.
+
+    Args:
+        request: A request object containing the broken mermaid_code and the error_message.
+
+    Returns:
+        A string containing the fixed Mermaid diagram code.
+    """
+    if not llm_config._llm:
+        log.warning("MERMAID_FIXER: LLM not configured. Cannot fix Mermaid diagram.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="LLM service is not configured, cannot perform diagram correction."
+        )
+
+    log.info(f"MERMAID_FIXER: Attempting to fix Mermaid diagram. Error: {request.error_message}")
+
+    prompt = f"""
+You are an expert in Mermaid.js syntax. Your task is to fix a Mermaid diagram that has a syntax error.
+I will provide you with the broken Mermaid code and the error message from the renderer.
+Analyze the code and the error to identify the problem.
+Correct the syntax and provide the complete, valid Mermaid code.
+
+**IMPORTANT RULES:**
+1.  Pay close attention to the error message. It often points to the exact line or cause of the issue. Common errors include unclosed subgraphs, incorrect arrow types, missing keywords, or invalid node identifiers.
+2.  Preserve the original intent and structure of the diagram as much as possible. Only fix the syntax errors.
+3.  The corrected code in the `fixed_mermaid_code` field must not be wrapped in markdown like ```mermaid ... ```. It should be the raw diagram code.
+
+**Broken Mermaid Code:**
+```mermaid
+{request.mermaid_code}
+```
+
+**Error Message:**
+```
+{request.error_message}
+```
+
+Respond with a JSON object structured according to the `MermaidCorrectionResponse` model.
+"""
+    json_text_output = ""
+    try:
+        mermaid_fixer_llm = llm_config._llm.as_structured_llm(MermaidCorrectionResponse)
+        completion_response = await mermaid_fixer_llm.acomplete(prompt=prompt)
+        json_text_output = completion_response.text
+
+        log.info(f"MERMAID_FIXER: Raw LLM JSON response: {json_text_output}")
+
+        loaded_correction_data = json.loads(json_text_output)
+        correction = MermaidCorrectionResponse(**loaded_correction_data)
+
+        fixed_code = correction.fixed_mermaid_code.strip()
+
+        log.info("MERMAID_FIXER: Successfully generated and parsed a fix for the diagram.")
+        log.debug(f"MERMAID_FIXER: Corrected code:\n{fixed_code}")
+        return fixed_code
+
+    except json.JSONDecodeError as e_json:
+        log.error(f"MERMAID_FIXER: JSON parsing error for Mermaid fix: {e_json}. Raw output: '{json_text_output}'")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to parse LLM response as JSON. Raw output: {json_text_output}"
+        )
+    except Exception as e:
+        log.error(f"MERMAID_FIXER: LLM call failed while trying to fix Mermaid diagram: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while communicating with the LLM to fix the diagram: {e}"
+        )

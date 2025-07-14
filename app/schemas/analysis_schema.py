@@ -15,3 +15,14 @@ class UnifiedAnalysisReportSchema(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class MermaidFixRequestSchema(BaseModel):
+    """Schema for the request to fix a Mermaid diagram."""
+    mermaid_code: str
+    error_message: str
+
+class MermaidFixResponseSchema(BaseModel):
+    """Schema for the response containing the fixed Mermaid diagram."""
+    fixed_mermaid_code: str
+    

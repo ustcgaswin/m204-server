@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 import json
 import re
 import subprocess
+from openai import APIError
 
 from app.models.project_model import Project
 from app.models.procedure_model import Procedure
@@ -37,7 +38,9 @@ from app.config.llm_config import llm_config
 from app.utils.logger import log
 from fastapi import HTTPException, status
 from datetime import datetime
-from openai import APIError
+
+
+MAX_CONCURRENT_LLM_CALLS = 5
 
 # --- Helper function to serialize SQLAlchemy models to dicts for LLM prompt ---
 def _serialize_model_instance(instance: Any, schema_class: Optional[Any] = None) -> Dict[str, Any]:
@@ -467,7 +470,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
            J --> K;
            K --> A;
        ```
-       **If data is insufficient or not applicable for generating a diagram, include the heading and state "Data insufficient or not applicable for generating a main processing loop diagram." instead of providing malformed Mermaid code.**)
+      
 """
         },
         {
@@ -529,7 +532,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
            DD_INPCUST --> M204_CUST;
            DD_OTACCT --> M204_ACCT;
        ```
-       **If no such relationships are found or data is insufficient to generate a meaningful and syntactically correct diagram, include the heading and state "No clear M204 file to JCL DD statement links found or data is insufficient to generate a diagram." instead of providing malformed Mermaid code.**)
+     
 """
         },
         {
@@ -575,7 +578,6 @@ def _get_sections_config() -> List[Dict[str, str]]:
                J2_STEPX --> J2_DDSYS["DD: SYSIN (DSN: *.STEPX.SYSIN)"];
            end
        ```
-       **If no JCL DD statement data is available to generate a meaningful and syntactically correct diagram, include the heading and state "No JCL data available to generate a job/step flow diagram." instead of providing malformed Mermaid code.**)
 """
         },
         {
@@ -603,7 +605,6 @@ def _get_sections_config() -> List[Dict[str, str]]:
            PROC_E["Procedure E"]; // A procedure that is called but doesn't call, or isn't called but exists
        ```
        Ensure all unique procedure names involved in any call (callers and callees) are represented as nodes in the diagram.
-       **If no procedure calls exist in the 'Procedure Call Relationships Data' or data is insufficient to generate a meaningful and syntactically correct diagram, include the heading and state "No procedure call relationships found or data is insufficient to generate a diagram." instead of providing malformed Mermaid code.**)
 """
         },
         {
@@ -630,7 +631,6 @@ def _get_sections_config() -> List[Dict[str, str]]:
             "instructions": """
    (Review all provided data for hints towards non-functional requirements.
     - Describe any identified NFRs (e.g., performance considerations from file attributes, security aspects from field encryption, operational constraints) in paragraph form.
-    - If none are directly inferable, state that "No specific non-functional requirements were directly inferable from the provided system data.")
 """
         },
         {
@@ -741,7 +741,6 @@ def _get_sections_config() -> List[Dict[str, str]]:
       - Error handling mechanisms (if visible in procedure snippets or implied by COBOL interactions).
       - Dependencies on external files/systems outlined in JCL (points of failure).
       - Recovery considerations for VSAM datasets based on `target_vsam_type` and usage patterns.
-    If specific NFRs are not directly inferable for an aspect, clearly state "No specific insights for [Aspect] could be directly inferred from the provided system data.")
 """
         }
     ]
@@ -861,7 +860,6 @@ Your output must start *exactly* with the following heading line:
 And then provide the content as described below:
 {section_instructions}
 
-If data for this specific section is not available or not applicable based on the input, include the heading and a brief note like "Not applicable based on provided data." or "No data available for this section."
 When discussing JCL, M204 Procedures, or M204 Files (if relevant to this section), refer to any 'Source File LLM-Generated Summaries' provided in the input data to give broader context.
 Do not add any preamble or explanation before the section's heading.
 Ensure the entire output for this section is valid Markdown.
@@ -1053,9 +1051,10 @@ async def generate_and_save_project_requirements_document(
     """
     Generates a comprehensive Software Requirements Specification (SRS) document
     in Markdown format for a given project using an LLM.
-    Each major section is generated via an LLM call, potentially in parallel.
+    Each major section is generated via an LLM call, with concurrency limited by a semaphore.
     """
     log.info(f"Starting requirements document generation for project ID: {project_id} with options: {options.model_dump_json(exclude_none=True)}")
+    log.info(f"Concurrency for LLM calls is limited to {MAX_CONCURRENT_LLM_CALLS}.")
 
     if not llm_config._llm:
         log.error("LLM is not configured. Cannot generate requirements document.")
@@ -1079,25 +1078,28 @@ async def generate_and_save_project_requirements_document(
     sections_config = _get_sections_config()
     markdown_parts = [f"# {document_title}\n"]
 
-    generation_tasks = []
-    for section_conf in sections_config:
-        section_id = section_conf["id"]
-        section_title = section_conf["title"]
-        section_instructions = section_conf["instructions"]
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
 
-        log.info(f"Queueing LLM generation for section: {section_id} - '{section_title}'")
-        task = _generate_llm_section(
-            section_id=section_id,
-            section_title=section_title,
-            section_instructions=section_instructions,
-            formatted_data_for_prompt=formatted_data_for_prompt,
-            custom_prompt_section=custom_prompt_section
-        )
-        generation_tasks.append(task)
+    async def generate_with_semaphore(section_conf: Dict[str, str]) -> str:
+        """Wrapper to acquire semaphore before calling the LLM generation function."""
+        async with semaphore:
+            section_id = section_conf["id"]
+            section_title = section_conf["title"]
+            section_instructions = section_conf["instructions"]
+            log.info(f"Acquired semaphore for section: {section_id} - '{section_title}'")
+            return await _generate_llm_section(
+                section_id=section_id,
+                section_title=section_title,
+                section_instructions=section_instructions,
+                formatted_data_for_prompt=formatted_data_for_prompt,
+                custom_prompt_section=custom_prompt_section
+            )
+
+    generation_tasks = [generate_with_semaphore(conf) for conf in sections_config]
 
     try:
-        log.info(f"Executing {len(generation_tasks)} section generation tasks in parallel.")
-        # asyncio.gather runs tasks concurrently and returns results in the order of tasks provided.
+        log.info(f"Executing {len(generation_tasks)} section generation tasks with a concurrency limit of {MAX_CONCURRENT_LLM_CALLS}.")
+        # asyncio.gather runs tasks concurrently, but the semaphore limits how many are active at once.
         # _generate_llm_section is designed to return a string (content or error message),
         # so exceptions from the LLM call itself are handled within that function.
         generated_sections_content = await asyncio.gather(*generation_tasks)
@@ -1146,6 +1148,8 @@ async def generate_and_save_project_requirements_document(
             log.warning(f"Could not parse generation_options_json for response for doc ID {db_document.requirement_document_id}: {e_parse_resp}")
             response_data.generation_options_used = None 
     return response_data
+
+
 
 # --- CRUD functions for RequirementDocument ---
 

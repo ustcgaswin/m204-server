@@ -1982,7 +1982,8 @@ async def process_m204_analysis(
 
 async def enhance_m204_db_file_with_vsam_suggestions(db: Session, m204_file: M204File):
     """
-    Updates an M204File (only if is_db_file is True) and its JSON field definitions with VSAM suggestions.
+    Updates an M204File (only if is_db_file is True) and its JSON field definitions with VSAM suggestions
+    using a structured LLM call to ensure output conforms to the Pydantic model.
     This process is idempotent and will skip files that have already been enhanced, unless the source is PARMLIB.
     """
     if not llm_config._llm:
@@ -1996,13 +1997,10 @@ async def enhance_m204_db_file_with_vsam_suggestions(db: Session, m204_file: M20
     # --- Idempotency Check ---
     db.refresh(m204_file)
     
-    # Check if the file definition source is PARMLIB
     is_parmlib_source = False
     if m204_file.file_definition_json and m204_file.file_definition_json.get('source') == 'parmlib':
         is_parmlib_source = True
 
-    # If the source is PARMLIB, we re-run enhancement to ensure it's authoritative.
-    # Otherwise, we skip if it has already been enhanced.
     if m204_file.target_vsam_type and not is_parmlib_source:
         log.info(f"M204_VSAM_ENHANCE: M204 file '{m204_file.m204_file_name}' has already been enhanced (VSAM Type: {m204_file.target_vsam_type}) and is not from PARMLIB. Skipping.")
         return
@@ -2056,29 +2054,34 @@ Defined Fields (from PARMLIB or IMAGE definitions):
 {fields_context_str}
 ```
 
-Based on all this information:
-1.  Suggest the most appropriate VSAM file organization (KSDS, ESDS, RRDS, or LDS).
-2.  For each field, provide refined suggestions for its role in a VSAM structure. Your suggestions should be the final determination.
-    *   `is_key_component`: boolean (true if this field should be part of the primary key).
-    *   `key_order`: integer (1-based order if it's a key component).
-    *   `suggested_cobol_field_name`: string (A suitable COBOL field name).
-    *   `cobol_picture_clause`: string (A suitable COBOL PICTURE clause).
-    *   `vsam_length`: integer (The length in bytes for VSAM).
-    *   `reasoning`: string (Briefly why you made these suggestions).
+Based on all this information, respond ONLY with a valid JSON object structured according to the M204FileVsamAnalysisOutput model.
+The JSON object must have the following top-level keys:
+- "m204_file_name": string (Must be "{m204_file.m204_file_name}")
+- "suggested_vsam_type": string (Suggested VSAM organization: KSDS, ESDS, RRDS, or LDS)
+- "field_specific_suggestions": list (A list of objects, one for each field, following the M204FieldVsamSuggestion model)
+- "overall_reasoning": string (Optional reasoning for the VSAM structure suggestion)
 
-Respond with a JSON object structured according to the M204FileVsamAnalysisOutput model.
-For KSDS, identify the primary key field(s).
+For each object in the "field_specific_suggestions" list, provide refined suggestions for its role in a VSAM structure. Each object must contain:
+- "m204_field_name": string (The original M204 field name)
+- "is_key_component": boolean (true if this field should be part of the primary key)
+- "key_order": integer (1-based order if it's a key component, null otherwise)
+- "suggested_cobol_field_name": string (A suitable COBOL field name)
+- "cobol_picture_clause": string (A suitable COBOL PICTURE clause)
+- "vsam_length": integer (The length in bytes for VSAM)
+- "reasoning": string (Briefly why you made these suggestions)
+
+For KSDS, identify the primary key field(s) by setting `is_key_component` to true.
+Do not include markdown backticks or any other text outside the JSON structure.
 """
     json_text_output: Optional[str] = None
     try:
-        vsam_analyzer_llm = llm_config._llm.as_structured_llm(M204FileVsamAnalysisOutput)
-        completion_response = await vsam_analyzer_llm.acomplete(prompt=prompt_fstr)
+        vsam_suggester_llm = llm_config._llm.as_structured_llm(M204FileVsamAnalysisOutput)
+        completion_response = await vsam_suggester_llm.acomplete(prompt=prompt_fstr)
         json_text_output = completion_response.text
-        
         log.info(f"M204_VSAM_ENHANCE: Raw LLM JSON response for file '{m204_file.m204_file_name}': {json_text_output}")
 
-        loaded_vsam_data = json.loads(strip_markdown_code_block(json_text_output))
-        vsam_output = M204FileVsamAnalysisOutput(**loaded_vsam_data)
+        loaded_data = json.loads(strip_markdown_code_block(json_text_output))
+        vsam_output = M204FileVsamAnalysisOutput(**loaded_data)
 
         if vsam_output.m204_file_name != m204_file.m204_file_name:
             log.warning(f"M204_VSAM_ENHANCE: LLM returned VSAM data for '{vsam_output.m204_file_name}' but expected '{m204_file.m204_file_name}'. Skipping update.")
@@ -2086,9 +2089,9 @@ For KSDS, identify the primary key field(s).
 
         m204_file.target_vsam_type = vsam_output.suggested_vsam_type
         if m204_file.target_vsam_type:
-            m204_file.target_vsam_dataset_name = f"{m204_file.m204_file_name}.{vsam_output.suggested_vsam_type}"
+            m204_file.target_vsam_dataset_name = f"PROJ.VSAM.{m204_file.m204_file_name}.{vsam_output.suggested_vsam_type}"
         else:
-            m204_file.target_vsam_dataset_name = m204_file.m204_file_name
+            m204_file.target_vsam_dataset_name = f"PROJ.FLAT.{m204_file.m204_file_name}"
 
         log.info(f"M204_VSAM_ENHANCE: LLM suggested VSAM type for {m204_file.m204_file_name}: {m204_file.target_vsam_type}. Reasoning: {vsam_output.overall_reasoning or 'N/A'}")
 
@@ -2103,7 +2106,6 @@ For KSDS, identify the primary key field(s).
                     if field_name in parmlib_fields:
                         parmlib_fields[field_name]['vsam_suggestions'] = field_suggestion.model_dump()
                         
-                        # Synchronize attributes with the final suggestion
                         field_attributes = parmlib_fields[field_name].get('attributes', [])
                         if field_suggestion.is_key_component:
                             if "NON-KEY" in field_attributes:
@@ -2140,10 +2142,5 @@ For KSDS, identify the primary key field(s).
 
         db.add(m204_file)
 
-    except json.JSONDecodeError as e_json:
-        log.error(f"M204_VSAM_ENHANCE: JSON parsing error for {m204_file.m204_file_name}. Raw output: '{json_text_output or 'N/A'}'. Error: {e_json}", exc_info=True)
-    except Exception as e_llm:
-        log.error(f"M204_VSAM_ENHANCE: Error during LLM call for {m204_file.m204_file_name}. Error: {e_llm}", exc_info=True)
-        if json_text_output:
-            log.error(f"M204_VSAM_ENHANCE: LLM raw output during error: {json_text_output}")
-    
+    except (json.JSONDecodeError, Exception) as e_llm:
+        log.error(f"M204_VSAM_ENHANCE: Error during LLM call or parsing for {m204_file.m204_file_name}. Error: {e_llm}. Raw output: '{json_text_output or 'N/A'}'", exc_info=True)

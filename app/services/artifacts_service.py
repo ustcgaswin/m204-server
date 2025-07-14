@@ -814,59 +814,36 @@ The `jcl_content` should be the complete JCL.
                 response = await llm_call.acomplete(prompt=prompt_fstr)
                 json_text_output = response.text
                 
-                # Clean and validate JSON
-                if json_text_output:
-                    json_text_output = strip_markdown_code_block(json_text_output)
-                    
-                    try:
-                        import json
-                        parsed_json = json.loads(json_text_output)
-                        
-                        # Validate structure
-                        if not isinstance(parsed_json, dict):
-                            raise ValueError("Response must be a JSON object")
-                        
-                        if "paragraphs" not in parsed_json:
-                            raise ValueError("Missing 'paragraphs' key in response")
-                            
-                        if not isinstance(parsed_json["paragraphs"], list):
-                            raise ValueError("'paragraphs' must be a list")
-                            
-                        if not parsed_json["paragraphs"]:
-                            raise ValueError("'paragraphs' list cannot be empty")
-                            
-                        # Validate first paragraph is main entry point
-                        if parsed_json["paragraphs"][0]["paragraph_name"] != "MAIN-PROCESSING-LOOP-PARA":
-                            raise ValueError("First paragraph must be 'MAIN-PROCESSING-LOOP-PARA'")
-                            
-                        # Check paragraph uniqueness
-                        para_names = set()
-                        for para in parsed_json["paragraphs"]:
-                            if para["paragraph_name"] in para_names:
-                                raise ValueError(f"Duplicate paragraph name: {para['paragraph_name']}")
-                            para_names.add(para["paragraph_name"])
-                            
-                            # Validate paragraph structure
-                            if not isinstance(para, dict):
-                                raise ValueError("Each paragraph must be a dictionary")
-                            if "paragraph_name" not in para or "cobol_code" not in para:
-                                raise ValueError("Paragraph missing required fields")
-                            if not isinstance(para["paragraph_name"], str) or not isinstance(para["cobol_code"], str):
-                                raise ValueError("Invalid types for paragraph fields")
-                            
-                            # Validate COBOL formatting
-                            if not all(line.startswith(" ") for line in para["cobol_code"].splitlines()):
-                                raise ValueError("COBOL code must be properly indented")
-                                
-                        return MainLoopToCobolOutput(**parsed_json)
-                        
-                    except json.JSONDecodeError as je:
-                        raise ValueError(f"Invalid JSON format: {je}")
-                    except Exception as e:
-                        raise ValueError(f"Validation error: {str(e).replace('{', '{{').replace('}', '}}')}")
-                else:
+                # Log the raw output before any processing for debugging purposes
+                log.debug(f"Raw LLM output for main loop conversion ({m204_file_name}):\n{json_text_output}")
+
+                if not json_text_output:
                     raise ValueError("Empty response from LLM")
+
+                # Clean and validate JSON
+                json_text_output = strip_markdown_code_block(json_text_output)
+                
+                try:
+                    # The Pydantic model will perform the validation upon instantiation
+                    parsed_output = MainLoopToCobolOutput.model_validate_json(json_text_output)
+
+                    # Additional custom validations
+                    if not parsed_output.paragraphs:
+                        raise ValueError("'paragraphs' list cannot be empty")
+                        
+                    if parsed_output.paragraphs[0].paragraph_name != "MAIN-PROCESSING-LOOP-PARA":
+                        raise ValueError("First paragraph must be 'MAIN-PROCESSING-LOOP-PARA'")
+                        
+                    para_names = {para.paragraph_name for para in parsed_output.paragraphs}
+                    if len(para_names) != len(parsed_output.paragraphs):
+                        raise ValueError("Duplicate paragraph names found in the response")
+
+                    return parsed_output
                     
+                except Exception as e:
+                    # Catches both Pydantic validation errors and our custom validation errors
+                    raise ValueError(f"Validation failed on LLM response: {e}")
+
         except Exception as e:
             log.error(f"LLM error converting main loop from file {m204_file_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
             
@@ -888,7 +865,6 @@ The `jcl_content` should be the complete JCL.
                 ],
                 comments=f"LLM conversion failed: {safe_error_str}. Manual review required."
             )
-
 
     async def _generate_and_save_artifacts_for_single_input_source(
         self, 

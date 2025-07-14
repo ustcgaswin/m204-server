@@ -4,7 +4,7 @@ from typing import List
 
 from app.config.db_config import get_db
 from app.services import analysis_service, file_service
-from app.schemas.analysis_schema import UnifiedAnalysisReportSchema
+from app.schemas.analysis_schema import UnifiedAnalysisReportSchema,MermaidFixRequestSchema,MermaidFixResponseSchema
 from app.utils.logger import log
 from app.models.input_source_model import InputSource
 
@@ -89,6 +89,14 @@ async def upload_and_analyze_parmlib_file(
             f"ANALYSIS_ROUTER: Successfully completed analysis for uploaded PARMLIB "
             f"file '{file.filename}' (InputSource ID: {input_source.input_source_id})."
         )
+        try:
+            log.info(f"ANALYSIS_ROUTER: Triggering project-wide VSAM enhancement for project {project_id} after PARMLIB analysis.")
+            await analysis_service.enhance_project_vsam_suggestions(project_id)
+            log.info(f"ANALYSIS_ROUTER: Successfully completed project-wide VSAM enhancement for project {project_id}.")
+        except Exception as e_enhance:
+            # Log the error but don't fail the entire request, as the primary analysis succeeded.
+            log.error(f"ANALYSIS_ROUTER: VSAM enhancement step failed for project {project_id} after PARMLIB analysis: {e_enhance}", exc_info=True)
+
         return analysis_report
 
     except HTTPException as he:
@@ -197,3 +205,26 @@ async def trigger_project_ordered_analysis(
         # but don't alter the reports. A separate status endpoint could reflect this.
 
     return analysis_reports
+
+
+@router.post("/fix-mermaid", response_model=MermaidFixResponseSchema, tags=["Utilities"])
+async def fix_mermaid_diagram_endpoint(
+    request: MermaidFixRequestSchema
+):
+    """
+    Accepts a Mermaid diagram string and an error message, then uses an LLM
+    to correct the diagram's syntax.
+    """
+    log.info("ANALYSIS_ROUTER: Received request to fix a Mermaid diagram.")
+    try:
+        fixed_code = await analysis_service.fix_mermaid_diagram(request)
+        return MermaidFixResponseSchema(fixed_mermaid_code=fixed_code)
+    except HTTPException as he:
+        log.warning(f"ANALYSIS_ROUTER: HTTPException during Mermaid fix: {he.detail}")
+        raise he
+    except Exception as e:
+        log.error(f"ANALYSIS_ROUTER: Unexpected error during Mermaid fix: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected server error occurred while fixing the Mermaid diagram."
+        )

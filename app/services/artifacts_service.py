@@ -160,7 +160,8 @@ Respond with a JSON object with:
         try:
             concept_llm = llm_config._llm.as_structured_llm(M204ConceptIdentificationOutput)
             concept_resp = await concept_llm.acomplete(prompt=concept_prompt)
-            concept_data = M204ConceptIdentificationOutput(**json.loads(strip_markdown_code_block(concept_resp.text)))
+            concept_text_output = strip_markdown_code_block(concept_resp.text)
+            concept_data = M204ConceptIdentificationOutput(**json.loads(concept_text_output))
             identified_concepts = concept_data.identified_concepts
         except Exception as e:
             log.error(f"Error identifying concepts for {proc.m204_proc_name}: {e}")
@@ -261,19 +262,24 @@ Ensure the `cobol_code_block` contains only the procedural COBOL statements, cor
                 response = await llm_call.acomplete(prompt=prompt_fstr)
                 json_text_output = response.text
             log.debug(f"LLM call for M204 procedure to COBOL: {proc.m204_proc_name} completed (semaphore released)")
+            
+            if not json_text_output:
+                raise ValueError("Empty response from LLM")
+
             json_text_output = strip_markdown_code_block(json_text_output)
             return M204ProcedureToCobolOutput(**json.loads(json_text_output))
         except Exception as e:
             log.error(f"LLM error converting M204 procedure {proc.m204_proc_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
+            # Escape curly braces in the error message to prevent f-string formatting errors
+            safe_error_str = str(e).replace('{', '{{').replace('}', '}}')
             return M204ProcedureToCobolOutput(
                 m204_procedure_name=proc.m204_proc_name,
                 cobol_code_block=f"      * --- Error during COBOL conversion for M204 Procedure: {proc.m204_proc_name} ---\n"
                                  f"      DISPLAY 'Error in logic for: {proc.m204_proc_name}'.\n"
-                                 f"      * --- See logs for details ---",
-                comments=f"LLM conversion failed: {str(e)}"
+                                 f"      * --- See logs for details. Error: {safe_error_str} ---",
+                comments=f"LLM conversion failed: {safe_error_str}"
             )
 
-    
 
     async def _llm_convert_file_definition_to_fd(self, m204_file: M204File) -> Optional[FileDefinitionToCobolFDOutput]:
         """Convert M204 file definition JSON to COBOL FD using LLM. Returns None if no definition exists."""
@@ -437,12 +443,13 @@ Ensure the FD record layout (01 and 05 levels) is complete and uses the 'Suggest
         except Exception as e:
             log.error(f"LLM error converting file definition for {m204_file.m204_file_name} to FD: {e}. Raw output: {json_text_output}", exc_info=True)
             select_name = (m204_file.m204_logical_dataset_name or m204_file.m204_file_name or f"FILE{m204_file.m204_file_id}").replace("-", "")[:8]
+            safe_error_str = str(e).replace('{', '{{').replace('}', '}}')
             return FileDefinitionToCobolFDOutput(
                 logical_file_name=select_name,
                 file_control_entry=f"       SELECT {select_name}-FILE ASSIGN TO {select_name}. *> ERROR IN CONVERSION\n",
                 file_description_entry=f"   FD  {select_name}-FILE. *> ERROR IN CONVERSION\n"
                                      f"   01  {select_name}-RECORD PIC X(80). *> Placeholder due to error\n",
-                comments=f"LLM FD conversion failed: {str(e)}"
+                comments=f"LLM FD conversion failed: {safe_error_str}"
             )
     
 
@@ -765,19 +772,19 @@ The `jcl_content` should be the complete JCL.
     4.  **Response Format:**
         Return a JSON object with this EXACT structure:
         ```json
-        {
+        {{
             "paragraphs": [
-                {
+                {{
                     "paragraph_name": "MAIN-PROCESSING-LOOP-PARA",
-                    "cobol_code": "      statement-1\n      statement-2"
-                },
-                {
+                    "cobol_code": "      statement-1\\n      statement-2"
+                }},
+                {{
                     "paragraph_name": "ANOTHER-PARA",
-                    "cobol_code": "      statement-3\n      statement-4"
-                }
+                    "cobol_code": "      statement-3\\n      statement-4"
+                }}
             ],
             "comments": "Optional conversion notes"
-        }
+        }}
         ```
 
     5.  **Validation Requirements:**
@@ -790,10 +797,10 @@ The `jcl_content` should be the complete JCL.
 
     Example of Valid Paragraph:
     ```json
-    {
+    {{
         "paragraph_name": "MAIN-PROCESSING-LOOP-PARA",
-        "cobol_code": "      PERFORM UNTIL END-OF-FILE = 'Y'\n          READ INPUT-FILE\n              AT END\n                  MOVE 'Y' TO END-OF-FILE\n              NOT AT END\n                  PERFORM PROCESS-RECORD-PARA\n          END-READ\n      END-PERFORM."
-    }
+        "cobol_code": "      PERFORM UNTIL END-OF-FILE = 'Y'\\n          READ INPUT-FILE\\n              AT END\\n                  MOVE 'Y' TO END-OF-FILE\\n              NOT AT END\\n                  PERFORM PROCESS-RECORD-PARA\\n          END-READ\\n      END-PERFORM."
+    }}
     ```
 
     Generate the COBOL conversion maintaining exact JSON structure and following all rules above.
@@ -856,7 +863,7 @@ The `jcl_content` should be the complete JCL.
                     except json.JSONDecodeError as je:
                         raise ValueError(f"Invalid JSON format: {je}")
                     except Exception as e:
-                        raise ValueError(f"Validation error: {str(e)}")
+                        raise ValueError(f"Validation error: {str(e).replace('{', '{{').replace('}', '}}')}")
                 else:
                     raise ValueError("Empty response from LLM")
                     
@@ -864,13 +871,14 @@ The `jcl_content` should be the complete JCL.
             log.error(f"LLM error converting main loop from file {m204_file_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
             
             # Return error-indicating response
+            safe_error_str = str(e).replace('{', '{{').replace('}', '}}')
             return MainLoopToCobolOutput(
                 paragraphs=[
                     CobolParagraph(
                         paragraph_name="MAIN-PROCESSING-LOOP-PARA",
                         cobol_code=(
                             "      * --- Error during COBOL conversion for Main Processing Loop ---\n"
-                            f"      * Error: {str(e)}\n"
+                            f"      * Error: {safe_error_str}\n"
                             "      DISPLAY 'Error in main loop conversion - see logs'.\n"
                             "      * --- Manual review required ---\n"
                             "      * Original M204 content preserved in comments:\n"
@@ -878,8 +886,9 @@ The `jcl_content` should be the complete JCL.
                         )
                     )
                 ],
-                comments=f"LLM conversion failed: {str(e)}. Manual review required."
+                comments=f"LLM conversion failed: {safe_error_str}. Manual review required."
             )
+
 
     async def _generate_and_save_artifacts_for_single_input_source(
         self, 
@@ -1191,7 +1200,8 @@ MAIN-PARAGRAPH.
                         if llm_vsam_jcl_result.generation_comments:
                             vsam_jcl_content = f"//* LLM Comments: {llm_vsam_jcl_result.generation_comments}\n" + vsam_jcl_content
                     except Exception as e:
-                        log.warning(f"LLM VSAM JCL gen failed for {vsam_jcl_name}: {e}. Falling back.", exc_info=True)
+                        safe_error_str = str(e).replace('{', '{{').replace('}', '}}')
+                        log.warning(f"LLM VSAM JCL gen failed for {vsam_jcl_name}: {safe_error_str}. Falling back.", exc_info=True)
                         vsam_jcl_content = self._generate_fallback_vsam_jcl(m204_file_obj, cobol_program_id_base, vsam_ds_name, vsam_type, input_source_name_for_comments)
                 else:
                     vsam_jcl_content = self._generate_fallback_vsam_jcl(m204_file_obj, cobol_program_id_base, vsam_ds_name, vsam_type, input_source_name_for_comments)
@@ -1335,9 +1345,10 @@ MAIN-PARAGRAPH.
                     self.db.rollback()
                     log.error(f"Error generating artifacts for InputSource {input_source_obj.input_source_id} ('{input_source_obj.original_filename}'): {e}", exc_info=True)
                     # Create an error placeholder file content
+                    safe_error_str = str(e).replace('{', '{{').replace('}', '}}')
                     error_file_content = GeneratedFileContent(
                         file_name=f"ERROR_InputSource_{input_source_obj.input_source_id}_{self._sanitize_filename_base(input_source_obj.original_filename or '', 'ERR')}.txt",
-                        content=f"Failed to generate artifacts for InputSource ID {input_source_obj.input_source_id} ('{input_source_obj.original_filename}').\nError: {str(e)}",
+                        content=f"Failed to generate artifacts for InputSource ID {input_source_obj.input_source_id} ('{input_source_obj.original_filename}').\nError: {safe_error_str}",
                         artifact_type="error"
                     )
                     current_source_files.append(error_file_content)

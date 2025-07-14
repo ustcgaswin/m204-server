@@ -752,10 +752,14 @@ def _get_sections_config() -> List[Dict[str, str]]:
 def _run_mmdc_sync(mermaid_code: str) -> subprocess.CompletedProcess:
     """Helper function to run the mmdc command synchronously."""
     return subprocess.run(
-        ['mmdc', '--input', '-', '--output', '-'],
-        input=mermaid_code.encode('utf-8'),
+        [
+            r"C:\Users\284713\AppData\Roaming\npm\mmdc.cmd",
+            "--input", "-",
+            "--output", "-"
+        ],
+        input=mermaid_code.encode("utf-8"),
         capture_output=True,
-        check=False # We will check the returncode manually
+        check=False  # We will check the returncode manually
     )
 
 async def _validate_and_correct_mermaid_code(mermaid_code: str) -> str:

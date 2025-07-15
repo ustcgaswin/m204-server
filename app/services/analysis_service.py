@@ -363,7 +363,7 @@ Correct the syntax and provide the complete, valid Mermaid code.
 
 **IMPORTANT RULES:**
 1.  Pay close attention to the error message. It often points to the exact line or cause of the issue. Common errors include unclosed subgraphs, incorrect arrow types, missing keywords, or invalid node identifiers.
-2.  Preserve the original intent and structure of the diagram as much as possible. Only fix the syntax errors.
+2.  Preserve the original intent, nodes, and connections of the diagram. Your goal is to make the minimum necessary changes to fix the syntax errors. Do not add, remove, or fundamentally alter the relationships between diagram elements.
 3.  The corrected code in the `fixed_mermaid_code` field must not be wrapped in markdown like ```mermaid ... ```. It should be the raw diagram code.
 
 **Broken Mermaid Code:**
@@ -377,6 +377,13 @@ Correct the syntax and provide the complete, valid Mermaid code.
 ```
 
 Respond with a JSON object structured according to the `MermaidCorrectionResponse` model.
+
+**Example Response Format:**
+```json
+{{
+  "fixed_mermaid_code": "graph TD\\n    A[Start] --> B{{Database}};\\n    B --> C{{End}};"
+}}
+```
 """
     json_text_output = ""
     try:

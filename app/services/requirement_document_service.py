@@ -28,7 +28,6 @@ from app.schemas.m204_analysis_schema import ( # For serializing nested data
     M204ProcedureResponseSchema,
     M204FileResponseSchema,
     M204VariableResponseSchema,
-    # ImageStatementResponseSchema, # Removed
     M204ProcedureCallResponseSchema
 )
 from app.schemas.generic_analysis_schema import DDStatementResponseSchema

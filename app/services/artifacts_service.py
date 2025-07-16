@@ -224,12 +224,13 @@ class ArtifactsService:
 
     **Core Instructions:**
 
-    1.  **Modularity Requirements:**
+    1.  **Modularity and Paragraph Generation:**
         - The M204 logic must be broken into one or more cohesive COBOL paragraphs.
         - The main entry point paragraph for this procedure MUST be named '{main_para_name}'.
-        - If the logic is complex (e.g., a loop body), extract it into its own new paragraph with a descriptive name (e.g., 'PROCESS-DETAIL-PARA') and use `PERFORM` to call it.
-        - Your response MUST include the definition for any new paragraphs you create and `PERFORM`.
+        - **Internal Helper Paragraphs:** If the logic within *this* procedure is complex (e.g., a loop body), you may extract it into its own new helper paragraph (e.g., 'PROCESS-DETAIL-PARA') and use `PERFORM` to call it. Your response MUST include the full implementation for any such new helper paragraphs you create.
+        - **External Procedure Calls:** If the M204 code contains a `CALL` to a *different* M204 procedure (e.g., `CALL OTHER-PROC`), you MUST convert this to a `PERFORM OTHER-PROC-PARA` statement. You MUST NOT provide the implementation for `OTHER-PROC-PARA`, as it will be generated separately from its own source.
 
+        
     2.  **VSAM Conversion Patterns (MANDATORY):**
         - **Target is VSAM:** The target files are VSAM. Your primary goal is to convert M204 data commands into the correct COBOL VSAM I/O verbs.
         - **`FIND` / `FR` (For Record):** Convert these to a standard COBOL file-reading loop. A `FIND` on a key implies a random `READ`. A loop over all records (`FR ALL RECORDS`) implies a sequential `READ NEXT` loop, likely preceded by a `START` verb.

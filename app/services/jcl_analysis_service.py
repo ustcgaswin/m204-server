@@ -231,7 +231,7 @@ async def _generate_jcl_description_iteratively_with_llm(file_content: str, orig
         return "LLM not configured. JCL description could not be generated."
 
     try:
-        text_splitter = SentenceSplitter(chunk_size=200, chunk_overlap=20)
+        text_splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=500)
         jcl_chunks = text_splitter.split_text(file_content)
     except Exception as e_splitter:
         log.error(f"JCL_SERVICE_LLM: Error splitting JCL content for {original_filename}: {e_splitter}", exc_info=True)

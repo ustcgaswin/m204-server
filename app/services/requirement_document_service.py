@@ -3,8 +3,6 @@ from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import desc, select
 from typing import List, Optional, Dict, Any
 import json
-import re
-import subprocess
 from openai import APIError
 
 from app.models.project_model import Project
@@ -39,7 +37,7 @@ from fastapi import HTTPException, status
 from datetime import datetime
 
 
-MAX_CONCURRENT_LLM_CALLS = 5
+MAX_CONCURRENT_LLM_CALLS = 5   #for generating sections
 
 # --- Helper function to serialize SQLAlchemy models to dicts for LLM prompt ---
 def _serialize_model_instance(instance: Any, schema_class: Optional[Any] = None) -> Dict[str, Any]:
@@ -747,85 +745,6 @@ def _get_sections_config() -> List[Dict[str, str]]:
 
 
 
-def _run_mmdc_sync(mermaid_code: str) -> subprocess.CompletedProcess:
-    """Helper function to run the mmdc command synchronously."""
-    return subprocess.run(
-        [
-            r"C:\Users\284713\AppData\Roaming\npm\mmdc.cmd",
-            "--input", "-",
-            "--output", "-"
-        ],
-        input=mermaid_code.encode("utf-8"),
-        capture_output=True,
-        check=False  # We will check the returncode manually
-    )
-
-async def _validate_and_correct_mermaid_code(mermaid_code: str) -> str:
-    """
-    Validates Mermaid code using the Mermaid CLI. If it fails, asks the LLM to correct it.
-    Returns the corrected code if successful, otherwise the original code.
-    """
-    # 1. Validate using Mermaid CLI by running the sync command in a separate thread
-    log.info("Validating mermaid code using asyncio.to_thread with subprocess.run")
-    try:
-        # Use asyncio.to_thread to run the synchronous subprocess call without blocking the event loop
-        proc = await asyncio.to_thread(_run_mmdc_sync, mermaid_code)
-
-        if proc.returncode == 0:
-            log.info("Mermaid validation successful.")
-            return mermaid_code # Code is valid
-
-        # If validation fails, proceed to correction
-        error_message = proc.stderr.decode('utf-8').strip()
-        if not error_message:
-            error_message = f"Mermaid CLI returned a non-zero exit code ({proc.returncode}) but no specific error message."
-        log.warning(f"Mermaid validation failed. Error: {error_message}")
-
-    except FileNotFoundError:
-        log.error("Mermaid CLI ('mmdc') not found. Skipping validation and correction. Please install '@mermaid-js/mermaid-cli' globally (`npm install -g @mermaid-js/mermaid-cli`) to enable this feature.")
-        return mermaid_code # Cannot validate, return original
-    except Exception as e:
-        log.error(f"An unexpected error occurred during Mermaid validation subprocess: {e}", exc_info=True)
-        return mermaid_code # Return original on unexpected error
-
-    # 2. If validation fails, build a correction prompt
-    log.info("Attempting to correct invalid Mermaid code with LLM.")
-    correction_prompt = f"""
-You are a Mermaid.js syntax expert. The following Mermaid code is invalid and failed to render.
-Your task is to fix it.
-
-**The Error Message:**
-```
-{error_message}
-```
-
-**The Invalid Mermaid Code:**
-```mermaid
-{mermaid_code}
-```
-
-Please provide only the corrected, complete, and valid Mermaid code block. Do not provide any explanation or other text.
-Your response must start with ```mermaid and end with ```.
-"""
-    try:
-        correction_response = await llm_config._llm.acomplete(prompt=correction_prompt)
-        if correction_response and correction_response.text:
-            corrected_code_full = correction_response.text.strip()
-            # Extract just the code from the response
-            match = re.search(r"```mermaid\n(.*?)\n```", corrected_code_full, re.DOTALL)
-            if match:
-                corrected_code = match.group(1).strip()
-                log.info("Successfully received corrected Mermaid code from LLM.")
-                return corrected_code
-            else:
-                log.warning("LLM correction response was not in the expected format. Returning original code.")
-                return mermaid_code # Return original if LLM response is malformed
-        else:
-            log.warning("LLM returned no content for Mermaid correction. Returning original code.")
-            return mermaid_code
-    except Exception as e:
-        log.error(f"LLM call for Mermaid correction failed: {e}", exc_info=True)
-        return mermaid_code # Return original on LLM error
 
 
 async def _generate_llm_section(
@@ -843,7 +762,13 @@ You are a senior technical analyst and writer. Your task is to generate the cont
 The section content should be based *solely* on the structured data provided below. Do not invent information not present in the provided data.
 Output *only* the Markdown for this specific section, starting with its heading.
 Emphasize the use of **paragraphs for description and bullet points for lists of attributes or related items**. Tables can be used sparingly.
-**When generating Mermaid diagrams, ensure the syntax is correct and the diagram is enclosed in a ```mermaid ... ``` fenced code block. If data is insufficient for a meaningful diagram, state this clearly instead of outputting malformed code.**
+
+**Mermaid Diagram Generation Rules (if applicable):**
+- You are a Mermaid.js expert.
+- The instructions for this section will specify the required diagram type (e.g., `graph TD`, `graph LR`).
+- Use clear, concise, and short labels for nodes and relationships to minimize syntax errors.
+- Ensure all Mermaid syntax is correct and enclosed in a ```mermaid ... ``` fenced code block.
+- If data is insufficient for a meaningful diagram, state this clearly under the section heading instead of outputting malformed code.
 
 **Input Data (Summary of system components and relationships):**
 --- BEGIN SYSTEM DATA ---
@@ -893,27 +818,7 @@ Ensure the entire output for this section is valid Markdown.
                         processed_content += parts[i]
                 section_content = processed_content
             
-            # --- START MERMAID VALIDATION & CORRECTION LOGIC ---
-            # Use a pattern that captures the code inside the ```mermaid block
-            mermaid_pattern = r"```mermaid\n(.*?)\n```"
-            mermaid_blocks = re.findall(mermaid_pattern, section_content, re.DOTALL)
             
-            if mermaid_blocks:
-                log.info(f"Found {len(mermaid_blocks)} Mermaid diagram(s) in section '{section_id}'. Validating...")
-                
-                # Create a list of validation tasks to run concurrently
-                validation_tasks = [_validate_and_correct_mermaid_code(code) for code in mermaid_blocks]
-                corrected_codes = await asyncio.gather(*validation_tasks)
-
-                # Replace original blocks with corrected ones if they have changed
-                for original_code, corrected_code in zip(mermaid_blocks, corrected_codes):
-                    if original_code is not corrected_code:
-                        log.info(f"Replacing original Mermaid code in section '{section_id}' with corrected version.")
-                        # Reconstruct the full block for replacement
-                        original_block = f"```mermaid\n{original_code}\n```"
-                        corrected_block = f"```mermaid\n{corrected_code}\n```"
-                        section_content = section_content.replace(original_block, corrected_block, 1)
-            # --- END MERMAID VALIDATION & CORRECTION LOGIC ---
 
             if not section_content.lstrip().startswith(section_title):
                 log.warning(f"LLM output for section '{section_id}' did not start with the expected title. Expected: '{section_title}'. Got: '{section_content[:200]}'. Prepending title.")
@@ -942,102 +847,6 @@ Ensure the entire output for this section is valid Markdown.
         return f"{section_title}\n\nError generating content for this section: {str(e_llm_section)}"
 
 
-
-# async def _generate_llm_section(
-#     section_id: str,
-#     section_title: str,
-#     section_instructions: str,
-#     formatted_data_for_prompt: str,
-#     custom_prompt_section: Optional[str]
-# ) -> str:
-#     """
-#     Generates content for a single section of the requirements document using the LLM.
-#     """
-#     prompt_for_section = f"""
-# You are a senior technical analyst and writer. Your task is to generate the content for *only* the following section of a Software Requirements Specification (SRS) document in Markdown format for an existing M204-based system.
-# The section content should be based *solely* on the structured data provided below. Do not invent information not present in the provided data.
-# Output *only* the Markdown for this specific section, starting with its heading.
-# Emphasize the use of **paragraphs for description and bullet points for lists of attributes or related items**. Tables can be used sparingly.
-# **When generating Mermaid diagrams, ensure the syntax is correct and the diagram is enclosed in a ```mermaid ... ``` fenced code block. If data is insufficient for a meaningful diagram, state this clearly instead of outputting malformed code.**
-
-# **Input Data (Summary of system components and relationships):**
-# --- BEGIN SYSTEM DATA ---
-# {formatted_data_for_prompt}
-# --- END SYSTEM DATA ---
-
-# {f"**Additional Instructions/Custom Section from User (consider these when generating content for this section):**\n{custom_prompt_section}\n" if custom_prompt_section else ""}
-
-# **Instructions for the section to generate:**
-# Your output must start *exactly* with the following heading line:
-# {section_title}
-
-# And then provide the content as described below:
-# {section_instructions}
-
-# If data for this specific section is not available or not applicable based on the input, include the heading and a brief note like "Not applicable based on provided data." or "No data available for this section."
-# When discussing JCL, M204 Procedures, or M204 Files (if relevant to this section), refer to any 'Source File LLM-Generated Summaries' provided in the input data to give broader context.
-# Do not add any preamble or explanation before the section's heading.
-# Ensure the entire output for this section is valid Markdown.
-# """
-#     log.info(f"Generating section: '{section_title}' (ID: {section_id})")
-    
-#     try:
-#         completion_response = await llm_config._llm.acomplete(prompt=prompt_for_section)
-#         if completion_response and completion_response.text:
-#             section_content = completion_response.text.strip()
-
-#             log.debug(f"Raw LLM response for section '{section_id}':\n{section_content}")
-
-#             # Sanitize the output: remove potential markdown code block wrappers
-#             if section_content.startswith("```markdown"):
-#                 section_content = section_content[len("```markdown"):].lstrip()
-            
-#             if section_content.endswith("```"):
-#                 section_content = section_content[:-len("```")].rstrip()
-
-#             # Fix for unclosed mermaid blocks
-#             if "```mermaid" in section_content:
-#                 parts = section_content.split("```mermaid")
-#                 processed_content = parts[0]
-#                 for i in range(1, len(parts)):
-#                     # Re-add the mermaid block start
-#                     processed_content += "```mermaid"
-                    
-#                     # Check if the subsequent part contains a closing fence
-#                     if "```" not in parts[i]:
-#                         log.warning(f"Found unclosed mermaid block in section '{section_id}'. Appending closing fence.")
-#                         # Add the content, ensuring it ends with a newline before the fence
-#                         processed_content += parts[i].rstrip() + "\n```"
-#                     else:
-#                         # The part already contains a closing fence, so just append it
-#                         processed_content += parts[i]
-#                 section_content = processed_content
-
-#             if not section_content.lstrip().startswith(section_title):
-#                 log.warning(f"LLM output for section '{section_id}' did not start with the expected title. Expected: '{section_title}'. Got: '{section_content[:200]}'. Prepending title.")
-#                 section_content = f"{section_title}\n\n{section_content.lstrip()}"
-#             else:
-#                 # This logic helps ensure proper spacing after the title if the LLM doesn't add it.
-#                 lines = section_content.splitlines()
-#                 if len(lines) > 1 and lines[0].strip() == section_title.strip():
-#                     if not section_content.startswith(f"{section_title}\n\n"):
-#                          # Add a newline if the next line isn't already blank or a list/code block
-#                         if lines[1].strip() and not (lines[1].strip().startswith(("*", "-", "```"))):
-#                             section_content = f"{section_title}\n\n{section_content[len(lines[0]):].lstrip()}"
-
-#             log.info(f"Successfully generated content for section '{section_id}'. Length: {len(section_content)}")
-#             return section_content
-#         else:
-#             log.warning(f"LLM returned empty or no text content for section '{section_id}'.")
-#             return f"{section_title}\n\nNo content was generated by the LLM for this section."
-#     except APIError as e_api:
-#         log.error(f"Azure OpenAI API error for section '{section_id}': {e_api}. Status: {e_api.status_code}, Body: {e_api.body}", exc_info=True)
-#         log.debug(f"Prompt length for failed section '{section_id}': {len(prompt_for_section)}")
-#         return f"{section_title}\n\nError generating content for this section due to an API error: {str(e_api)}"
-#     except Exception as e_llm_section:
-#         log.error(f"LLM completion error for section '{section_id}': {e_llm_section}", exc_info=True)
-#         log.debug(f"Prompt length for failed section '{section_id}': {len(prompt_for_section)}")
-#         return f"{section_title}\n\nError generating content for this section: {str(e_llm_section)}"
 
 
 

@@ -15,7 +15,6 @@ from app.models.input_source_model import InputSource
 
 from app.services.m204_analysis_service import M204ConceptIdentificationOutput  # Import the model
 
-
 # Import Pydantic Schemas for artifact data structures
 from app.schemas.artifacts_schema import (
     GeneratedArtifactsResponse,
@@ -34,6 +33,8 @@ from app.models.generated_unit_test_artifact_model import GeneratedUnitTestArtif
 from app.utils.logger import log
 from app.config.llm_config import llm_config
 from pydantic import BaseModel, Field as PydanticField 
+
+from app.models.UsedVariable import UsedVariable  # <-- Import the UsedVariable model
 
 LLM_API_CALL_BATCH_SIZE = 20
 
@@ -65,7 +66,6 @@ class M204ProcedureToCobolOutput(BaseModel):
     cobol_code_block: str = PydanticField(description="Generated COBOL code block.")
     comments: Optional[str] = PydanticField(description="Conversion comments.", default=None)
 
-
 class CobolParagraph(BaseModel):
     """Represents a single generated COBOL paragraph."""
     paragraph_name: str = PydanticField(
@@ -81,19 +81,18 @@ class M204ProcedureToCobolParagraphsOutput(BaseModel):
     paragraphs: List[CobolParagraph] = PydanticField(
         description="A list of generated COBOL paragraphs. The first paragraph should be the main entry point for the procedure's logic."
     )
+    used_variables: List[UsedVariable] = PydanticField(default_factory=list)
     comments: Optional[str] = PydanticField(
         description="General comments regarding the conversion, potential issues, or assumptions made.",
         default=None
     )
-
-
-
 
 class MainLoopToCobolOutput(BaseModel):
     """Structured output for M204 main processing loop to COBOL conversion."""
     paragraphs: List[CobolParagraph] = PydanticField(
         description="A list of generated COBOL paragraphs. The first paragraph in the list should be the main entry point, 'MAIN-PROCESSING-LOOP-PARA'."
     )
+    used_variables: List[UsedVariable] = PydanticField(default_factory=list)
     comments: Optional[str] = PydanticField(
         description="General comments regarding the conversion, potential issues, or assumptions made.",
         default=None
@@ -110,6 +109,7 @@ class VsamJclGenerationOutput(BaseModel):
     """Structured output for VSAM JCL generation by LLM."""
     jcl_content: str = PydanticField(description="The fully generated JCL content for defining the VSAM cluster using IDCAMS.")
     generation_comments: Optional[str] = PydanticField(description="Any comments or notes from the LLM regarding the JCL generation process or assumptions made.", default=None)
+
 
 class ArtifactsService:
     def __init__(self, db: Session):
@@ -136,18 +136,26 @@ class ArtifactsService:
         return cobol_program_id_base
 
     
+    
     async def _llm_convert_m204_proc_to_cobol(self, proc: Procedure, rag_service=None) -> M204ProcedureToCobolParagraphsOutput:
         """
         Converts an M204 procedure to a list of COBOL paragraphs using LLM, with RAG context injection.
-        1. Identify M204 concepts in the procedure.
-        2. Fetch RAG context for those concepts.
-        3. Call LLM to convert to COBOL paragraphs, including RAG context in the prompt.
+        Handles grouped_used_variables and standalone_variables if present in LLM output.
         """
         proc_para_name_base = re.sub(r'[^A-Z0-9-]', '', proc.m204_proc_name.upper().replace('%', 'P').replace('$', 'D').replace('_', '-').replace('#','N'))[:28]
         if not proc_para_name_base or not (proc_para_name_base[0].isalpha() or proc_para_name_base[0].isdigit()):
             proc_para_name_base = "P" + (proc_para_name_base[1:] if proc_para_name_base else "")
         main_para_name = f"{proc_para_name_base}-PARA"
 
+        # --- Variable Mapping Context ---
+        variable_mappings_str = "No specific variable mappings provided. Use best judgment for variable names."
+        if proc.variables_in_procedure:
+            mappings = []
+            for var in proc.variables_in_procedure:
+                if var.cobol_mapped_variable_name:
+                    mappings.append(f"- M204: '{var.variable_name}' -> COBOL: '{var.cobol_mapped_variable_name}'")
+            if mappings:
+                variable_mappings_str = "Use these M204 to COBOL variable mappings:\n" + "\n".join(mappings)
 
         if not llm_config._llm or not proc.procedure_content:
             log.warning(f"LLM not available or no content for M204 procedure: {proc.m204_proc_name}. Returning placeholder COBOL.")
@@ -163,26 +171,27 @@ class ArtifactsService:
                         )
                     )
                 ],
+                used_variables=[],
                 comments="LLM not available or procedure content missing. Manual conversion required. Ensure COBOL6 standard."
             )
 
         # --- Step 1: Identify Concepts ---
         concept_prompt = f"""
-    You are an M204 expert. Analyze the following M204 procedure and identify the key M204 commands, keywords, or concepts (e.g., FIND, FOR EACH VALUE, %variables, IMAGE, SCREEN) that are important for understanding its logic and for accurate COBOL conversion.
+You are an M204 expert. Analyze the following M204 procedure and identify the key M204 commands, keywords, or concepts (e.g., FIND, FOR EACH VALUE, %variables, IMAGE, SCREEN) that are important for understanding its logic and for accurate COBOL conversion.
 
-    M204 Procedure Name: {proc.m204_proc_name}
-    M204 Procedure Parameters: {proc.m204_parameters_string or "None"}
+M204 Procedure Name: {proc.m204_proc_name}
+M204 Procedure Parameters: {proc.m204_parameters_string or "None"}
 
-    M204 Procedure Content:
-    ```m204
-    {proc.procedure_content}
-    ```
+M204 Procedure Content:
+```m204
+{proc.procedure_content}
+```
 
-    Respond with a JSON object with:
-    - "procedure_name": string
-    - "identified_concepts": list of strings
-    - "brief_reasoning": string
-    """
+Respond with a JSON object with:
+- "procedure_name": string
+- "identified_concepts": list of strings
+- "brief_reasoning": string
+"""
         identified_concepts = []
         rag_context = "No RAG context available."
         try:
@@ -207,70 +216,111 @@ class ArtifactsService:
 
         # --- Step 3: COBOL Conversion ---
         prompt_fstr = f"""
-    You are an expert M204 to COBOL migration specialist.
-    You have the following relevant documentation/context for this procedure:
-    ---
-    {rag_context}
-    ---
+You are an expert M204 to COBOL migration specialist.
+You have the following relevant documentation/context for this procedure:
+---
+{rag_context}
+---
 
-    Convert the following M204 procedure into a set of modular COBOL paragraphs. This set of paragraphs will be inserted directly into the PROCEDURE DIVISION of a larger COBOL program.
+**Variable Mapping Context:**
+{variable_mappings_str}
+---
 
-    M204 Procedure Name: {proc.m204_proc_name}
-    M204 Parameters: {proc.m204_parameters_string or "None"}
-    M204 Procedure Content:
-    ```m204
-    {proc.procedure_content}
-    ```
+Convert the following M204 procedure into a set of modular COBOL paragraphs. This set of paragraphs will be inserted directly into the PROCEDURE DIVISION of a larger COBOL program.
 
-    **Core Instructions:**
+M204 Procedure Name: {proc.m204_proc_name}
+M204 Parameters: {proc.m204_parameters_string or "None"}
+M204 Procedure Content:
+```m204
+{proc.procedure_content}
+```
 
-    1.  **Modularity and Paragraph Generation:**
-        - The M204 logic must be broken into one or more cohesive COBOL paragraphs.
-        - The main entry point paragraph for this procedure MUST be named '{main_para_name}'.
-        - **Internal Helper Paragraphs:** If the logic within *this* procedure is complex (e.g., a loop body), you may extract it into its own new helper paragraph (e.g., 'PROCESS-DETAIL-PARA') and use `PERFORM` to call it. Your response MUST include the full implementation for any such new helper paragraphs you create.
-        - **External Procedure Calls:** If the M204 code contains a `CALL` to a *different* M204 procedure (e.g., `CALL OTHER-PROC`), you MUST convert this to a `PERFORM OTHER-PROC-PARA` statement. You MUST NOT provide the implementation for `OTHER-PROC-PARA`, as it will be generated separately from its own source.
+**Core Instructions:**
 
-        
-    2.  **VSAM Conversion Patterns (MANDATORY):**
-        - **Target is VSAM:** The target files are VSAM. Your primary goal is to convert M204 data commands into the correct COBOL VSAM I/O verbs.
-        - **`FIND` / `FR` (For Record):** Convert these to a standard COBOL file-reading loop. A `FIND` on a key implies a random `READ`. A loop over all records (`FR ALL RECORDS`) implies a sequential `READ NEXT` loop, likely preceded by a `START` verb.
-        - **`ADD` / `STORE`:** Convert to a `WRITE` statement to create a new record.
-        - **`CHANGE` / `UPDATE`:** Convert to a `REWRITE` statement to update the last-read record.
-        - **`DELETE`:** Convert to a `DELETE` statement to remove the last-read record.
+1.  **Modularity and Paragraph Generation:**
+    - The M204 logic must be broken into one or more cohesive COBOL paragraphs.
+    - The main entry point paragraph for this procedure MUST be named '{main_para_name}'.
+    - **Internal Helper Paragraphs:** If the logic within *this* procedure is complex (e.g., a loop body), you may extract it into its own new helper paragraph (e.g., 'PROCESS-DETAIL-PARA') and use `PERFORM` to call it. Your response MUST include the full implementation for any such new helper paragraphs you create.
+    - **External Procedure Calls:** If the M204 code contains a `CALL` to a *different* M204 procedure (e.g., `CALL OTHER-PROC`), you MUST convert this to a `PERFORM OTHER-PROC-PARA` statement. You MUST NOT provide the implementation for `OTHER-PROC-PARA`, as it will be generated separately from its own source.
 
-    3.  **General Logic Conversion:**
-        - **`ONEOF` blocks:** Convert to COBOL `EVALUATE` statements.
-        - **`FOR` loops:** Convert to `PERFORM VARYING` loops.
-        - **`CALL` statements:** Convert to `PERFORM <procedure-name>-PARA`.
-        - **Basic Statements:** Translate `IF/ELSE`, `PRINT` (to `DISPLAY`), and assignments (to `MOVE`) into their direct COBOL equivalents.
+2.  **Variable Usage Reporting (CRITICAL):**
+    - After generating the COBOL code, analyze it and return a list of all variables actually used in your generated COBOL code.
+    - For each variable, provide:
+        - `cobol_variable_name`: The COBOL variable name as used in your code.
+        - `cobol_variable_type`: The COBOL PIC or type (e.g., PIC 9(8), PIC X(20), etc.).
+        - `usage_context`: A brief description of how the variable is used.
+    - This list will be used to generate the WORKING-STORAGE SECTION. Do NOT include variables that are not referenced in your code. If you introduce new variables (e.g., loop counters, flags), include them with appropriate types.
 
-    4.  **Critical Rules:**
-        - The `cobol_code` for each paragraph MUST NOT include the paragraph name itself.
-        - DO NOT generate any DB2 `SELECT` statements or other database-specific SQL. Use only standard VSAM file I/O verbs.
-        - DO NOT include `IDENTIFICATION DIVISION`, `ENVIRONMENT DIVISION`, `DATA DIVISION`, or the `PROCEDURE DIVISION.` header itself.
-        - Assume all required data items (variables, counters, file records, etc.) are already defined in the main program's `DATA DIVISION`.
-        - If you encounter an M204 function that cannot be converted, insert a clear comment in the COBOL code explaining the limitation and add a TODO for manual implementation.
+3.  **VSAM Conversion Patterns (MANDATORY):**
+    - **Target is VSAM:** The target files are VSAM. Your primary goal is to convert M204 data commands into the correct COBOL VSAM I/O verbs.
+    - **`FIND` / `FR` (For Record):** Convert these to a standard COBOL file-reading loop. A `FIND` on a key implies a random `READ`. A loop over all records (`FR ALL RECORDS`) implies a sequential `READ NEXT` loop, likely preceded by a `START` verb.
+    - **`ADD` / `STORE`:** Convert to a `WRITE` statement to create a new record.
+    - **`CHANGE` / `UPDATE`:** Convert to a `REWRITE` statement to update the last-read record.
+    - **`DELETE`:** Convert to a `DELETE` statement to remove the last-read record.
 
-        
-    Respond with a JSON object structured according to the M204ProcedureToCobolParagraphsOutput model:
-    ```json
+4.  **General Logic Conversion:**
+    - **`ONEOF` blocks:** Convert to COBOL `EVALUATE` statements.
+    - **`FOR` loops:** Convert to `PERFORM VARYING` loops.
+    - **`CALL` statements:** Convert to `PERFORM <procedure-name>-PARA`.
+    - **Basic Statements:** Translate `IF/ELSE`, `PRINT` (to `DISPLAY`), and assignments (to `MOVE`) into their direct COBOL equivalents.
+
+5.  **Critical Rules:**
+    - The `cobol_code` for each paragraph MUST NOT include the paragraph name itself.
+    - DO NOT generate any DB2 `SELECT` statements or other database-specific SQL. Use only standard VSAM file I/O verbs.
+    - DO NOT include `IDENTIFICATION DIVISION`, `ENVIRONMENT DIVISION`, `DATA DIVISION`, or the `PROCEDURE DIVISION.` header itself.
+    - Assume all required data items (variables, counters, file records, etc.) are already defined in the main program's `DATA DIVISION`. Use the variable mappings provided above.
+    - If you encounter an M204 function that cannot be converted, insert a clear comment in the COBOL code explaining the limitation and add a TODO for manual implementation.
+
+Respond with a JSON object structured according to the M204ProcedureToCobolParagraphsOutput model:
+```json
+{{
+"m204_procedure_name": "{proc.m204_proc_name}",
+"paragraphs": [
     {{
-    "m204_procedure_name": "{proc.m204_proc_name}",
-    "paragraphs": [
-        {{
-        "paragraph_name": "{main_para_name}",
-        "cobol_code": "      PERFORM PROCESS-DETAIL-PARA.\\n      MOVE 'X' TO SOME-FLAG."
-        }},
-        {{
-        "paragraph_name": "PROCESS-DETAIL-PARA",
-        "cobol_code": "      READ INPUT-FILE AT END MOVE 'Y' TO EOF.\\n      DISPLAY 'DETAIL PROCESSED'."
-        }}
-    ],
-    "comments": "string (optional)"
+    "paragraph_name": "{main_para_name}",
+    "cobol_code": "      PERFORM PROCESS-DETAIL-PARA.\\n      MOVE 'X' TO SOME-FLAG."
+    }},
+    {{
+    "paragraph_name": "PROCESS-DETAIL-PARA",
+    "cobol_code": "      READ INPUT-FILE AT END MOVE 'Y' TO EOF.\\n      DISPLAY 'DETAIL PROCESSED'."
     }}
-    ```
-    Ensure the first paragraph in the list is named '{main_para_name}' and that all generated COBOL code is correctly indented for Area B (column 12+).
-    """
+],
+"used_variables": [
+    {{
+        "cobol_variable_name": "SOME-FLAG",
+        "cobol_variable_type": "PIC X",
+        "usage_context": "Status flag for processing."
+    }},
+    {{
+        "cobol_variable_name": "EOF",
+        "cobol_variable_type": "PIC X",
+        "usage_context": "End of file indicator."
+    }}
+],
+"grouped_used_variables": [
+    {{
+        "group_name": "CUSTOMER-RECORD",
+        "variables": [
+            {{
+                "cobol_variable_name": "CUST-ID",
+                "cobol_variable_type": "PIC 9(8)",
+                "usage_context": "Customer ID field."
+            }}
+        ]
+    }}
+],
+"standalone_variables": [
+    {{
+        "cobol_variable_name": "TOTAL-COUNT",
+        "cobol_variable_type": "PIC 9(5)",
+        "usage_context": "Counter for total records."
+    }}
+],
+"comments": "string (optional)"
+}}
+```
+Ensure the first paragraph in the list is named '{main_para_name}' and that all generated COBOL code is correctly indented for Area B (column 12+).
+"""
         json_text_output: Optional[str] = None
         try:
             async with self.llm_semaphore:
@@ -279,24 +329,19 @@ class ArtifactsService:
                 response = await llm_call.acomplete(prompt=prompt_fstr)
                 json_text_output = response.text
             log.debug(f"LLM call for M204 procedure to COBOL: {proc.m204_proc_name} completed (semaphore released)")
-            
             if not json_text_output:
                 raise ValueError("Empty response from LLM")
-
             json_text_output = strip_markdown_code_block(json_text_output)
             parsed_output = M204ProcedureToCobolParagraphsOutput(**json.loads(json_text_output))
-
-            # Validation
             if not parsed_output.paragraphs:
                 raise ValueError("'paragraphs' list cannot be empty.")
             if parsed_output.paragraphs[0].paragraph_name != main_para_name:
                 log.warning(f"LLM did not name the first paragraph as requested. Expected '{main_para_name}', got '{parsed_output.paragraphs[0].paragraph_name}'. Renaming it.")
                 parsed_output.paragraphs[0].paragraph_name = main_para_name
-
+            # No further processing here: downstream code should check grouped_used_variables/standalone_variables if present
             return parsed_output
         except Exception as e:
             log.error(f"LLM error converting M204 procedure {proc.m204_proc_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
-            # Escape curly braces in the error message to prevent f-string formatting errors
             safe_error_str = str(e).replace('{', '{{').replace('}', '}}')
             return M204ProcedureToCobolParagraphsOutput(
                 m204_procedure_name=proc.m204_proc_name,
@@ -310,6 +355,7 @@ class ArtifactsService:
                         )
                     )
                 ],
+                used_variables=[],
                 comments=f"LLM conversion failed: {safe_error_str}"
             )
 
@@ -435,7 +481,7 @@ File Definition JSON (for detailed structure if needed by LLM):
     - For other file types (like ESDS or flat files), generate a standard `SELECT` statement without the INDEXED/KEY clauses.
 
 2.  **FILE SECTION Entry (FD):**
-    - Create a complete `FD` entry.
+    - Create a complete `FD` entry for the file.
     - For DB files, create record layouts based on the PARMLIB field definitions and their 'Suggested COBOL PIC'.
     - For flat files, use the IMAGE statement field definitions and their 'Suggested COBOL PIC'.
     - If any field or group in the M204 definition uses `OCCURS`, generate the corresponding COBOL field/group with `OCCURS n TIMES`.
@@ -720,12 +766,12 @@ The `jcl_content` should be the complete JCL.
 
     
 
-  
-
-    async def _llm_convert_main_loop_to_cobol(self, main_loop_content: str, m204_file_name: str) -> MainLoopToCobolOutput:
+    
+    async def _llm_convert_main_loop_to_cobol(self, main_loop_content: str, m204_file_name: str, fd_context: str = "") -> MainLoopToCobolOutput:
         """
         Converts a potentially large M204 main processing loop into one or more
         modular COBOL paragraphs using an LLM.
+        fd_context: (optional) string containing all generated COBOL FD entries for this input source.
         """
         if not llm_config._llm:
             log.warning(f"LLM not available for main loop conversion from file {m204_file_name}. Returning placeholder.")
@@ -740,117 +786,145 @@ The `jcl_content` should be the complete JCL.
                         )
                     )
                 ],
+                used_variables=[],
                 comments="LLM not available. Manual conversion of main loop required."
             )
 
+        fd_context_section = ""
+        if fd_context and fd_context.strip():
+            fd_context_section = f"""
+You have the following COBOL FD (File Description) entries available for reference:
+---
+{fd_context}
+---
+
+If you encounter a variable reference like %IMAGE:IDENTIFIER (e.g., %MORT_IN:FIELD1), map it to the corresponding field in the appropriate FD (e.g., the FD for MORTIN and the field FIELD1). Use the correct COBOL field name and structure as defined in the FD.
+"""
+
         prompt_fstr = f"""
-    You are an expert M204 to COBOL migration specialist. Your task is to convert the following M204 main processing logic, extracted from the file '{m204_file_name}', into a set of clean, modular, and maintainable COBOL paragraphs.
+You are an expert M204 to COBOL migration specialist. Your task is to convert the following M204 main processing logic, extracted from the file '{m204_file_name}', into a set of clean, modular, and maintainable COBOL paragraphs.
 
-    M204 Main Logic Content:
-    ```m204
-    {main_loop_content}
+{fd_context_section}
+
+M204 Main Logic Content:
+```m204
+{main_loop_content}
+```
+
+**Core Instructions:**
+
+1.  **Modularity Requirements:**
+    - The M204 logic must be broken into cohesive COBOL paragraphs.
+    - The main entry point MUST be named 'MAIN-PROCESSING-LOOP-PARA'.
+    - Additional paragraphs for complex logic should use descriptive names (e.g., 'PROCESS-CUSTOMER-PARA').
+    - Use 'PERFORM' statements to call these paragraphs.
+
+2.  **VSAM Conversion Patterns (MANDATORY):**
+    - **Target is VSAM:** The target files are VSAM. Your primary goal is to convert M204 data commands into the correct COBOL VSAM I/O verbs.
+    - **`FIND` / `FR` (For Record):** Convert these to a standard COBOL file-reading loop. A `FIND` on a key implies a random `READ`. A loop over all records (`FR ALL RECORDS`) implies a sequential `READ NEXT` loop, likely preceded by a `START` verb.
+    - **`ADD` / `STORE`:** Convert to a `WRITE` statement to create a new record.
+    - **`CHANGE` / `UPDATE`:** Convert to a `REWRITE` statement to update the last-read record.
+    - **`DELETE`:** Convert to a `DELETE` statement to remove the last-read record.
+
+3.  **General Logic Conversion:**
+    - **`ONEOF` blocks:** Convert to COBOL `EVALUATE` statements.
+    - **`FOR` loops:** Convert to `PERFORM VARYING` loops.
+    - **`CALL` statements:** Convert to `PERFORM <procedure-name>-PARA`.
+    - **Basic Statements:** Translate `IF/ELSE`, `PRINT` (to `DISPLAY`), and assignments (to `MOVE`) into their direct COBOL equivalents.
+
+4.  **Critical Rules:**
+    - DO NOT generate any DB2 `SELECT` statements or other database-specific SQL. Use only standard VSAM file I/O verbs.
+    - DO NOT include `IDENTIFICATION DIVISION`, `ENVIRONMENT DIVISION`, `DATA DIVISION`, or the `PROCEDURE DIVISION.` header itself.
+    - Assume all required data items (variables, counters, file records, etc.) are already defined in the main program's `DATA DIVISION`.
+    - If you encounter an M204 function that cannot be converted, insert a clear comment in the COBOL code explaining the limitation and add a TODO for manual implementation.
+    - Format for Area B (column 12+).
+
+5.  **Specific Conversion Patterns (MANDATORY):**
+    - **FR/FIND Statements:** Convert any 'FR', 'FR ALL RECORDS', or 'FIND' to COBOL file I/O loops:
+    ```cobol
+    PERFORM UNTIL END-OF-FILE = 'Y'
+        READ INPUT-FILE
+            AT END
+                MOVE 'Y' TO END-OF-FILE
+            NOT AT END
+                PERFORM PROCESS-RECORD-PARA
+        END-READ
+    END-PERFORM
     ```
+    - **ONEOF Blocks:** Convert to COBOL EVALUATE:
+    ```cobol
+    EVALUATE TRUE
+        WHEN condition-1
+            statements-1
+        WHEN condition-2
+            statements-2
+        WHEN OTHER
+            statements-3
+    END-EVALUATE
+    ```
+    - **FOR Loops:** Convert to PERFORM VARYING:
+    ```cobol
+    PERFORM VARYING index FROM 1 BY 1 UNTIL index > max
+        statements
+    END-PERFORM
+    ```
+    - **Basic Statements:**
+    - Convert IF/ELSE to COBOL IF
+    - Convert PRINT to DISPLAY
+    - Convert assignments to MOVE
+    - Convert subroutine CALL to PERFORM
 
-    **Core Instructions:**
+6.  **Variable Usage Reporting (CRITICAL):**
+    - After generating the COBOL code, analyze it and return a list of all variables actually used in your generated COBOL code.
+    - For each variable, provide:
+        - `cobol_variable_name`: The COBOL variable name as used in your code.
+        - `cobol_variable_type`: The COBOL PIC or type (e.g., PIC 9(8), PIC X(20), etc.).
+        - `usage_context`: A brief description of how the variable is used.
+    - This list will be used to generate the WORKING-STORAGE SECTION. Do NOT include variables that are not referenced in your code. If you introduce new variables (e.g., loop counters, flags), include them with appropriate types.
 
-    1.  **Modularity Requirements:**
-        - The M204 logic must be broken into cohesive COBOL paragraphs.
-        - The main entry point MUST be named 'MAIN-PROCESSING-LOOP-PARA'.
-        - Additional paragraphs for complex logic should use descriptive names (e.g., 'PROCESS-CUSTOMER-PARA').
-        - Use 'PERFORM' statements to call these paragraphs.
-
-    2.  **VSAM Conversion Patterns (MANDATORY):**
-        - **Target is VSAM:** The target files are VSAM. Your primary goal is to convert M204 data commands into the correct COBOL VSAM I/O verbs.
-        - **`FIND` / `FR` (For Record):** Convert these to a standard COBOL file-reading loop. A `FIND` on a key implies a random `READ`. A loop over all records (`FR ALL RECORDS`) implies a sequential `READ NEXT` loop, likely preceded by a `START` verb.
-        - **`ADD` / `STORE`:** Convert to a `WRITE` statement to create a new record.
-        - **`CHANGE` / `UPDATE`:** Convert to a `REWRITE` statement to update the last-read record.
-        - **`DELETE`:** Convert to a `DELETE` statement to remove the last-read record.
-
-    3.  **General Logic Conversion:**
-        - **`ONEOF` blocks:** Convert to COBOL `EVALUATE` statements.
-        - **`FOR` loops:** Convert to `PERFORM VARYING` loops.
-        - **`CALL` statements:** Convert to `PERFORM <procedure-name>-PARA`.
-        - **Basic Statements:** Translate `IF/ELSE`, `PRINT` (to `DISPLAY`), and assignments (to `MOVE`) into their direct COBOL equivalents.
-
-    4.  **Critical Rules:**
-        - DO NOT generate any DB2 `SELECT` statements or other database-specific SQL. Use only standard VSAM file I/O verbs.
-        - DO NOT include `IDENTIFICATION DIVISION`, `ENVIRONMENT DIVISION`, `DATA DIVISION`, or the `PROCEDURE DIVISION.` header itself.
-        - Assume all required data items (variables, counters, file records, etc.) are already defined in the main program's `DATA DIVISION`.
-        - If you encounter an M204 function that cannot be converted, insert a clear comment in the COBOL code explaining the limitation and add a TODO for manual implementation.
-        - Format for Area B (column 12+).
-
-    5.  **Specific Conversion Patterns (MANDATORY):**
-        - **FR/FIND Statements:** Convert any 'FR', 'FR ALL RECORDS', or 'FIND' to COBOL file I/O loops:
-        ```cobol
-        PERFORM UNTIL END-OF-FILE = 'Y'
-            READ INPUT-FILE
-                AT END
-                    MOVE 'Y' TO END-OF-FILE
-                NOT AT END
-                    PERFORM PROCESS-RECORD-PARA
-            END-READ
-        END-PERFORM
-        ```
-        - **ONEOF Blocks:** Convert to COBOL EVALUATE:
-        ```cobol
-        EVALUATE TRUE
-            WHEN condition-1
-                statements-1
-            WHEN condition-2
-                statements-2
-            WHEN OTHER
-                statements-3
-        END-EVALUATE
-        ```
-        - **FOR Loops:** Convert to PERFORM VARYING:
-        ```cobol
-        PERFORM VARYING index FROM 1 BY 1 UNTIL index > max
-            statements
-        END-PERFORM
-        ```
-        - **Basic Statements:**
-        - Convert IF/ELSE to COBOL IF
-        - Convert PRINT to DISPLAY
-        - Convert assignments to MOVE
-        - Convert subroutine CALL to PERFORM
-
-        
-    6.  **Response Format:**
-        Return a JSON object with this EXACT structure:
-        ```json
-        {{
-            "paragraphs": [
-                {{
-                    "paragraph_name": "MAIN-PROCESSING-LOOP-PARA",
-                    "cobol_code": "      statement-1\\n      statement-2"
-                }},
-                {{
-                    "paragraph_name": "ANOTHER-PARA",
-                    "cobol_code": "      statement-3\\n      statement-4"
-                }}
-            ],
-            "comments": "Optional conversion notes"
-        }}
-        ```
-
-    7.  **Validation Requirements:**
-        - Each paragraph MUST have a valid COBOL paragraph name
-        - Paragraph names MUST be unique
-        - All COBOL code MUST be properly indented
-        - First paragraph MUST be MAIN-PROCESSING-LOOP-PARA
-        - No paragraph name in the cobol_code field
-        - No PROCEDURE DIVISION or SECTION headers
-
-    Example of Valid Paragraph:
+7.  **Response Format:**
+    Return a JSON object with this EXACT structure:
     ```json
     {{
-        "paragraph_name": "MAIN-PROCESSING-LOOP-PARA",
-        "cobol_code": "      PERFORM UNTIL END-OF-FILE = 'Y'\\n          READ INPUT-FILE\\n              AT END\\n                  MOVE 'Y' TO END-OF-FILE\\n              NOT AT END\\n                  PERFORM PROCESS-RECORD-PARA\\n          END-READ\\n      END-PERFORM."
+        "paragraphs": [
+            {{
+                "paragraph_name": "MAIN-PROCESSING-LOOP-PARA",
+                "cobol_code": "      statement-1\\n      statement-2"
+            }},
+            {{
+                "paragraph_name": "ANOTHER-PARA",
+                "cobol_code": "      statement-3\\n      statement-4"
+            }}
+        ],
+        "used_variables": [
+            {{
+                "cobol_variable_name": "END-OF-FILE",
+                "cobol_variable_type": "PIC X",
+                "usage_context": "End of file indicator for main loop."
+            }}
+        ],
+        "comments": "Optional conversion notes"
     }}
     ```
 
-    Generate the COBOL conversion maintaining exact JSON structure and following all rules above.
-    """
+8.  **Validation Requirements:**
+    - Each paragraph MUST have a valid COBOL paragraph name
+    - Paragraph names MUST be unique
+    - All COBOL code MUST be properly indented
+    - First paragraph MUST be MAIN-PROCESSING-LOOP-PARA
+    - No paragraph name in the cobol_code field
+    - No PROCEDURE DIVISION or SECTION headers
+
+Example of Valid Paragraph:
+```json
+{{
+    "paragraph_name": "MAIN-PROCESSING-LOOP-PARA",
+    "cobol_code": "      PERFORM UNTIL END-OF-FILE = 'Y'\\n          READ INPUT-FILE\\n              AT END\\n                  MOVE 'Y' TO END-OF-FILE\\n              NOT AT END\\n                  PERFORM PROCESS-RECORD-PARA\\n          END-READ\\n      END-PERFORM."
+}}
+```
+
+Generate the COBOL conversion maintaining exact JSON structure and following all rules above.
+"""
 
         json_text_output: Optional[str] = None
         try:
@@ -859,7 +933,7 @@ The `jcl_content` should be the complete JCL.
                 llm_call = llm_config._llm.as_structured_llm(MainLoopToCobolOutput)
                 response = await llm_call.acomplete(prompt=prompt_fstr)
                 json_text_output = response.text
-                
+
                 # Log the raw output before any processing for debugging purposes
                 log.debug(f"Raw LLM output for main loop conversion ({m204_file_name}):\n{json_text_output}")
 
@@ -868,31 +942,29 @@ The `jcl_content` should be the complete JCL.
 
                 # Clean and validate JSON
                 json_text_output = strip_markdown_code_block(json_text_output)
-                
+
                 try:
                     # The Pydantic model will perform the validation upon instantiation
-                    parsed_output = MainLoopToCobolOutput.model_validate_json(json_text_output)
+                    parsed_output = MainLoopToCobolOutput(**json.loads(json_text_output))
 
                     # Additional custom validations
                     if not parsed_output.paragraphs:
                         raise ValueError("'paragraphs' list cannot be empty")
-                        
                     if parsed_output.paragraphs[0].paragraph_name != "MAIN-PROCESSING-LOOP-PARA":
                         raise ValueError("First paragraph must be 'MAIN-PROCESSING-LOOP-PARA'")
-                        
                     para_names = {para.paragraph_name for para in parsed_output.paragraphs}
                     if len(para_names) != len(parsed_output.paragraphs):
                         raise ValueError("Duplicate paragraph names found in the response")
 
                     return parsed_output
-                    
+
                 except Exception as e:
                     # Catches both Pydantic validation errors and our custom validation errors
                     raise ValueError(f"Validation failed on LLM response: {e}")
 
         except Exception as e:
             log.error(f"LLM error converting main loop from file {m204_file_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
-            
+
             # Return error-indicating response
             safe_error_str = str(e).replace('{', '{{').replace('}', '}}')
             return MainLoopToCobolOutput(
@@ -909,9 +981,85 @@ The `jcl_content` should be the complete JCL.
                         )
                     )
                 ],
+                used_variables=[],
                 comments=f"LLM conversion failed: {safe_error_str}. Manual review required."
             )
+    
 
+    @staticmethod
+    def deduplicate_and_group_used_variables(
+    grouped_used_variables_lists: Optional[List[List[dict]]] = None,
+    standalone_variables_lists: Optional[List[List[dict]]] = None,
+    flat_used_variables_lists: Optional[List[List[dict]]] = None
+) -> tuple[list, list]:
+        """
+        Deduplicate and merge grouped and standalone variables from multiple LLM outputs.
+
+        Args:
+            grouped_used_variables_lists: List of lists of UsedVariableGroup dicts from LLM outputs.
+            standalone_variables_lists: List of lists of UsedVariable dicts from LLM outputs.
+            flat_used_variables_lists: List of lists of UsedVariable dicts (legacy/flat).
+
+        Returns:
+            (deduped_groups, deduped_standalone)
+            - deduped_groups: List of UsedVariableGroup (no duplicate group names, no duplicate variables in groups)
+            - deduped_standalone: List of UsedVariable (no duplicates)
+        """
+        from app.schemas.artifacts_schema import UsedVariableGroup, UsedVariable
+
+        # --- Deduplicate groups ---
+        group_map: dict[str, dict[str, UsedVariable]] = {}
+        if grouped_used_variables_lists:
+            for group_list in grouped_used_variables_lists:
+                for group in group_list or []:
+                    group_name = group['group_name'] if isinstance(group, dict) else group.group_name
+                    variables = group['variables'] if isinstance(group, dict) else group.variables
+                    if group_name not in group_map:
+                        group_map[group_name] = {}
+                    for var in variables:
+                        var_name = var['cobol_variable_name'] if isinstance(var, dict) else var.cobol_variable_name
+                        var_type = var['cobol_variable_type'] if isinstance(var, dict) else var.cobol_variable_type
+                        key = (var_name, var_type)
+                        if key not in group_map[group_name]:
+                            group_map[group_name][key] = UsedVariable(**var) if isinstance(var, dict) else var
+
+        deduped_groups = [
+            UsedVariableGroup(
+                group_name=group_name,
+                variables=list(var_map.values())
+            )
+            for group_name, var_map in group_map.items()
+        ]
+
+        # --- Deduplicate standalone variables ---
+        standalone_map: dict[tuple, UsedVariable] = {}
+        if standalone_variables_lists:
+            for var_list in standalone_variables_lists:
+                for var in var_list or []:
+                    var_name = var['cobol_variable_name'] if isinstance(var, dict) else var.cobol_variable_name
+                    var_type = var['cobol_variable_type'] if isinstance(var, dict) else var.cobol_variable_type
+                    key = (var_name, var_type)
+                    if key not in standalone_map:
+                        standalone_map[key] = UsedVariable(**var) if isinstance(var, dict) else var
+
+        # Also deduplicate from flat_used_variables_lists (legacy)
+        if flat_used_variables_lists:
+            for var_list in flat_used_variables_lists:
+                for var in var_list or []:
+                    var_name = var['cobol_variable_name'] if isinstance(var, dict) else var.cobol_variable_name
+                    var_type = var['cobol_variable_type'] if isinstance(var, dict) else var.cobol_variable_type
+                    key = (var_name, var_type)
+                    if key not in standalone_map:
+                        standalone_map[key] = UsedVariable(**var) if isinstance(var, dict) else var
+
+        deduped_standalone = list(standalone_map.values())
+
+        return deduped_groups, deduped_standalone
+
+    
+
+    
+    
     async def _generate_and_save_artifacts_for_single_input_source(
         self, 
         input_source: InputSource, 
@@ -931,12 +1079,12 @@ The `jcl_content` should be the complete JCL.
         log.debug(f"Fetching detailed InputSource data for ID: {input_source.input_source_id}")
         current_input_source_with_details = self.db.query(InputSource).filter(InputSource.input_source_id == input_source.input_source_id).options(
             selectinload(InputSource.procedures_defined).selectinload(Procedure.variables_in_procedure),
-            selectinload(InputSource.m204_files_defined).selectinload(M204File.defined_in_source)
+            selectinload(InputSource.m204_files_defined).selectinload(M204File.defined_in_source),
+            selectinload(InputSource.m204_variables_defined)
         ).one_or_none()
 
         if not current_input_source_with_details:
             log.error(f"InputSource ID {input_source.input_source_id} not found during artifact generation. Cannot proceed.")
-            # Return an empty response or raise an error, consistent with how generate_artifacts_for_project handles it
             return GeneratedArtifactsResponse(
                 input_source_id=input_source.input_source_id,
                 cobol_files=[],
@@ -946,8 +1094,6 @@ The `jcl_content` should be the complete JCL.
         log.info(f"Successfully fetched InputSource: {current_input_source_with_details.original_filename or f'ID_{current_input_source_with_details.input_source_id}'} (Type: {current_input_source_with_details.source_type})")
 
         input_source_name_for_comments = current_input_source_with_details.original_filename or f"InputSourceID_{current_input_source_with_details.input_source_id}"
-        
-        # Adjust default prefix for cobol_program_id_base based on source type
         prefix_map = {'m204': 'M204PROG', 'parmlib': 'PARMLIB', 'jcl': 'JCL'}
         default_program_prefix = prefix_map.get(current_input_source_with_details.source_type, "UNKNOWN")
         cobol_program_id_base = self._sanitize_filename_base(current_input_source_with_details.original_filename, default_prefix=default_program_prefix)
@@ -955,11 +1101,9 @@ The `jcl_content` should be the complete JCL.
         log.info(f"Generating artifacts for InputSource: '{input_source_name_for_comments}' (ID: {current_input_source_with_details.input_source_id}), Program ID base: '{cobol_program_id_base}'")
 
         related_procedures = current_input_source_with_details.procedures_defined or []
-
         m204_files_in_this_source = self.db.query(M204File).filter(
             M204File.project_id == current_input_source_with_details.project_id
         ).all()
-
 
         log.info(f"Found {len(related_procedures)} procedures and {len(m204_files_in_this_source)} M204 files for this input source ('{input_source_name_for_comments}').")
 
@@ -1004,13 +1148,31 @@ The `jcl_content` should be the complete JCL.
                 file_section_fds_str = "* No M204 files for FD generation.\n"
             log.info("FD generation process finished (M204 source).")
 
-            
+            # --- M204 Variable to COBOL Working-Storage Conversion ---
+            working_storage_variables_str = ""
+            log.info(f"Starting M204 variable to COBOL Working-Storage conversion for InputSource '{input_source_name_for_comments}'.")
+            if current_input_source_with_details.m204_variables_defined:
+                ws_parts = ["01  M204-VARIABLES."]
+                for var in current_input_source_with_details.m204_variables_defined:
+                    cobol_name = var.cobol_mapped_variable_name or f"M204-VAR-{var.variable_name.upper().replace('%', '').replace('_', '-')}"
+                    cobol_type = var.cobol_variable_type or "PIC X(80)"
+                    cobol_name = re.sub(r'[^A-Z0-9-]', '', cobol_name.upper())
+                    if not cobol_name or not cobol_name[0].isalpha():
+                        cobol_name = "VAR-" + cobol_name
+                    ws_parts.append(f"    05  {cobol_name:<30} {cobol_type}.")
+                if len(ws_parts) > 1:
+                    working_storage_variables_str = "\n".join(ws_parts) + "\n"
+                else:
+                    working_storage_variables_str = "   * No M204 variables with COBOL mappings found.\n"
+                log.info(f"Converted {len(current_input_source_with_details.m204_variables_defined)} M204 variables to Working-Storage entries.")
+            else:
+                working_storage_variables_str = "   * No M204 variables defined in this input source.\n"
+
             cobol_conversion_comments = []
 
             # --- Main Processing Loop Conversion ---
-            # This variable will hold all paragraphs generated for the main loop.
             main_loop_paragraphs_str = ""
-
+            main_loop_result = None
             if current_input_source_with_details.main_processing_loop_content:
                 if llm_config._llm:
                     log.info(f"Found main processing loop in InputSource '{input_source_name_for_comments}'. Converting to COBOL.")
@@ -1018,30 +1180,24 @@ The `jcl_content` should be the complete JCL.
                         current_input_source_with_details.main_processing_loop_content,
                         input_source_name_for_comments
                     )
-                    
-                    # Check if the LLM returned valid paragraphs
                     if main_loop_result and main_loop_result.paragraphs:
-                        # Assemble the main loop paragraphs string
                         paragraph_parts = []
                         for para in main_loop_result.paragraphs:
-                            # Format each paragraph with its name and code
                             paragraph_parts.append(f"{para.paragraph_name}.\n{para.cobol_code}\n")
                         main_loop_paragraphs_str = "\n".join(paragraph_parts)
-
                         if main_loop_result.comments:
                             cobol_conversion_comments.append(f"Main Loop: {main_loop_result.comments}")
                     else:
-                        # Handle cases where LLM might fail to return paragraphs
                         log.error("LLM conversion for main loop did not return valid paragraphs.")
                         main_loop_paragraphs_str = "MAIN-PROCESSING-LOOP-PARA.\n      * ERROR: Main loop conversion failed to produce paragraphs.\n\n"
-
-                else: # LLM not configured
+                else:
                     log.warning("Main processing loop found, but LLM is not configured. Skipping conversion.")
                     main_loop_paragraphs_str = "MAIN-PROCESSING-LOOP-PARA.\n      * Main processing loop found but LLM not configured for conversion.\n\n"
 
             # --- M204 Procedure Conversion (Subroutines) ---
             procedure_division_main_logic = ""
             procedure_division_subroutine_paragraphs = ""
+            converted_procs_results = []
 
             log.info(f"Starting M204 procedure to COBOL conversion for {len(related_procedures)} procedures (M204 source).")
             if llm_config._llm and related_procedures:
@@ -1051,17 +1207,11 @@ The `jcl_content` should be the complete JCL.
                     proc_name_for_log = related_procedures[i].m204_proc_name
                     if isinstance(result, M204ProcedureToCobolParagraphsOutput):
                         if result.paragraphs:
-                            # The first paragraph is the main entry point for this procedure's logic
                             main_proc_para_name = result.paragraphs[0].paragraph_name
-                            
-                            # If no main loop was generated, the first procedure's main paragraph is called from the top level.
                             if not main_loop_paragraphs_str and not procedure_division_main_logic:
                                 procedure_division_main_logic += f"           PERFORM {main_proc_para_name}.\n"
-                            
-                            # Assemble all paragraphs from this procedure conversion
                             for para in result.paragraphs:
                                 procedure_division_subroutine_paragraphs += f"{para.paragraph_name}.\n{para.cobol_code}\n\n"
-                            
                             if result.comments:
                                 cobol_conversion_comments.append(f"Proc {result.m204_procedure_name}: {result.comments}")
                         else:
@@ -1073,11 +1223,76 @@ The `jcl_content` should be the complete JCL.
             elif not llm_config._llm:
                 procedure_division_subroutine_paragraphs = "      * LLM not configured for M204 Procedure to COBOL conversion.\n"
 
+            # --- Deduplicate and group used variables from all LLM outputs ---
+            all_grouped_used_variables_lists = []
+            all_standalone_variables_lists = []
+            all_flat_used_variables_lists = []
+
+            # Main loop variables
+            if main_loop_result:
+                if hasattr(main_loop_result, "grouped_used_variables") and main_loop_result.grouped_used_variables:
+                    all_grouped_used_variables_lists.append(main_loop_result.grouped_used_variables)
+                if hasattr(main_loop_result, "standalone_variables") and main_loop_result.standalone_variables:
+                    all_standalone_variables_lists.append(main_loop_result.standalone_variables)
+                if hasattr(main_loop_result, "used_variables") and main_loop_result.used_variables:
+                    all_flat_used_variables_lists.append(main_loop_result.used_variables)
+
+            # Procedure variables
+            for proc_result in converted_procs_results:
+                if isinstance(proc_result, M204ProcedureToCobolParagraphsOutput):
+                    if hasattr(proc_result, "grouped_used_variables") and proc_result.grouped_used_variables:
+                        all_grouped_used_variables_lists.append(proc_result.grouped_used_variables)
+                    if hasattr(proc_result, "standalone_variables") and proc_result.standalone_variables:
+                        all_standalone_variables_lists.append(proc_result.standalone_variables)
+                    if hasattr(proc_result, "used_variables") and proc_result.used_variables:
+                        all_flat_used_variables_lists.append(proc_result.used_variables)
+
+            deduped_groups, deduped_standalone = self.deduplicate_and_group_used_variables(
+                grouped_used_variables_lists=all_grouped_used_variables_lists,
+                standalone_variables_lists=all_standalone_variables_lists,
+                flat_used_variables_lists=all_flat_used_variables_lists
+            )
+
+            # --- Filter out variables already defined in FD ---
+            fd_variable_names = set()
+            for line in file_section_fds_str.splitlines():
+                match = re.match(r"\s*05\s+([A-Z0-9\-]+)", line)
+                if match:
+                    fd_variable_names.add(match.group(1).upper())
+
+            def is_not_in_fd(var):
+                var_name = re.sub(r'[^A-Z0-9-]', '', var.cobol_variable_name.upper())
+                return var_name not in fd_variable_names
+
+            deduped_standalone = [var for var in deduped_standalone if is_not_in_fd(var)]
+            for group in deduped_groups:
+                group.variables = [var for var in group.variables if is_not_in_fd(var)]
+            deduped_groups = [group for group in deduped_groups if group.variables]
+
+            # --- Generate WORKING-STORAGE SECTION from deduped variables ---
+            working_storage_llm_vars_str = ""
+            if deduped_groups:
+                for group in deduped_groups:
+                    group_name = re.sub(r'[^A-Z0-9-]', '', group.group_name.upper())
+                    if not group_name or not group_name[0].isalpha():
+                        group_name = "GRP-" + group_name
+                    working_storage_llm_vars_str += f"01  {group_name}.\n"
+                    for var in group.variables:
+                        var_name = re.sub(r'[^A-Z0-9-]', '', var.cobol_variable_name.upper())
+                        if not var_name or not var_name[0].isalpha():
+                            var_name = "VAR-" + var_name
+                        working_storage_llm_vars_str += f"    05  {var_name:<30} {var.cobol_variable_type}.\n"
+            if deduped_standalone:
+                for var in deduped_standalone:
+                    var_name = re.sub(r'[^A-Z0-9-]', '', var.cobol_variable_name.upper())
+                    if not var_name or not var_name[0].isalpha():
+                        var_name = "VAR-" + var_name
+                    working_storage_llm_vars_str += f"01  {var_name:<30} {var.cobol_variable_type}.\n"
+
             # --- Determine the Final Main Logic Flow ---
             if main_loop_paragraphs_str:
-                # If a main loop was generated, it is the entry point.
                 procedure_division_main_logic = "           PERFORM MAIN-PROCESSING-LOOP-PARA.\n"
-            elif not procedure_division_main_logic: # No main loop and no procedures
+            elif not procedure_division_main_logic:
                 procedure_division_main_logic = "           DISPLAY 'No M204 procedures or main loop mapped'."
 
             # --- Assemble the Final COBOL Program ---
@@ -1099,6 +1314,8 @@ FILE SECTION.
 {file_section_fds_str if file_section_fds_str.strip() else "   * No FDs."}
 WORKING-STORAGE SECTION.
 {working_storage_for_fds_str if working_storage_for_fds_str.strip() else "   * No specific W-S from FDs."}
+{working_storage_variables_str if working_storage_variables_str.strip() else ""}
+{working_storage_llm_vars_str if working_storage_llm_vars_str.strip() else ""}
 PROCEDURE DIVISION.
 MAIN-LOGIC SECTION.
 MAIN-PARAGRAPH.
@@ -1108,7 +1325,12 @@ MAIN-PARAGRAPH.
 {main_loop_paragraphs_str if main_loop_paragraphs_str.strip() else ""}
 {procedure_division_subroutine_paragraphs if procedure_division_subroutine_paragraphs.strip() else ""}
             """
-            cobol_output_schema = CobolOutputSchema(input_source_id=current_input_source_with_details.input_source_id, file_name=cobol_file_name, content=cobol_content, artifact_type="cobol")
+            cobol_output_schema = CobolOutputSchema(
+                input_source_id=current_input_source_with_details.input_source_id,
+                file_name=cobol_file_name,
+                content=cobol_content,
+                artifact_type="cobol"
+            )
             cobol_output_schemas.append(cobol_output_schema)
             db_cobol_artifacts_to_add.append(GeneratedCobolArtifact(**cobol_output_schema.model_dump()))
             log.info(f"Generated COBOL file {cobol_file_name} for M204 source.")
@@ -1128,7 +1350,11 @@ MAIN-PARAGRAPH.
                                 if isinstance(tc_data, dict):
                                     try:
                                         tc = TestCase(**tc_data)
-                                        unit_test_content_parts.extend([f"ID: {tc.test_case_id}\n  Desc: {tc.description}\n", ("  Inputs: " + str(tc.inputs) + "\n"), ("  Expected: " + str(tc.expected_outputs) + "\n")])
+                                        unit_test_content_parts.extend([
+                                            f"ID: {tc.test_case_id}\n  Desc: {tc.description}\n",
+                                            ("  Inputs: " + str(tc.inputs) + "\n"),
+                                            ("  Expected: " + str(tc.expected_outputs) + "\n")
+                                        ])
                                     except Exception as e_tc:
                                         unit_test_content_parts.append(f"  Error parsing TC: {e_tc}\n")
                                 else:
@@ -1140,7 +1366,12 @@ MAIN-PARAGRAPH.
                 else:
                     unit_test_content_parts.append("  No pre-defined test cases.\n")
             final_unit_test_content = "".join(unit_test_content_parts)
-            unit_test_schema = UnitTestOutputSchema(input_source_id=current_input_source_with_details.input_source_id, file_name=unit_test_file_name, content=final_unit_test_content, artifact_type="unit_test")
+            unit_test_schema = UnitTestOutputSchema(
+                input_source_id=current_input_source_with_details.input_source_id,
+                file_name=unit_test_file_name,
+                content=final_unit_test_content,
+                artifact_type="unit_test"
+            )
             unit_test_output_schemas.append(unit_test_schema)
             db_unit_test_artifacts_to_add.append(GeneratedUnitTestArtifact(**unit_test_schema.model_dump()))
             log.info(f"Generated Unit Test file {unit_test_file_name} for M204 source.")
@@ -1162,13 +1393,12 @@ MAIN-PARAGRAPH.
                     if not dd_name_final:
                         dd_name_final = f"DD{m204_file_obj.m204_file_id:06}"
                     dsn = m204_file_obj.target_vsam_dataset_name or m204_file_obj.m204_logical_dataset_name or f"YOUR.DSN.FOR.{dd_name_final}"
-                    # Basic DSN sanitization, can be improved
                     if not re.match(r"^[A-Z@#$][A-Z0-9@#$]{0,7}(\.[A-Z@#$][A-Z0-9@#$]{0,7})*$", dsn.upper()):
-                        dsn = f"USER.M204.{dd_name_final}.DATA" # Fallback DSN
+                        dsn = f"USER.M204.{dd_name_final}.DATA"
                     dd_statements_for_jcl.append(f"//{dd_name_final:<8} DD DSN={dsn},DISP=SHR")
             dd_statements_str = "\n".join(dd_statements_for_jcl) if dd_statements_for_jcl else "//* No M204 files for DD statements."
             general_jcl_content = f"""\
-//JOBGENER JOB (ACCT),'RUN {cobol_program_id_base}',CLASS=A,MSGCLASS=X
+/*JOBGENER JOB (ACCT),'RUN {cobol_program_id_base}',CLASS=A,MSGCLASS=X
 //* Run JCL for COBOL: {cobol_file_name} (From M204 Source: {input_source_name_for_comments})
 //STEP010  EXEC PGM={cobol_program_id_base}
 //STEPLIB  DD DSN=YOUR.COBOL.LOADLIB,DISP=SHR
@@ -1177,7 +1407,13 @@ MAIN-PARAGRAPH.
 //SYSIN    DD *
 /*
 """
-            jcl_general_schema = JclOutputSchema(input_source_id=current_input_source_with_details.input_source_id, file_name=general_jcl_file_name, content=general_jcl_content, jcl_purpose="general", artifact_type="jcl_general")
+            jcl_general_schema = JclOutputSchema(
+                input_source_id=current_input_source_with_details.input_source_id,
+                file_name=general_jcl_file_name,
+                content=general_jcl_content,
+                jcl_purpose="general",
+                artifact_type="jcl_general"
+            )
             jcl_output_schemas.append(jcl_general_schema)
             db_jcl_artifacts_to_add.append(GeneratedJclArtifact(**jcl_general_schema.model_dump()))
             log.info(f"Generated Run JCL {general_jcl_file_name} for M204 source.")
@@ -1190,7 +1426,6 @@ MAIN-PARAGRAPH.
         # --- VSAM Definition JCL Generation (for 'm204', 'parmlib', and 'jcl' source types) ---
         log.info(f"Starting VSAM definition JCL consideration for InputSource: {input_source_name_for_comments} (Type: {current_input_source_with_details.source_type})")
         vsam_jcls_generated_this_pass = 0
-        # m204_files_in_this_source are files *defined by* the current input_source
         for m204_file_obj in m204_files_in_this_source:
             log.debug(f"Evaluating M204File ID {m204_file_obj.m204_file_id} ('{m204_file_obj.m204_file_name}') from source '{input_source_name_for_comments}' for VSAM JCL.")
 
@@ -1198,9 +1433,7 @@ MAIN-PARAGRAPH.
                 log.info(f"VSAM JCL for M204File ID {m204_file_obj.m204_file_id} ('{m204_file_obj.m204_file_name}') already generated in this project run. Skipping for this pass with source: {input_source_name_for_comments}.")
                 continue
 
-            # VSAM JCL is only generated for files explicitly marked as M204 database files.
             should_generate_vsam = m204_file_obj.is_db_file is True
-            
             if should_generate_vsam:
                 log.info(f"M204File ID {m204_file_obj.m204_file_id} ('{m204_file_obj.m204_file_name}') is a DB file. Generating VSAM JCL.")
                 m204_name_part_raw = m204_file_obj.m204_file_name or f"FILE{m204_file_obj.m204_file_id}"
@@ -1210,11 +1443,10 @@ MAIN-PARAGRAPH.
                 if not m204_name_part[0].isalpha():
                     m204_name_part = "V" + m204_name_part[:7]
 
-                vsam_jcl_name = f"{cobol_program_id_base}_{m204_name_part}_vsam.jcl" # cobol_program_id_base is from current InputSource
+                vsam_jcl_name = f"{cobol_program_id_base}_{m204_name_part}_vsam.jcl"
                 vsam_ds_name = m204_file_obj.target_vsam_dataset_name or f"DEFAULT.VSAM.{cobol_program_id_base}.{m204_name_part}"
-                # Basic DSN sanitization
                 if not re.match(r"^[A-Z@#$][A-Z0-9@#$]{0,7}(\.[A-Z@#$][A-Z0-9@#$]{0,7})+$", vsam_ds_name.upper()):
-                    vsam_ds_name = f"PROJ.VSAM.{cobol_program_id_base}.{m204_name_part}" # Fallback DSN
+                    vsam_ds_name = f"PROJ.VSAM.{cobol_program_id_base}.{m204_name_part}"
 
                 vsam_type = m204_file_obj.target_vsam_type or "KSDS"
                 
@@ -1233,7 +1465,13 @@ MAIN-PARAGRAPH.
                 else:
                     vsam_jcl_content = self._generate_fallback_vsam_jcl(m204_file_obj, cobol_program_id_base, vsam_ds_name, vsam_type, input_source_name_for_comments)
                 
-                jcl_vsam_schema = JclOutputSchema(input_source_id=current_input_source_with_details.input_source_id, file_name=vsam_jcl_name, content=vsam_jcl_content, jcl_purpose="vsam", artifact_type="jcl_vsam")
+                jcl_vsam_schema = JclOutputSchema(
+                    input_source_id=current_input_source_with_details.input_source_id,
+                    file_name=vsam_jcl_name,
+                    content=vsam_jcl_content,
+                    jcl_purpose="vsam",
+                    artifact_type="jcl_vsam"
+                )
                 jcl_output_schemas.append(jcl_vsam_schema)
                 db_jcl_artifacts_to_add.append(GeneratedJclArtifact(**jcl_vsam_schema.model_dump()))
                 log.info(f"Generated VSAM JCL {vsam_jcl_name} for M204File ID {m204_file_obj.m204_file_id}.")
@@ -1247,7 +1485,7 @@ MAIN-PARAGRAPH.
         if vsam_jcls_generated_this_pass == 0:
             log.info(f"No new VSAM definition JCLs were generated by InputSource '{input_source_name_for_comments}' in this pass.")
         log.info(f"VSAM definition JCL generation process finished for InputSource '{input_source_name_for_comments}'.")
-        
+
         # --- Save all collected artifacts to DB ---
         log.info(f"Preparing to save artifacts for InputSource ID: {current_input_source_with_details.input_source_id}")
         if db_cobol_artifacts_to_add:
@@ -1266,6 +1504,7 @@ MAIN-PARAGRAPH.
         )
         log.info(f"Finished artifact generation for InputSource ID: {input_source.input_source_id} ('{input_source_name_for_comments}'). Returning {len(response.cobol_files)} COBOL, {len(response.jcl_files)} JCL, {len(response.unit_test_files)} Unit Test files.")
         return response
+
 
     async def generate_artifacts_for_project(self, project_id: int) -> List[InputSourceArtifacts]:
         project = self.db.query(Project).filter(Project.project_id == project_id).first()

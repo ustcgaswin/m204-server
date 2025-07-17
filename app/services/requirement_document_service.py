@@ -4,6 +4,8 @@ from sqlalchemy import desc, select
 from typing import List, Optional, Dict, Any
 import json
 from openai import APIError
+import re
+import subprocess
 
 from app.models.project_model import Project
 from app.models.procedure_model import Procedure
@@ -35,9 +37,116 @@ from app.config.llm_config import llm_config
 from app.utils.logger import log
 from fastapi import HTTPException, status
 from datetime import datetime
+import os
 
 
 MAX_CONCURRENT_LLM_CALLS = 5   #for generating sections
+MAX_MERMAID_FIX_ATTEMPTS = 3 # Max attempts to fix a diagram
+
+
+
+_current_script_dir = os.path.dirname(os.path.abspath(__file__))
+# Go up two levels to get to the 'server' directory, which is our project root
+_server_root_dir = os.path.abspath(os.path.join(_current_script_dir, '..', '..'))
+# Construct the full path to the validator script
+MERMAID_VALIDATOR_PATH = os.path.join(_server_root_dir, "mermaid_validator.js")
+
+
+
+def _run_mermaid_validator_sync(mermaid_code: str) -> subprocess.CompletedProcess:
+    """Synchronous helper to run the validator in a separate thread."""
+    return subprocess.run(
+        ['node', MERMAID_VALIDATOR_PATH],
+        input=mermaid_code.encode('utf-8'),
+        capture_output=True,
+        check=False, # Don't raise exception on non-zero exit code
+        cwd=_server_root_dir
+    )
+
+async def _validate_mermaid_code(mermaid_code: str) -> tuple[bool, Optional[str], Optional[int]]:
+    """
+    Validates Mermaid code using an external Node.js script.
+    Returns (is_valid, error_message, error_line_number).
+    This version uses asyncio.to_thread to be compatible with Windows.
+    """
+    if not mermaid_code.strip():
+        return False, "Mermaid code is empty.", 0
+    
+    try:
+        # Run the synchronous subprocess call in a separate thread
+        process = await asyncio.to_thread(_run_mermaid_validator_sync, mermaid_code)
+        
+        if process.returncode == 0:
+            log.info("Mermaid validation successful.")
+            return True, None, None
+        else:
+            error_output = process.stderr.decode('utf-8').strip()
+            line_num_output = process.stdout.decode('utf-8').strip()
+            error_line = int(line_num_output) if line_num_output.isdigit() else 0
+            log.warning(f"Mermaid validation failed at line {error_line}. Error: {error_output}")
+            return False, error_output, error_line
+    except FileNotFoundError:
+        log.error(f"Mermaid validator script not found at '{MERMAID_VALIDATOR_PATH}'. Please ensure Node.js is installed and the script is in the correct path.")
+        # Return True to skip validation and avoid fix attempts if the validator itself is broken.
+        return True, "Validator script not found, skipping validation.", None
+    except Exception as e:
+        log.error(f"An exception occurred during Mermaid validation: {e}", exc_info=True)
+        # Return True to skip validation on unexpected errors.
+        return True, f"An exception occurred during validation: {e}, skipping validation.", None
+
+
+
+
+async def _attempt_to_fix_mermaid_code(invalid_code: str, error_message: str, error_line: int) -> Optional[str]:
+    """
+    Uses the LLM to attempt to fix invalid Mermaid code based on a specific error.
+    """
+    if not llm_config._llm:
+        return None
+    
+    log.info(f"Attempting to fix invalid Mermaid code with LLM. Error at line {error_line}.")
+
+    lines = invalid_code.split('\n')
+    # Create a context window of +-3 lines around the error
+    start = max(0, error_line - 4)
+    end = min(len(lines), error_line + 3)
+    context_snippet = "\n".join(f"{i+1}: {line}" for i, line in enumerate(lines[start:end]))
+
+    prompt = f"""
+You are an expert in Mermaid.js syntax. The following Mermaid code is invalid.
+Your task is to fix it based on the provided error message and context, without changing the meaning or structure of the diagram.
+Your response must contain *only* the complete, corrected, raw Mermaid code inside a ```mermaid ... ``` block and nothing else.
+
+**Error Message:**
+{error_message}
+
+**Error occurred near line {error_line}. Here is a snippet of the code around the error line (with line numbers):**
+```
+{context_snippet}
+```
+
+**Full Invalid Mermaid Code:**
+```mermaid
+{invalid_code}
+```
+
+Please provide the full, corrected Mermaid code.
+"""
+    try:
+        completion_response = await llm_config._llm.acomplete(prompt=prompt)
+        if completion_response and completion_response.text:
+            # Extract code from ```mermaid ... ``` block
+            fixed_code_match = re.search(r"```mermaid\n(.*?)\n```", completion_response.text, re.DOTALL)
+            if fixed_code_match:
+                fixed_code = fixed_code_match.group(1).strip()
+                log.info("LLM provided a potential fix for the Mermaid code.")
+                return fixed_code
+            else:
+                log.warning("LLM response for Mermaid fix did not contain a valid code block.")
+                return None
+    except Exception as e:
+        log.error(f"An error occurred while asking LLM to fix Mermaid code: {e}", exc_info=True)
+    return None
 
 # --- Helper function to serialize SQLAlchemy models to dicts for LLM prompt ---
 def _serialize_model_instance(instance: Any, schema_class: Optional[Any] = None) -> Dict[str, Any]:
@@ -123,21 +232,25 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project with ID {project_id} not found.")
     project_data["project_info"] = _serialize_model_instance(project)
 
-    # Input Source Summaries (JCL and M204 detailed descriptions)
-    if options.include_project_overview: # Tying inclusion to project overview
-        input_sources = db.query(InputSource).filter(InputSource.project_id == project_id).all()
-        source_summaries = []
-        main_loop_content = None # Variable to hold the main loop content
-        main_loop_source_filename = None # To identify which file the loop came from
-        for src in input_sources:
-            # Check for and capture the main processing loop content from any M204 source
-            if src.source_type == 'm204' and src.main_processing_loop_content:
-                if not main_loop_content: # Take the first one found
-                    main_loop_content = src.main_processing_loop_content
-                    main_loop_source_filename = src.original_filename or f"InputSource ID {src.input_source_id}"
-                else:
-                    log.warning(f"Multiple main_processing_loop_content found for project {project_id}. Using the first one from source '{main_loop_source_filename}'.")
+    # Always fetch input sources to check for summaries and main loop content
+    input_sources = db.query(InputSource).filter(InputSource.project_id == project_id).all()
+    source_summaries = []
+    main_loop_content = None # Variable to hold the main loop content
+    main_loop_source_filename = None # To identify which file the loop came from
 
+    for src in input_sources:
+        # Unconditionally check for and capture the main processing loop content from any M204 source
+        log.debug(f" details about src: {src}")
+        if src.source_type == 'm204' and src.main_processing_loop_content:
+            log.debug("checking for m204 main processing loop")
+            if not main_loop_content: # Take the first one found
+                main_loop_content = src.main_processing_loop_content
+                main_loop_source_filename = src.original_filename or f"InputSource ID {src.input_source_id}"
+            else:
+                log.warning(f"Multiple main_processing_loop_content found for project {project_id}. Using the first one from source '{main_loop_source_filename}'.")
+
+        # Conditionally gather summaries if the option is selected
+        if options.include_project_overview:
             summary_item = {
                 "original_filename": src.original_filename,
                 "source_type": src.source_type,
@@ -147,18 +260,20 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
             # Only add if there's a relevant description
             if summary_item["jcl_detailed_description"] or summary_item["m204_detailed_description"]:
                 source_summaries.append(summary_item)
-        if source_summaries:
-            project_data["source_file_llm_summaries"] = source_summaries
-        
-        # Process and add the main loop content if found
-        if main_loop_content:
-            log.info(f"Found main processing loop content from '{main_loop_source_filename}', structuring for LLM prompt.")
-            structured_logic = await _structure_m204_loop_logic(main_loop_content)
-            project_data["main_processing_loop"] = {
-                "source_filename": main_loop_source_filename,
-                "raw_content": main_loop_content,
-                "structured_logic": structured_logic
-            }
+
+    # Add summaries to project_data if they were gathered
+    if source_summaries:
+        project_data["source_file_llm_summaries"] = source_summaries
+    
+    # Process and add the main loop content if found, regardless of other options
+    if main_loop_content:
+        log.info(f"Found main processing loop content from '{main_loop_source_filename}', structuring for LLM prompt.")
+        structured_logic = await _structure_m204_loop_logic(main_loop_content)
+        project_data["main_processing_loop"] = {
+            "source_filename": main_loop_source_filename,
+            "raw_content": main_loop_content,
+            "structured_logic": structured_logic
+        }
 
 
     # M204 Procedures
@@ -206,27 +321,15 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
 
 
 
-def _construct_llm_prompt_content(project_data: Dict[str, Any], options: RequirementGenerationOptionsSchema) -> str:
+def _construct_llm_prompt_content(project_data: Dict[str, Any]) -> str:
     """
     Constructs the detailed data dump part of the LLM prompt.
     Formats the fetched data into a readable structure for the LLM.
+    This function now receives a targeted subset of data for a specific section.
     """
     content_parts = []
 
-    # For the Program Overview section: ONLY include M204 detailed descriptions from InputSource
-    if options.include_project_overview and "source_file_llm_summaries" in project_data:
-        m204_descriptions = [
-            s["m204_detailed_description"]
-            for s in project_data["source_file_llm_summaries"]
-            if s.get("m204_detailed_description")
-        ]
-        if m204_descriptions:
-            content_parts.append("M204 Detailed Descriptions from Input Sources:")
-            for desc in m204_descriptions:
-                content_parts.append(f"- {desc}")
-            content_parts.append("\n")
-
-    # For all other sections, include the rest of the data as before
+    # Source File Summaries
     if "source_file_llm_summaries" in project_data and project_data["source_file_llm_summaries"]:
         content_parts.append("Source File LLM-Generated Summaries:")
         for summary_info in project_data["source_file_llm_summaries"]:
@@ -259,7 +362,8 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
             content_parts.append("  ```")
         content_parts.append("\n")
 
-    if options.include_procedures and "procedures" in project_data and project_data["procedures"]:
+    # M204 Procedures
+    if "procedures" in project_data and project_data["procedures"]:
         content_parts.append("M204 Procedures Data:")
         for proc in project_data["procedures"]:
             proc_details = [
@@ -268,17 +372,18 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
                 f"    Parameters String: {proc.get('m204_parameters_string', 'None')}",
                 f"    Target COBOL Program: {proc.get('target_cobol_function_name', 'N/A')}",
             ]
-            if options.include_procedure_summaries and proc.get('summary'):
+            if proc.get('summary'):
                 proc_details.append(f"    Summary: {proc.get('summary', 'No summary available.')}")
             proc_details.append(f"    Content Snippet (first 200 chars): {proc.get('procedure_content', 'N/A')[:200]}...")
-            if options.include_procedure_variables and proc.get("variables_in_procedure"):
+            if proc.get("variables_in_procedure"):
                 proc_details.append("    Variables Defined in Procedure:")
                 for var in proc["variables_in_procedure"]:
                     proc_details.append(f"      - Variable Name: {var.get('variable_name')}, Type: {var.get('variable_type')}, Scope: {var.get('scope')}, COBOL Mapped Name: {var.get('cobol_mapped_variable_name', 'N/A')}")
             content_parts.extend(proc_details)
         content_parts.append("\n")
 
-    if options.include_files and "m204_files" in project_data and project_data["m204_files"]:
+    # M204 Files
+    if "m204_files" in project_data and project_data["m204_files"]:
         content_parts.append("M204 File Definitions Data:")
         for f_data in project_data["m204_files"]:
             log.debug(f"f_data: {f_data}")
@@ -354,54 +459,72 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any], options: Require
             content_parts.extend(file_details)
         content_parts.append("\n")
 
-    if options.include_global_variables and "global_variables" in project_data and project_data["global_variables"]:
+    # Global Variables
+    if "global_variables" in project_data and project_data["global_variables"]:
         content_parts.append("Global/Public M204 Variables Data:")
         for var in project_data["global_variables"]:
             attributes_json = json.dumps(var.get('attributes')) if var.get('attributes') else 'None'
             content_parts.append(f"  - Variable Name: {var.get('variable_name')}, Type: {var.get('variable_type')}, Scope: {var.get('scope')}, COBOL Mapped Name: {var.get('cobol_mapped_variable_name', 'N/A')}, Attributes: {attributes_json}")
         content_parts.append("\n")
 
-    if options.include_jcl_dd_statements and "dd_statements" in project_data and project_data["dd_statements"]:
+    # JCL DD Statements
+    if "dd_statements" in project_data and project_data["dd_statements"]:
         content_parts.append("JCL DD Statements Data:")
         for dd in project_data["dd_statements"]:
             content_parts.append(f"  - DD Name: {dd.get('dd_name')}, DSN: {dd.get('dsn', 'N/A')}, Disposition: {dd.get('disposition', 'N/A')}, Job Name: {dd.get('job_name', 'N/A')}, Step Name: {dd.get('step_name', 'N/A')}")
         content_parts.append("\n")
 
-    if options.include_procedure_calls and "procedure_calls" in project_data and project_data["procedure_calls"]:
+    # Procedure Calls
+    if "procedure_calls" in project_data and project_data["procedure_calls"]:
         content_parts.append("Procedure Call Relationships Data:")
+        # Create a quick lookup for procedure names from their IDs
+        proc_name_map = {p['proc_id']: p.get('m204_proc_name', 'N/A') for p in project_data.get("procedures", [])}
+        
         for call in project_data["procedure_calls"]:
             calling_proc_id = call.get('calling_procedure_id')
-            calling_proc_name = "N/A"
-            if calling_proc_id and "procedures" in project_data and project_data["procedures"]:
-                caller = next((p for p in project_data["procedures"] if p.get("proc_id") == calling_proc_id or p.get("m204_proc_id") == calling_proc_id), None)
-                if caller: 
-                    calling_proc_name = caller.get("m204_proc_name", "N/A")
-                else:
-                    log.debug(f"Calling procedure ID {calling_proc_id} not found in pre-loaded procedure data for call ID {call.get('procedure_call_id')}")
-            content_parts.append(f"  - Calling Procedure Name: {calling_proc_name} (ID: {calling_proc_id}), Called Procedure Name: {call.get('called_procedure_name')}, Line Number: {call.get('line_number')}, Is External: {call.get('is_external')}")
+            calling_proc_name = proc_name_map.get(calling_proc_id, f"ID {calling_proc_id}")
+            if calling_proc_name == f"ID {calling_proc_id}":
+                 log.debug(f"Calling procedure ID {calling_proc_id} not found in pre-loaded procedure data for call ID {call.get('procedure_call_id')}")
+
+            content_parts.append(f"  - Calling Procedure Name: {calling_proc_name}, Called Procedure Name: {call.get('called_procedure_name')}, Line Number: {call.get('line_number')}, Is External: {call.get('is_external')}")
         content_parts.append("\n")
 
     return "\n".join(content_parts)
 
-def _get_sections_config() -> List[Dict[str, str]]:
+
+
+def _get_sections_config() -> List[Dict[str, Any]]:
     """
-    Defines the structure and instructions for each section of the requirements document.
+    Defines the structure, instructions, and data dependencies for each section.
     """
+    # Define a set of all possible data keys for validation/reference
+    all_data_keys = {
+        "project_info", "source_file_llm_summaries", "main_processing_loop",
+        "procedures", "m204_files", "global_variables", "dd_statements", "procedure_calls"
+    }
+    
+    # Define common data combinations
+    tech_overview_data = ["procedures", "m204_files", "dd_statements", "source_file_llm_summaries"]
+    full_context_data = list(all_data_keys)
+
     return [
         {
             "id": "program_overview",  
             "title": "## 1. Program Overview", 
+            "required_data": ["source_file_llm_summaries", "m204_files"],
             "instructions": """
-        (Provide a business-oriented overview of the system in 2-3 paragraphs based on the 'm204_detailed_description' fields from all InputSource records. 
-        Describe the system's primary business purpose, core functionality, and key capabilities in terms of what it does for the organization.
-        Focus on business functions, operational processes, and data handling capabilities rather than technical architecture.
-        Present the information clearly for business users and technical stakeholders, emphasizing the system's role in supporting business operations.
-        Exclude project metadata such as project name, description, or creation date.)
+        (Provide a concise, technical overview of what the program does at a high level, based on the 'm204_detailed_description' fields from all InputSource records.
+        Do not include business-oriented or stakeholder-focused language.
+        After the overview, provide:
+        - A bullet list of all files involved in the program, as found in the M204 file definitions (list the file names).
+        - A separate bullet list of all files that are flagged as Model 204 database files (where is_db_file = True).
+        Do not include project metadata or business context.)
         """
         },
         {
             "id": "conceptual_data_model",
             "title": "### 1.1. Conceptual Data Model Diagram",
+            "required_data": ["m204_files", "dd_statements", "procedures", "procedure_calls", "source_file_llm_summaries"],
             "instructions": """
       (Based on the overall system data, including 'M204 Procedures Data', 'M204 File Definitions Data', 'JCL DD Statements Data', and 'Source File LLM-Generated Summaries', generate a high-level Mermaid flowchart diagram (e.g., using `graph TD;` for Top-Down or `graph LR;` for Left-to-Right) illustrating the primary data flows or control sequences within the system.
        The diagram should identify:
@@ -430,16 +553,22 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "main_processing_loop",
             "title": "## 2. Main Processing Loop",
+            "required_data": ["main_processing_loop"],
             "instructions": """
-   (If 'Structured Main Processing Loop Logic (JSON)' is provided in the input data, recursively walk the JSON object to describe the logic. For each `action`, describe it. For each `conditional`, describe the condition of each `branch` and then detail its nested operations. Ensure every node in the JSON tree is described in sequence.
-    If only raw 'Main Processing Loop Content' is provided (as a fallback), analyze the M204 code directly. Describe its purpose, high-level logic, and trace the sequence of operations, paying close attention to nested `IF/ELSE` blocks.
-    Identify the primary inputs and outputs of the loop.
-    If no loop data is provided, state "No main processing loop was identified in the analyzed source files.")
+The input provides the main processing loop as a block of M204 code (not as structured JSON). Please:
+
+- Begin with a concise summary paragraph describing the overall purpose and function of the main processing loop, based on your analysis of the code.
+- Then, analyze the M204 code directly, outlining the sequence of operations and major conditional logic in a step-by-step, hierarchical bullet-point format.
+    * For each significant operation (e.g., FIND, CALL, PRINT, variable assignment), state the code line and provide a plain-language explanation.
+    * For each conditional (e.g., IF, ELSE IF, ELSE), clearly state the condition, then describe the logic within each branch, using indentation to show nesting and sequence.
+- Explicitly identify the primary inputs, outputs, and any key decision points or repeated operations.
+
 """
         },
         {
             "id": "main_processing_loop_diagram",
             "title": "### 2.1. Main Processing Loop Flowchart",
+            "required_data": ["main_processing_loop"],
             "instructions": """
       (If 'Structured Main Processing Loop Logic (JSON)' is provided, generate a Mermaid flowchart by walking the JSON tree. `action` types should be rectangular process nodes. `conditional` types should be decision diamonds, with arrows pointing to the first operation in each `branch`. Connect all operations sequentially to represent the full logic flow.
        If only raw 'Main Processing Loop Content' is provided (as a fallback), generate the diagram by analyzing the M204 code directly.
@@ -473,6 +602,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "m204_procedures",
             "title": "## 3. M204 Procedures",
+            "required_data": ["procedures", "source_file_llm_summaries"],
             "instructions": """
    (Based on 'M204 Procedures Data' and relevant 'Source File LLM-Generated Summaries' for M204 files:
     - For each procedure, write a descriptive paragraph. This paragraph should cover its name, type, and its target COBOL program name for generation (if specified).
@@ -490,6 +620,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
         "id": "m204_file_definitions",
         "title": "## 4. M204 File Definitions",
+        "required_data": ["m204_files", "source_file_llm_summaries"],
         "instructions": """
         Based on the 'M204 File Definitions and Main Processing Loops Data' and any relevant 'Source File LLM-Generated Summaries' for M204 files:
 
@@ -513,6 +644,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "m204_file_vsam_jcl_diagram",
             "title": "### 4.1. M204 File and Associated VSAM/JCL Diagram",
+            "required_data": ["m204_files", "dd_statements"],
             "instructions": """
       (Based on 'M204 File Definitions Data' (`m204_file_name`, `target_vsam_dataset_name`) and 'JCL DD Statements Data' (`dd_name`, `dsn`), generate a Mermaid flowchart diagram.
        The diagram should show each M204 file and its target VSAM dataset name.
@@ -535,6 +667,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "global_variables",
             "title": "## 5. Global/Public M204 Variables",
+            "required_data": ["global_variables"],
             "instructions": """
    (Based on 'Global/Public M204 Variables Data':
     - Begin with an introductory paragraph about the role of global/public variables in the system.
@@ -545,6 +678,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "jcl_dd_statements",
             "title": "## 6. JCL DD Statements",
+            "required_data": ["dd_statements", "source_file_llm_summaries"],
             "instructions": """
    (Based on 'JCL DD Statements Data' and relevant 'Source File LLM-Generated Summaries' for JCL files:
     - Start with a paragraph describing the role of JCL DD statements in interfacing the M204 application with datasets. Refer to the LLM-generated summaries for the JCL files to provide context on the overall purpose of the JCLs containing these DD statements.
@@ -555,6 +689,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "jcl_job_step_flow_diagram",
             "title": "### 6.1. JCL Job/Step Flow Diagram",
+            "required_data": ["dd_statements"],
             "instructions": """
       (Based on 'JCL DD Statements Data' (`job_name`, `step_name`, `dd_name`, `dsn`), generate a Mermaid flowchart diagram illustrating the JCL job and step flow.
        Group DD statements under their respective steps, and steps under their respective jobs.
@@ -580,6 +715,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "procedure_call_flow",
             "title": "## 7. Procedure Call Flow",
+            "required_data": ["procedure_calls", "procedures"],
             "instructions": """
    (Based on 'Procedure Call Relationships Data':
     - Describe the procedure call flow using narrative paragraphs to explain major sequences or interactions.
@@ -590,6 +726,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "procedure_call_diagram",
             "title": "### 7.1. Procedure Call Diagram",
+            "required_data": ["procedure_calls"],
             "instructions": """
       (Based on the 'Procedure Call Relationships Data', generate a Mermaid flowchart diagram (e.g., `graph TD;` for Top-Down or `graph LR;` for Left-to-Right) illustrating the direct call relationships between procedures.
        The diagram should clearly show which procedure calls which other procedure(s). Use the actual procedure names found in the data.
@@ -607,6 +744,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "data_dictionary",
             "title": "## 8. Data Dictionary / Key Data Elements",
+            "required_data": ["m204_files", "global_variables", "procedures"],
             "instructions": """
    (Synthesize information from 'M204 File Definitions Data' (primarily `file_definition_json` if available for field details), 'Global/Public M204 Variables Data', and 'M204 Procedures Data' (variables_in_procedure).
     - Describe key data elements in paragraphs. For each element or group of related elements, discuss its apparent meaning and use.
@@ -617,14 +755,16 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "external_interfaces",
             "title": "## 9. External Interfaces",
+            "required_data": ["dd_statements", "m204_files", "procedure_calls"],
             "instructions": """
-   (Infer from 'JCL DD Statements Data' (DSNs) and 'M204 File Definitions Data' (attributes suggesting external links).
+   (Infer from 'JCL DD Statements Data' (DSNs), 'M204 File Definitions Data' (attributes suggesting external links), and 'Procedure Call Relationships Data' (`is_external` flag).
     - Describe in paragraph form any identified external systems, datasets, or interfaces that the M204 application interacts with. Explain the nature of these interactions if discernible.)
 """
         },
         {
             "id": "non_functional_requirements",
             "title": "## 10. Non-Functional Requirements",
+            "required_data": full_context_data,
             "instructions": """
    (Review all provided data for hints towards non-functional requirements.
     - Describe any identified NFRs (e.g., performance considerations from file attributes, security aspects from field encryption, operational constraints) in paragraph form.
@@ -633,6 +773,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "other_observations",
             "title": "## 11. Other Observations / Summary",
+            "required_data": full_context_data,
             "instructions": """
    (Provide a concluding summary of the system in narrative paragraphs. Highlight any overarching patterns, complexities, or notable observations that don't fit neatly into other sections. Address points from the 'Additional Instructions/Custom Section from User' here if not covered elsewhere.)
 """
@@ -640,6 +781,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "technical_requirements_main",
             "title": "# Technical Requirements",
+            "required_data": [], # This is just a title section
             "instructions": """
    (This section is intended for a high-level technical audience like Project Management and CTO.
     It should provide a structured, detailed overview of the system's technical aspects based on the provided data.
@@ -649,6 +791,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "tech_req_architecture",
             "title": "### A. System Architecture Overview",
+            "required_data": tech_overview_data,
             "instructions": """
    (Describe the high-level components of the M204-based system and their primary roles.
     Illustrate how M204 procedures (distinguishing between `m204_proc_type` like ONLINE, BATCH, INCLUDE, SUBROUTINE), the target COBOL programs to be generated from them (as indicated by `target_cobol_function_name`), JCL (from `DDStatement` data providing `job_name`, `step_name`, `dd_name`, `dsn`, and `disposition`), and M204 files/VSAM datasets (from `M204File` data, including `m204_file_name`, `target_vsam_dataset_name`, `target_vsam_type`) interact to form the overall system architecture. **Use the 'Source File LLM-Generated Summaries' to provide context on the purpose of specific JCL files or M204 source modules.**
@@ -658,6 +801,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "tech_req_data_model",
             "title": "### B. Data Model and Management",
+            "required_data": ["m204_files", "source_file_llm_summaries"],
             "instructions": """
    (Detail the key data entities managed by the system, as identified from `M204 File Definitions Data` (specifically `m204_file_name` and its associated `file_definition_json` if present). For each M204 file, describe its purpose (e.g., master data, transactional data, index files, work files) based on its name, attributes, and any field information available in `file_definition_json`. **Corroborate with 'Source File LLM-Generated Summaries' for M204 files.**
     Explain how data is stored, referencing `M204File.is_db_file`, `M204File.target_vsam_dataset_name`, and `M204File.target_vsam_type` (e.g., KSDS, ESDS).
@@ -676,6 +820,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "tech_req_core_processing",
             "title": "### C. Core Processing Logic and Control Flow",
+            "required_data": ["procedures", "procedure_calls", "global_variables", "source_file_llm_summaries"],
             "instructions": """
    (Explain the main processing sequences and business logic implemented within the M204 procedures, referencing their `m204_proc_type` and their relationship to the target COBOL programs to be generated. **Contextualize with 'Source File LLM-Generated Summaries' for the M204 files containing these procedures.**
     Highlight critical procedures or call chains by analyzing `Procedure Call Relationships Data` (using `calling_procedure_name`, `called_procedure_name`, `line_number` of call, and `is_external` flag). Discuss the significance of frequently called procedures or key external calls.
@@ -689,6 +834,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "tech_req_external_interfaces",
             "title": "### D. External Interfaces and Dependencies",
+            "required_data": ["dd_statements", "m204_files", "procedure_calls", "source_file_llm_summaries"],
             "instructions": """
    (List and describe all identified external systems, datasets, or services that the M204 application interacts with.
     Base this on:
@@ -701,6 +847,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "tech_req_tech_stack",
             "title": "### E. Technology Stack and Environment",
+            "required_data": tech_overview_data,
             "instructions": """
    (Summarize the core technologies used, based on available data:
     - **Model 204:** Note its role (e.g., primary application logic, database). Mention specific features used if inferable from `Procedure.m204_proc_type` (ONLINE, BATCH, INCLUDE, SUBROUTINE indicating User Language/SOUL usage), `M204File.m204_attributes`, or field attributes. **Refer to 'Source File LLM-Generated Summaries' for M204 files for broader context on how M204 is utilized.**
@@ -717,6 +864,7 @@ def _get_sections_config() -> List[Dict[str, str]]:
         {
             "id": "tech_req_nfr_inferred",
             "title": "### F. Key Non-Functional Aspects (Inferred)",
+            "required_data": full_context_data,
             "instructions": """
    (Based on the detailed analysis in section 9 and the overall system data, reiterate and detail any significant non-functional requirements or characteristics critical from a technical perspective. Be specific by referencing the data points that lead to these inferences.
     - **Performance:**
@@ -744,9 +892,6 @@ def _get_sections_config() -> List[Dict[str, str]]:
 
 
 
-
-
-
 async def _generate_llm_section(
     section_id: str,
     section_title: str,
@@ -756,7 +901,12 @@ async def _generate_llm_section(
 ) -> str:
     """
     Generates content for a single section of the requirements document using the LLM.
+    Includes a validation and self-correction loop for Mermaid diagrams.
     """
+    # If there are no instructions and no data, it's likely a title-only section.
+    if not section_instructions.strip() and not formatted_data_for_prompt.strip():
+        return section_title
+
     prompt_for_section = f"""
 You are a senior technical analyst and writer. Your task is to generate the content for *only* the following section of a Software Requirements Specification (SRS) document in Markdown format for an existing M204-based system.
 The section content should be based *solely* on the structured data provided below. Do not invent information not present in the provided data.
@@ -772,7 +922,7 @@ Emphasize the use of **paragraphs for description and bullet points for lists of
 
 **Input Data (Summary of system components and relationships):**
 --- BEGIN SYSTEM DATA ---
-{formatted_data_for_prompt}
+{formatted_data_for_prompt if formatted_data_for_prompt.strip() else "No specific data provided for this section."}
 --- END SYSTEM DATA ---
 
 {f"**Additional Instructions/Custom Section from User (consider these when generating content for this section):**\n{custom_prompt_section}\n" if custom_prompt_section else ""}
@@ -819,6 +969,39 @@ Ensure the entire output for this section is valid Markdown.
                 section_content = processed_content
             
             
+            # --- MERMAID VALIDATION AND SELF-CORRECTION LOOP ---
+            mermaid_match = re.search(r"```mermaid\n(.*?)\n```", section_content, re.DOTALL)
+            if mermaid_match:
+                original_mermaid_block = mermaid_match.group(0)
+                mermaid_code = mermaid_match.group(1).strip()
+                last_error_msg = "Diagram validation failed."
+
+                for attempt in range(MAX_MERMAID_FIX_ATTEMPTS):
+                    is_valid, error_msg, error_line = await _validate_mermaid_code(mermaid_code)
+                    
+                    if is_valid:
+                        log.info(f"Mermaid diagram in section '{section_id}' is valid after {attempt} fix attempts.")
+                        # If the code was fixed, replace it in the main content
+                        if attempt > 0:
+                            new_mermaid_block = f"```mermaid\n{mermaid_code}\n```"
+                            section_content = section_content.replace(original_mermaid_block, new_mermaid_block)
+                        break # Exit the loop on success
+                    
+                    last_error_msg = error_msg or "Unknown validation error."
+                    log.warning(f"Mermaid fix attempt {attempt + 1}/{MAX_MERMAID_FIX_ATTEMPTS} for section '{section_id}' failed. Error: {last_error_msg}")
+
+                    if attempt < MAX_MERMAID_FIX_ATTEMPTS - 1: # Don't try to fix on the last attempt
+                        fixed_code = await _attempt_to_fix_mermaid_code(mermaid_code, last_error_msg, error_line or 0)
+                        if fixed_code:
+                            mermaid_code = fixed_code # Update code for the next validation cycle
+                        else:
+                            log.error(f"LLM could not provide a fix for section '{section_id}'. Aborting fix attempts.")
+                            break # Abort if LLM fails to provide a fix
+                else: # This 'else' belongs to the 'for' loop, executes if the loop finishes without a 'break'
+                    log.error(f"Failed to validate Mermaid diagram for section '{section_id}' after {MAX_MERMAID_FIX_ATTEMPTS} attempts.")
+                    error_block = f"```\n[Mermaid Diagram Generation Failed]\nThe LLM failed to generate a valid diagram after multiple correction attempts. The final error was:\n{last_error_msg}\n```"
+                    section_content = section_content.replace(original_mermaid_block, error_block)
+
 
             if not section_content.lstrip().startswith(section_title):
                 log.warning(f"LLM output for section '{section_id}' did not start with the expected title. Expected: '{section_title}'. Got: '{section_content[:200]}'. Prepending title.")
@@ -846,10 +1029,6 @@ Ensure the entire output for this section is valid Markdown.
         log.debug(f"Prompt length for failed section '{section_id}': {len(prompt_for_section)}")
         return f"{section_title}\n\nError generating content for this section: {str(e_llm_section)}"
 
-
-
-
-
 async def generate_and_save_project_requirements_document(
     db: Session,
     project_id: int,
@@ -859,7 +1038,7 @@ async def generate_and_save_project_requirements_document(
     """
     Generates a comprehensive Software Requirements Specification (SRS) document
     in Markdown format for a given project using an LLM.
-    Each major section is generated via an LLM call, with concurrency limited by a semaphore.
+    Each major section is generated via an LLM call with a tailored data payload.
     """
     log.info(f"Starting requirements document generation for project ID: {project_id} with options: {options.model_dump_json(exclude_none=True)}")
     log.info(f"Concurrency for LLM calls is limited to {MAX_CONCURRENT_LLM_CALLS}.")
@@ -877,9 +1056,6 @@ async def generate_and_save_project_requirements_document(
         log.error(f"Failed to fetch project data for LLM (Project ID: {project_id}): {e_fetch}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch project data: {str(e_fetch)}")
 
-    formatted_data_for_prompt = _construct_llm_prompt_content(project_data_for_llm, options)
-    log.info(f"Formatted data for LLM prompt constructed. Length: {len(formatted_data_for_prompt)}")
-
     project_name = project_data_for_llm.get("project_info", {}).get("project_name", f"Project {project_id}")
     document_title = f"Requirements Document for {project_name}"
     
@@ -888,12 +1064,24 @@ async def generate_and_save_project_requirements_document(
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
 
-    async def generate_with_semaphore(section_conf: Dict[str, str]) -> str:
+    async def generate_with_semaphore(section_conf: Dict[str, Any]) -> str:
         """Wrapper to acquire semaphore before calling the LLM generation function."""
         async with semaphore:
             section_id = section_conf["id"]
             section_title = section_conf["title"]
             section_instructions = section_conf["instructions"]
+            required_data_keys = section_conf.get("required_data", [])
+
+            # Create a targeted data subset for the current section
+            targeted_project_data = {
+                key: project_data_for_llm[key] 
+                for key in required_data_keys 
+                if key in project_data_for_llm
+            }
+            
+            # Generate prompt content just for this section's data
+            formatted_data_for_prompt = _construct_llm_prompt_content(targeted_project_data)
+
             log.info(f"Acquired semaphore for section: {section_id} - '{section_title}'")
             return await _generate_llm_section(
                 section_id=section_id,
@@ -907,18 +1095,11 @@ async def generate_and_save_project_requirements_document(
 
     try:
         log.info(f"Executing {len(generation_tasks)} section generation tasks with a concurrency limit of {MAX_CONCURRENT_LLM_CALLS}.")
-        # asyncio.gather runs tasks concurrently, but the semaphore limits how many are active at once.
-        # _generate_llm_section is designed to return a string (content or error message),
-        # so exceptions from the LLM call itself are handled within that function.
         generated_sections_content = await asyncio.gather(*generation_tasks)
         markdown_parts.extend(generated_sections_content)
         log.info("All parallel section generation tasks completed.")
     except Exception as e_gather:
-        # This would catch exceptions if asyncio.gather itself fails, or if a task raises an
-        # exception not caught by _generate_llm_section (which is unlikely given its try/except).
         log.error(f"Error during parallel generation of sections: {e_gather}", exc_info=True)
-        # Append a generic error message; individual failed sections should have their own error messages
-        # from _generate_llm_section.
         markdown_parts.append(f"\n\n## Error During Document Assembly\n\nAn error occurred while assembling the document sections: {str(e_gather)}")
 
 
@@ -956,8 +1137,6 @@ async def generate_and_save_project_requirements_document(
             log.warning(f"Could not parse generation_options_json for response for doc ID {db_document.requirement_document_id}: {e_parse_resp}")
             response_data.generation_options_used = None 
     return response_data
-
-
 
 # --- CRUD functions for RequirementDocument ---
 

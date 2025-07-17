@@ -16,6 +16,8 @@ logs/
 #temp folders
 temp_uploads/
 
+node_modules/
+
 #debug prompts
 debug_prompts/
 

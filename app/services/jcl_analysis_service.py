@@ -33,10 +33,10 @@ async def _extract_and_store_dd_statements_from_jcl(
     db: Session, input_source: InputSource, file_content: str
 ) -> Tuple[List[DDStatement], List[M204File]]:
     """
-    Extracts DD statements from JCL content, stores them, and identifies/updates
-    associated M204File records.
-    If a DD statement DSN matches M204 DB patterns, it will create or update
-    an M204File entry, marking it as is_db_file = True, **but only if there is an OPEN statement for that file**.
+    Extracts DD statements from JCL content, stores them, and creates or updates
+    an associated M204File record for every DD statement.
+    The logic to identify a true M204 DB file (DSN pattern + OPEN statement) is
+    used to set the 'is_db_file' flag on the M204File record.
     Returns a list of created/updated DDStatement objects and a list of
     M204File objects that were affected by this JCL.
     """
@@ -51,7 +51,7 @@ async def _extract_and_store_dd_statements_from_jcl(
     current_job_name: Optional[str] = None
     current_step_name: Optional[str] = None
 
-    # --- NEW: Preload all open statement file names for this project ---
+    # Preload all open statement file names for this project for efficient lookup
     open_stmt_file_names = set(
         row[0].upper()
         for row in db.query(M204OpenStatement.m204_file_name)
@@ -60,7 +60,7 @@ async def _extract_and_store_dd_statements_from_jcl(
             .all()
         if row[0]
     )
-    log.info(f"JCL_SERVICE: Loaded {len(open_stmt_file_names)} OPEN statement file names for project {input_source.project_id}: {open_stmt_file_names}")
+    log.info(f"JCL_SERVICE: Loaded {len(open_stmt_file_names)} OPEN statement file names for project {input_source.project_id}.")
 
     for i, line_content_full in enumerate(lines):
         line_num = i + 1
@@ -73,13 +73,11 @@ async def _extract_and_store_dd_statements_from_jcl(
         if job_match := job_pattern.match(line_stripped):
             current_job_name = job_match.group(1)
             current_step_name = None
-            log.debug(f"JCL_SERVICE_PARSE: JOB detected: {current_job_name} at line {line_num}")
             continue
         if exec_match := exec_pattern.match(line_stripped):
             current_step_name = exec_match.group(1) or \
                                 (f"PGM_{exec_match.group(2)}" if exec_match.group(2) else \
                                 (f"PROC_{exec_match.group(3)}" if exec_match.group(3) else "ANON_STEP"))
-            log.debug(f"JCL_SERVICE_PARSE: EXEC detected: {current_step_name} in JOB {current_job_name} at line {line_num}")
             continue
 
         dd_match = dd_pattern.match(line_stripped)
@@ -88,113 +86,98 @@ async def _extract_and_store_dd_statements_from_jcl(
             dd_params_str = dd_match.group(2)
             dd_name = dd_name_raw.strip().upper()
 
-            log.debug(f"JCL_SERVICE_PARSE: DD statement found: Name='{dd_name}' (Raw='{dd_name_raw}'), Params='{dd_params_str[:100]}...' at line {line_num} in Job='{current_job_name}', Step='{current_step_name}'")
+            log.debug(f"JCL_SERVICE_PARSE: DD statement found: Name='{dd_name}' at line {line_num}")
 
             dsn_val: Optional[str] = None
             disp_val: Optional[str] = None
             params_dict: Dict[str, Any] = {"raw_parameters_string": dd_params_str}
 
-            dsn_search = re.search(r"(?:DSN|DATASET)\s*=\s*((?:[^,\s(]+(?:\([^)]+\))?)|(?:&[^,\s]+))", dd_params_str, re.IGNORECASE)
-            if dsn_search:
+            if dsn_search := re.search(r"(?:DSN|DATASET)\s*=\s*((?:[^,\s(]+(?:\([^)]+\))?)|(?:&[^,\s]+))", dd_params_str, re.IGNORECASE):
                 dsn_val = dsn_search.group(1)
-                log.debug(f"JCL_SERVICE_PARSE: Extracted DSN: '{dsn_val}' for DD '{dd_name}'")
 
-            disp_search = re.search(r"DISP\s*=\s*(?:\(([^)]+)\)|([A-Z0-9#@$-]+(?:,[A-Z0-9#@$-]+)*))", dd_params_str, re.IGNORECASE)
-            if disp_search:
+            if disp_search := re.search(r"DISP\s*=\s*(?:\(([^)]+)\)|([A-Z0-9#@$-]+(?:,[A-Z0-9#@$-]+)*))", dd_params_str, re.IGNORECASE):
                 disp_val = disp_search.group(1) or disp_search.group(2)
-                log.debug(f"JCL_SERVICE_PARSE: Extracted DISP: '{disp_val}' for DD '{dd_name}'")
 
+            # Check for M204 DB DSN pattern
             is_explicit_m204_db_dsn = False
-            if dsn_val:
-                if re.search(r"\.DBASEF", dsn_val, re.IGNORECASE) or \
-                   re.search(r"\.[A-Z0-9#@$-]*204", dsn_val, re.IGNORECASE) or \
-                   re.search(r"M204\.DB", dsn_val, re.IGNORECASE):
-                    is_explicit_m204_db_dsn = True
-                    log.debug(f"JCL_SERVICE_PARSE: DSN '{dsn_val}' for DD '{dd_name}' identified as explicit M204 DB DSN.")
+            if dsn_val and (re.search(r"\.DBASEF", dsn_val, re.IGNORECASE) or \
+                           re.search(r"\.[A-Z0-9#@$-]*204", dsn_val, re.IGNORECASE) or \
+                           re.search(r"M204\.DB", dsn_val, re.IGNORECASE)):
+                is_explicit_m204_db_dsn = True
 
-            # --- NEW: Only treat as DB file if this DDNAME is referenced by an OPEN statement ---
+            # Check if the DDNAME is referenced in an OPEN statement
             is_open_stmt_file = dd_name in open_stmt_file_names
-            if is_explicit_m204_db_dsn and not is_open_stmt_file:
-                log.info(f"JCL_SERVICE: DD '{dd_name}' matches M204 DB DSN pattern but is not referenced by any OPEN statement. Will NOT treat as DB file.")
-            elif is_explicit_m204_db_dsn and is_open_stmt_file:
-                log.info(f"JCL_SERVICE: DD '{dd_name}' matches M204 DB DSN pattern and is referenced by an OPEN statement. Will treat as DB file.")
 
-            log.debug(f"JCL_SERVICE_MATCH: Looking up M204File with m204_file_name (DDNAME) '{dd_name}' for project ID {input_source.project_id}")
+            # Determine if this DD statement represents a true M204 DB file
+            is_m204_db_file = is_explicit_m204_db_dsn and is_open_stmt_file
+            if is_m204_db_file:
+                log.info(f"JCL_SERVICE: DD '{dd_name}' matches DB DSN pattern and is in an OPEN statement. Will be marked as a DB file.")
+
+            # Find or create the M204File record for this DD statement
             existing_m204_file = db.query(M204File).filter(
                 M204File.project_id == input_source.project_id,
                 func.upper(M204File.m204_file_name) == dd_name
             ).first()
 
             if existing_m204_file:
-                log.info(f"JCL_SERVICE_MATCH: Found matching M204File for JCL DD '{dd_name}': ID={existing_m204_file.m204_file_id}, Stored m204_file_name='{existing_m204_file.m204_file_name}'")
+                log.info(f"JCL_SERVICE_MATCH: Found existing M204File for DD '{dd_name}' (ID: {existing_m204_file.m204_file_id}).")
                 update_m204_file = False
-                # Only mark as DB file if both criteria are met
-                if is_explicit_m204_db_dsn and is_open_stmt_file and existing_m204_file.is_db_file is not True:
+                
+                # If JCL analysis confirms this is a DB file, and it wasn't marked as such, update it.
+                if is_m204_db_file and not existing_m204_file.is_db_file:
                     existing_m204_file.is_db_file = True
                     if dsn_val:
-                        existing_m204_file.target_vsam_dataset_name = dsn_val  # <-- Only set for DB files
+                        existing_m204_file.target_vsam_dataset_name = dsn_val
                     update_m204_file = True
-                    log.debug(f"JCL_SERVICE_UPDATE: Marking M204File '{dd_name}' as DB file due to explicit DSN and OPEN statement.")
-                elif (not is_explicit_m204_db_dsn or not is_open_stmt_file) and existing_m204_file.is_db_file is None:
+                    log.info(f"JCL_SERVICE_UPDATE: Marking existing M204File '{dd_name}' as a DB file.")
+                # If the file's DB status is unknown (None), and this JCL does not confirm it's a DB file, mark it as False.
+                elif not is_m204_db_file and existing_m204_file.is_db_file is None:
                     existing_m204_file.is_db_file = False
                     update_m204_file = True
-                    log.debug(f"JCL_SERVICE_UPDATE: Marking M204File '{dd_name}' as NOT a DB file (is_db_file=None previously).")
-
-                # Do NOT set target_vsam_dataset_name for non-DB files anymore
+                    log.info(f"JCL_SERVICE_UPDATE: Marking existing M204File '{dd_name}' as NOT a DB file (was previously NULL).")
 
                 if update_m204_file:
                     db.add(existing_m204_file)
                     if existing_m204_file not in m204_files_affected_by_jcl:
                         m204_files_affected_by_jcl.append(existing_m204_file)
-                    log.info(f"JCL_SERVICE_UPDATE: Updated M204File '{existing_m204_file.m204_file_name}' (ID: {existing_m204_file.m204_file_id}) based on JCL DD statement '{dd_name}'.")
-            elif is_explicit_m204_db_dsn and is_open_stmt_file:  # Only create if both criteria are met
-                log.info(f"JCL_SERVICE_CREATE_M204: No existing M204File found for DDNAME '{dd_name}'. Creating new M204File entry as it's an explicit M204 DB DSN ('{dsn_val}') and referenced by an OPEN statement.")
+
+            else: # No existing M204File found, create a new one for this DD statement.
+                log.info(f"JCL_SERVICE_CREATE_M204: No existing M204File for DD '{dd_name}'. Creating new entry.")
                 new_m204_file = M204File(
                     project_id=input_source.project_id,
-                    m204_file_name=dd_name,  # DDNAME from JCL
-                    m204_logical_dataset_name=None,  # No M204 logical name known from JCL alone at this stage
-                    defined_in_input_source_id=input_source.input_source_id,  # Defined/Identified in this JCL
-                    definition_line_number_start=line_num,  # Line number of the DD statement
-                    definition_line_number_end=line_num,    # Line number of the DD statement
-                    is_db_file=True,  # Explicitly an M204 DB file based on DSN and OPEN
-                    m204_attributes=f"Identified as M204 DB file from JCL DD: {dd_name}, DSN: {dsn_val}",
-                    target_vsam_dataset_name=dsn_val  # DSN from JCL
+                    m204_file_name=dd_name,
+                    m204_logical_dataset_name=None, # Not known from JCL alone
+                    defined_in_input_source_id=input_source.input_source_id,
+                    definition_line_number_start=line_num,
+                    definition_line_number_end=line_num,
+                    is_db_file=is_m204_db_file, # Set based on the combined check
+                    m204_attributes=f"Identified from JCL DD: {dd_name}, DSN: {dsn_val}",
+                    # Only set the target DSN if it's identified as a DB file
+                    target_vsam_dataset_name=dsn_val if is_m204_db_file else None
                 )
                 db.add(new_m204_file)
                 if new_m204_file not in m204_files_affected_by_jcl:
                     m204_files_affected_by_jcl.append(new_m204_file)
-                log.info(f"JCL_SERVICE_CREATE_M204: Created new M204File '{new_m204_file.m204_file_name}' (pending ID) as DB file based on JCL DD statement '{dd_name}'.")
-            else:  # No existing M204File and not an explicit M204 DB DSN or not referenced by OPEN
-                log.warning(f"JCL_SERVICE_MATCH: JCL DD statement for '{dd_name}' (DSN: '{dsn_val}') in {input_source.original_filename} (project_id: {input_source.project_id}, line: {line_num}) does not match any existing M204File by m204_file_name (DDNAME), is not an explicit M204 DB DSN, or is not referenced by an OPEN statement. No M204File created or updated from this DD.")
+                log.info(f"JCL_SERVICE_CREATE_M204: Created new M204File '{new_m204_file.m204_file_name}'. Is DB file: {is_m204_db_file}.")
 
-            # Process DDStatement itself (create or update)
+            # Process the DDStatement model itself (create or update)
             existing_dd = db.query(DDStatement).filter_by(
                 project_id=input_source.project_id,
                 input_source_id=input_source.input_source_id,
-                job_name=current_job_name,
-                step_name=current_step_name,
                 dd_name=dd_name,
-                line_number_start=line_num  # Assuming DDs are unique by this combination for now
+                line_number_start=line_num
             ).first()
 
             if existing_dd:
                 update_dd_needed = False
-                if existing_dd.parameters_json.get("raw_parameters_string") != dd_params_str:
-                    existing_dd.parameters_json = params_dict
-                    update_dd_needed = True
                 if existing_dd.dsn != dsn_val:
                     existing_dd.dsn = dsn_val
                     update_dd_needed = True
                 if existing_dd.disposition != disp_val:
                     existing_dd.disposition = disp_val
                     update_dd_needed = True
-                if existing_dd.raw_statement_text != line_stripped:
-                    existing_dd.raw_statement_text = line_stripped
-                    update_dd_needed = True
-
                 if update_dd_needed:
                     db.add(existing_dd)
-                    log.info(f"JCL_SERVICE_DD: Updating existing DDStatement '{dd_name}' (ID: {existing_dd.dd_statement_id}).")
                 dd_statements_processed.append(existing_dd)
             else:
                 try:
@@ -207,19 +190,20 @@ async def _extract_and_store_dd_statements_from_jcl(
                         dsn=dsn_val,
                         disposition=disp_val,
                         line_number_start=line_num,
-                        line_number_end=line_num,  # For single line DD, start and end are same
+                        line_number_end=line_num,
                         raw_statement_text=line_stripped,
                         parameters_json=params_dict
                     )
                     db_dd_statement = DDStatement(**dd_data.model_dump(exclude_none=True))
                     db.add(db_dd_statement)
                     dd_statements_processed.append(db_dd_statement)
-                    log.info(f"JCL_SERVICE_DD: Created new DDStatement '{dd_name}'.")
                 except Exception as e:
                     log.error(f"JCL_SERVICE_DD: Error creating DB entry for DD statement '{dd_name}' at line {line_num}: {e}", exc_info=True)
 
-    log.info(f"JCL_SERVICE: Finished extracting {len(dd_statements_processed)} DD statements and identified {len(m204_files_affected_by_jcl)} affected/created M204 files from JCL file ID: {input_source.input_source_id}.")
-    return dd_statements_processed, m204_files_affected_by_jcl 
+    log.info(f"JCL_SERVICE: Finished extracting {len(dd_statements_processed)} DD statements and identified/created {len(m204_files_affected_by_jcl)} M204 files from JCL file ID: {input_source.input_source_id}.")
+    return dd_statements_processed, m204_files_affected_by_jcl
+
+
 
 async def _generate_jcl_description_iteratively_with_llm(file_content: str, original_filename: str) -> str:
     """

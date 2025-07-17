@@ -47,7 +47,7 @@ class M204ProcedureBaseSchema(BaseModel):
     procedure_content: Optional[str] = None
     summary: Optional[str] = None
     target_cobol_function_name: Optional[str] = None # MODIFIED HERE
-    suggested_test_cases_json: Optional[List[Dict[str, Any]]] = None
+    suggested_test_cases_json: Optional[List[Dict[str, Any]]] = Field(default=None, description="Test cases grouped by suggested COBOL paragraph.")
 
 class M204ProcedureCreateSchema(M204ProcedureBaseSchema):
     project_id: int

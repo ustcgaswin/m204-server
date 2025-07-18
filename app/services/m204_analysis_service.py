@@ -431,8 +431,11 @@ If no specific test cases can be generated, return an empty list for "test_cases
                             generated_test_cases_by_paragraph.append(test_case_output.model_dump())
                             log.info(f"M204_LLM_TASK: Generated {len(test_case_output.test_cases)} test cases for paragraph {para_name}.")
                     except Exception as e_test_case_llm:
-                        log.error(f"M204_LLM_TASK: Error parsing test case LLM response for paragraph {para_name}: {e_test_case_llm}. Raw output: '{result_or_exc.text if result_or_exc else 'N/A'}'", exc_info=True)
-
+                        log.error(
+                f"M204_LLM_TASK: Error parsing test case LLM response for paragraph {para_name}: {e_test_case_llm}. "
+                f"Raw output: '{getattr(result_or_exc, 'raw', None)}'",
+                exc_info=True
+            )
             if generated_test_cases_by_paragraph:
                 suggested_test_cases_json = generated_test_cases_by_paragraph
         else:
@@ -2202,4 +2205,13 @@ Do not include markdown backticks or any other text outside the JSON structure.
         db.add(m204_file)
 
     except (json.JSONDecodeError, Exception) as e_llm:
-        log.error(f"M204_VSAM_ENHANCE: Error during LLM call or parsing for {m204_file.m204_file_name}. Error: {e_llm}. Raw output: '{json_text_output or 'N/A'}'", exc_info=True)
+        raw_output = None
+        try:
+            # Try to get raw output from completion_response if available
+            raw_output = completion_response.raw if 'completion_response' in locals() and hasattr(completion_response, 'raw') else json_text_output
+        except Exception:
+            raw_output = json_text_output
+        log.error(
+            f"M204_VSAM_ENHANCE: Error during LLM call or parsing for {m204_file.m204_file_name}. Error: {e_llm}. Raw output: '{raw_output}'",
+            exc_info=True
+        )

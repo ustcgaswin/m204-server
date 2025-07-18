@@ -53,13 +53,16 @@ async def _extract_and_store_dd_statements_from_jcl(
 
     # Preload all open statement file names for this project for efficient lookup
     open_stmt_file_names = set(
-        row[0].upper()
-        for row in db.query(M204OpenStatement.m204_file_name)
-            .filter(M204OpenStatement.project_id == input_source.project_id)
-            .distinct()
-            .all()
-        if row[0]
-    )
+    row[0].upper()
+    for row in db.query(M204OpenStatement.m204_file_name)
+        .filter(
+            M204OpenStatement.project_id == input_source.project_id,
+            M204OpenStatement.statement_type.in_(["OPEN", "OPENC"])  # Include both OPEN and OPENC
+        )
+        .distinct()
+        .all()
+    if row[0]
+)
     log.info(f"JCL_SERVICE: Loaded {len(open_stmt_file_names)} OPEN statement file names for project {input_source.project_id}.")
 
     for i, line_content_full in enumerate(lines):

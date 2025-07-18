@@ -213,7 +213,7 @@ async def _extract_m204_files_from_parmlib(
 
     lines = file_content.splitlines()
     field_def_pattern = re.compile(
-        r"^\s*DEFINE\s+FIELD\s+([A-Z0-9_#@$-]+)",
+        r"^\s*DEFINE\s+FIELD\s+(?:'([^']+)'|\"([^\"]+)\"|([A-Z0-9_#@$\-]+))",
         re.IGNORECASE
     )
     root_cmd_pattern = re.compile(
@@ -265,7 +265,7 @@ async def _extract_m204_files_from_parmlib(
         # Detect field definitions
         m_field = field_def_pattern.match(line_stripped)
         if m_field:
-            field_name = m_field.group(1)
+            field_name = m_field.group(1) or m_field.group(2) or m_field.group(3)
             log.debug(
                 f"Line {start_line}: matched DEFINE FIELD, parsing: "
                 f"{line_for_parsing!r}"

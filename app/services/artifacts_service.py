@@ -154,8 +154,15 @@ COBOL Code:
     - `expected_outputs`: Key-value pairs of expected output variables, screen elements, or file states and their values.
     - `expected_behavior_description`: A textual description of the expected behavior, side effects, or outcome.
 
+**CRITICAL JSON FORMATTING RULES:**
+- Use only valid JSON syntax - NO JavaScript expressions, method calls, or operators
+- For repeated characters, write out the actual string literals
+- For concatenated strings, provide the final concatenated result as a literal string
+- All values must be JSON primitives (string, number, boolean, null, array, object)
+- NO .repeat(), + operators, or any programming language constructs
+
 **Output Format:**
-Respond ONLY with a JSON object matching this structure:
+Respond ONLY with a valid JSON object matching this structure:
 {{
   "cobol_paragraph_name": "{paragraph_name}",
   "test_cases": [
@@ -175,11 +182,10 @@ Respond ONLY with a JSON object matching this structure:
       "expected_outputs": {{"STATUS": "NOT-FOUND", "ERROR-FLAG": "Y"}},
       "expected_behavior_description": "The paragraph should handle missing records gracefully and set ERROR-FLAG to Y."
     }}
-    // ... more test cases ...
   ]
 }}
-Do not include any explanatory text, markdown, or comments outside the JSON object.
-I want just the json
+
+IMPORTANT: Do not include any explanatory text, markdown, comments, or code blocks. Return ONLY the raw JSON object.
 """
         try:
             raw_response = await llm_config._llm.acomplete(prompt=prompt)
@@ -216,12 +222,22 @@ I want just the json
 
     
     
-    async def _llm_convert_m204_proc_to_cobol(self, proc: Procedure, rag_service=None) -> M204ProcedureToCobolParagraphsOutput:
+    
+    async def _llm_convert_m204_proc_to_cobol(
+        self,
+        proc: Procedure,
+        rag_service=None,
+        fd_context: Optional[str] = None,
+        file_control_context: Optional[str] = None
+    ) -> M204ProcedureToCobolParagraphsOutput:
         """
         Converts an M204 procedure to a list of COBOL paragraphs using LLM, with RAG context injection.
-        Handles grouped_used_variables and standalone_variables if present in LLM output.
+        Includes FD and FILE-CONTROL context for accurate variable mapping and usage reporting.
         """
-        proc_para_name_base = re.sub(r'[^A-Z0-9-]', '', proc.m204_proc_name.upper().replace('%', 'P').replace('$', 'D').replace('_', '-').replace('#','N'))[:28]
+        proc_para_name_base = re.sub(
+            r'[^A-Z0-9-]', '',
+            proc.m204_proc_name.upper().replace('%', 'P').replace('$', 'D').replace('_', '-').replace('#', 'N')
+        )[:28]
         if not proc_para_name_base or not (proc_para_name_base[0].isalpha() or proc_para_name_base[0].isdigit()):
             proc_para_name_base = "P" + (proc_para_name_base[1:] if proc_para_name_base else "")
         main_para_name = f"{proc_para_name_base}-PARA"
@@ -235,6 +251,24 @@ I want just the json
                     mappings.append(f"- M204: '{var.variable_name}' -> COBOL: '{var.cobol_mapped_variable_name}'")
             if mappings:
                 variable_mappings_str = "Use these M204 to COBOL variable mappings:\n" + "\n".join(mappings)
+
+        # --- FD and FILE-CONTROL Context ---
+        fd_context_section = ""
+        if fd_context and fd_context.strip():
+            fd_context_section += f"""
+You have the following COBOL FD (File Description) entries available for reference:
+---
+{fd_context}
+---
+"""
+        file_control_context_section = ""
+        if file_control_context and file_control_context.strip():
+            file_control_context_section += f"""
+You have the following COBOL FILE-CONTROL section available for reference:
+---
+{file_control_context}
+---
+"""
 
         if not llm_config._llm or not proc.procedure_content:
             log.warning(f"LLM not available or no content for M204 procedure: {proc.m204_proc_name}. Returning placeholder COBOL.")
@@ -301,6 +335,9 @@ You have the following relevant documentation/context for this procedure:
 {rag_context}
 ---
 
+{fd_context_section}
+{file_control_context_section}
+
 **Variable Mapping Context:**
 {variable_mappings_str}
 ---
@@ -328,7 +365,7 @@ M204 Procedure Content:
         - `cobol_variable_name`: The COBOL variable name as used in your code.
         - `cobol_variable_type`: The COBOL PIC or type (e.g., PIC 9(8), PIC X(20), etc.).
         - `usage_context`: A brief description of how the variable is used.
-    - This list will be used to generate the WORKING-STORAGE SECTION. Do NOT include variables that are not referenced in your code. If you introduce new variables (e.g., loop counters, flags), include them with appropriate types.
+    - This list will be used to generate the WORKING-STORAGE SECTION. Do NOT include variables that are already defined in the FD record layouts or FILE-CONTROL section. If you introduce new variables (e.g., loop counters, flags), include them with appropriate types.
 
 3.  **VSAM Conversion Patterns (MANDATORY):**
     - **Target is VSAM:** The target files are VSAM. Your primary goal is to convert M204 data commands into the correct COBOL VSAM I/O verbs.
@@ -400,6 +437,7 @@ Respond with a JSON object structured according to the M204ProcedureToCobolParag
 ```
 Ensure the first paragraph in the list is named '{main_para_name}' and that all generated COBOL code is correctly indented for Area B (column 12+).
 """
+
         json_text_output: Optional[str] = None
         try:
             async with self.llm_semaphore:
@@ -417,7 +455,6 @@ Ensure the first paragraph in the list is named '{main_para_name}' and that all 
             if parsed_output.paragraphs[0].paragraph_name != main_para_name:
                 log.warning(f"LLM did not name the first paragraph as requested. Expected '{main_para_name}', got '{parsed_output.paragraphs[0].paragraph_name}'. Renaming it.")
                 parsed_output.paragraphs[0].paragraph_name = main_para_name
-            # No further processing here: downstream code should check grouped_used_variables/standalone_variables if present
             return parsed_output
         except Exception as e:
             log.error(f"LLM error converting M204 procedure {proc.m204_proc_name} to COBOL: {e}. Raw output: {json_text_output}", exc_info=True)
@@ -438,6 +475,53 @@ Ensure the first paragraph in the list is named '{main_para_name}' and that all 
                 comments=f"LLM conversion failed: {safe_error_str}"
             )
 
+
+    @staticmethod
+    def format_cobol_fd_or_ws_section(section: str) -> str:
+        """
+        Formats COBOL FD or WORKING-STORAGE section for consistent indentation and spacing.
+        - Indents FD/01/05 levels to Area B (column 12+).
+        - Adds blank lines between FD entries/groups.
+        - Aligns field names and PIC clauses.
+        """
+        lines = section.splitlines()
+        formatted = []
+        prev_fd = False
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # FD line
+            if stripped.startswith("FD "):
+                if prev_fd:
+                    formatted.append("")  # Blank line between FDs
+                formatted.append(f"   {stripped}")
+                prev_fd = True
+            # 01 level
+            elif stripped.startswith("01 "):
+                formatted.append(f"      {stripped}")
+                prev_fd = False
+            # 05 level
+            elif stripped.startswith("05 "):
+                # Try to align field name and PIC clause
+                parts = stripped.split()
+                if len(parts) >= 3:
+                    field = parts[1]
+                    pic = " ".join(parts[2:])
+                    formatted.append(f"         05  {field:<30} {pic}")
+                else:
+                    formatted.append(f"         {stripped}")
+                prev_fd = False
+            # Comment or other
+            elif stripped.startswith("*"):
+                formatted.append(f"   {stripped}")
+                prev_fd = False
+            else:
+                formatted.append(f"   {stripped}")
+                prev_fd = False
+        return "\n".join(formatted)
+
+
     async def _llm_convert_file_definition_to_fd(self, m204_file: M204File) -> Optional[FileDefinitionToCobolFDOutput]:
         """Convert M204 file definition JSON to COBOL FD using LLM. Returns None if no definition exists."""
         if not m204_file.file_definition_json:
@@ -447,36 +531,39 @@ Ensure the first paragraph in the list is named '{main_para_name}' and that all 
         if not llm_config._llm:
             log.warning(f"LLM not available for M204 file: {m204_file.m204_file_name}. Returning placeholder FD because a file definition exists.")
             select_name = (m204_file.m204_logical_dataset_name or m204_file.m204_file_name or f"FILE{m204_file.m204_file_id}").replace("-", "")[:8]
+            fd_entry = f"   FD  {select_name}-FILE.\n      01  {select_name}-RECORD PIC X(80). *> Placeholder\n"
+            fd_entry = self.format_cobol_fd_or_ws_section(fd_entry)
             return FileDefinitionToCobolFDOutput(
                 logical_file_name=select_name,
                 file_control_entry=f"       SELECT {select_name}-FILE ASSIGN TO {select_name}.\n",
-                file_description_entry=f"   FD  {select_name}-FILE.\n"
-                                     f"   01  {select_name}-RECORD PIC X(80). *> Placeholder\n",
+                file_description_entry=fd_entry,
                 comments="LLM not available. Manual FD creation required."
             )
 
         file_definition = m204_file.file_definition_json
         file_type = file_definition.get('file_type', 'unknown')
 
-        # Build field information string from JSON
+        # Build field information string from JSON, including overlays and arrays
         field_info_parts = []
         vsam_key_fields = []
-        
+
         if file_type == "db_file":
-            # DB file with PARMLIB field definitions
             fields = file_definition.get('fields', {})
             for field_name, field_data in fields.items():
                 attributes = field_data.get('attributes', [])
                 vsam_suggestions = field_data.get('vsam_suggestions', {})
                 field_info = f"- Field: {field_name}, Attributes: {', '.join(attributes)}"
                 if vsam_suggestions.get('cobol_picture_clause'):
-                    field_info += f", Suggested COBOL PIC: {vsam_suggestions['cobol_picture_clause']}"
+                    field_info += f", COBOL PIC: {vsam_suggestions['cobol_picture_clause']}"
                 if vsam_suggestions.get('is_key_component'):
                     key_order = vsam_suggestions.get('key_order', 999)
                     vsam_key_fields.append((key_order, field_name))
+                if 'array_dimensions' in field_data:
+                    field_info += f", OCCURS: {field_data['array_dimensions']}"
+                if 'redefines' in field_data:
+                    field_info += f", REDEFINES: {field_data['redefines']}"
                 field_info_parts.append(field_info)
         elif file_type == "flat_file":
-            # Flat file with IMAGE definitions
             image_definitions = file_definition.get('image_definitions', [])
             for image_def in image_definitions:
                 image_name = image_def.get('image_name', 'UNKNOWN')
@@ -487,13 +574,20 @@ Ensure the first paragraph in the list is named '{main_para_name}' and that all 
                     data_type = field.get('data_type', 'UNKNOWN')
                     length = field.get('length', '')
                     suggested_cobol_pic = field.get('cobol_layout_suggestions', {}).get('cobol_picture_clause')
-                    field_info_parts.append(f"  - Field: {field_name}, Type: {data_type}, Length: {length}{f', Suggested COBOL PIC: {suggested_cobol_pic}' if suggested_cobol_pic else ''}")
+                    occurs_clause = field.get('cobol_layout_suggestions', {}).get('cobol_occurs_clause')
+                    redefines_field = field.get('cobol_layout_suggestions', {}).get('cobol_redefines_field')
+                    field_info = f"  - Field: {field_name}, Type: {data_type}, Length: {length}"
+                    if suggested_cobol_pic:
+                        field_info += f", COBOL PIC: {suggested_cobol_pic}"
+                    if occurs_clause:
+                        field_info += f", OCCURS: {occurs_clause}"
+                    if redefines_field:
+                        field_info += f", REDEFINES: {redefines_field}"
+                    field_info_parts.append(field_info)
         elif file_type == "mixed":
-            # Combined DB and flat file definitions
             field_info_parts.append("- Mixed file type with both DB and flat definitions")
             db_def = file_definition.get('db_file_definition', {})
             flat_def = file_definition.get('flat_file_definition', {})
-            # Process both definitions
             if db_def.get('fields'):
                 field_info_parts.append("  DB Fields:")
                 for field_name, field_data in db_def['fields'].items():
@@ -501,10 +595,14 @@ Ensure the first paragraph in the list is named '{main_para_name}' and that all 
                     vsam_suggestions = field_data.get('vsam_suggestions', {})
                     field_info = f"    - {field_name}: {', '.join(attributes)}"
                     if vsam_suggestions.get('cobol_picture_clause'):
-                        field_info += f", Suggested COBOL PIC: {vsam_suggestions['cobol_picture_clause']}"
+                        field_info += f", COBOL PIC: {vsam_suggestions['cobol_picture_clause']}"
                     if vsam_suggestions.get('is_key_component'):
                         key_order = vsam_suggestions.get('key_order', 999)
                         vsam_key_fields.append((key_order, field_name))
+                    if 'array_dimensions' in field_data:
+                        field_info += f", OCCURS: {field_data['array_dimensions']}"
+                    if 'redefines' in field_data:
+                        field_info += f", REDEFINES: {field_data['redefines']}"
                     field_info_parts.append(field_info)
             if flat_def.get('image_definitions'):
                 field_info_parts.append("  IMAGE Definitions:")
@@ -516,15 +614,22 @@ Ensure the first paragraph in the list is named '{main_para_name}' and that all 
                         data_type = field.get('data_type', 'UNKNOWN')
                         length = field.get('length', '')
                         suggested_cobol_pic = field.get('cobol_layout_suggestions', {}).get('cobol_picture_clause')
-                        field_info_parts.append(f"      - Field: {field_name}, Type: {data_type}, Length: {length}{f', Suggested COBOL PIC: {suggested_cobol_pic}' if suggested_cobol_pic else ''}")
+                        occurs_clause = field.get('cobol_layout_suggestions', {}).get('cobol_occurs_clause')
+                        redefines_field = field.get('cobol_layout_suggestions', {}).get('cobol_redefines_field')
+                        field_info = f"      - Field: {field_name}, Type: {data_type}, Length: {length}"
+                        if suggested_cobol_pic:
+                            field_info += f", COBOL PIC: {suggested_cobol_pic}"
+                        if occurs_clause:
+                            field_info += f", OCCURS: {occurs_clause}"
+                        if redefines_field:
+                            field_info += f", REDEFINES: {redefines_field}"
+                        field_info_parts.append(field_info)
 
-        # Compose VSAM key info for DB files
         key_field_name_for_prompt = "N/A"
         if m204_file.is_db_file:
             if vsam_key_fields:
                 vsam_key_fields.sort()
-                # Get the primary key field name, making it COBOL-friendly
-                key_names = [f[1].replace("_", "-").upper() for f in vsam_key_fields] 
+                key_names = [f[1].replace("_", "-").upper() for f in vsam_key_fields]
                 key_field_name_for_prompt = key_names[0] if key_names else "N/A"
             elif m204_file.primary_key_field_name:
                 key_field_name_for_prompt = m204_file.primary_key_field_name.replace("_", "-").upper()
@@ -532,60 +637,61 @@ Ensure the first paragraph in the list is named '{main_para_name}' and that all 
         field_info_str = "\n".join(field_info_parts) if field_info_parts else "No field information available."
 
         prompt_fstr = f"""
-You are an expert M204 to COBOL migration specialist.
-Convert the following M204 file definition into COBOL FILE-CONTROL (SELECT) and FILE SECTION (FD) entries.
+    You are an expert M204 to COBOL migration specialist.
+    Convert the following M204 file definition into COBOL FILE-CONTROL (SELECT) and FILE SECTION (FD) entries.
 
-M204 File Information:
-- File Name (DDNAME): {m204_file.m204_file_name or 'UNKNOWN'}
-- Logical Dataset Name: {m204_file.m204_logical_dataset_name or 'Not specified'}
-- File Type: {file_type}
-- Is DB File: {m204_file.is_db_file}
-- Target VSAM Type: {m204_file.target_vsam_type or 'Not specified'}
-- Primary Key Field Name: {key_field_name_for_prompt}
+    M204 File Information:
+    - File Name (DDNAME): {m204_file.m204_file_name or 'UNKNOWN'}
+    - Logical Dataset Name: {m204_file.m204_logical_dataset_name or 'Not specified'}
+    - File Type: {file_type}
+    - Is DB File: {m204_file.is_db_file}
+    - Target VSAM Type: {m204_file.target_vsam_type or 'Not specified'}
+    - Primary Key Field Name: {key_field_name_for_prompt}
 
-Field/Layout Information:
-{field_info_str}
+    Field/Layout Information:
+    {field_info_str}
 
-File Definition JSON (for detailed structure if needed by LLM):
-{json.dumps(file_definition, indent=2)}
+    File Definition JSON (for detailed structure if needed by LLM):
+    {json.dumps(file_definition, indent=2)}
 
-**Conversion Instructions:**
+    **Conversion Instructions:**
 
-1.  **FILE-CONTROL Entry (SELECT Statement):**
-    - Create a `SELECT` statement for the file.
-    - **For DB files with a Target VSAM Type of 'KSDS' (or if it's an indexed file):** You MUST include the following clauses in the `SELECT` statement:
-      - `ORGANIZATION IS INDEXED`
-      - `ACCESS MODE IS DYNAMIC` (or SEQUENTIAL/RANDOM as appropriate)
-      - `RECORD KEY IS <key-field-name>` where `<key-field-name>` is the 'Primary Key Field Name' provided above. This field must also be defined in the FD.
-    - For other file types (like ESDS or flat files), generate a standard `SELECT` statement without the INDEXED/KEY clauses.
+    1.  **FILE-CONTROL Entry (SELECT Statement):**
+        - Create a `SELECT` statement for the file.
+        - **For DB files with a Target VSAM Type of 'KSDS' (or if it's an indexed file):** You MUST include the following clauses in the `SELECT` statement:
+        - `ORGANIZATION IS INDEXED`
+        - `ACCESS MODE IS DYNAMIC` (or SEQUENTIAL/RANDOM as appropriate)
+        - `RECORD KEY IS <key-field-name>` where `<key-field-name>` is the 'Primary Key Field Name' provided above. This field must also be defined in the FD.
+        - For other file types (like ESDS or flat files), generate a standard `SELECT` statement without the INDEXED/KEY clauses.
 
-2.  **FILE SECTION Entry (FD):**
-    - Create a complete `FD` entry for the file.
-    - For DB files, create record layouts based on the PARMLIB field definitions and their 'Suggested COBOL PIC'.
-    - For flat files, use the IMAGE statement field definitions and their 'Suggested COBOL PIC'.
-    - If any field or group in the M204 definition uses `OCCURS`, generate the corresponding COBOL field/group with `OCCURS n TIMES`.
-    - **DO NOT include the `RECORD KEY` clause in the FD.** This clause belongs only in the `SELECT` statement.
-    - Add appropriate comments in the COBOL FD wherever necessary, especially for `OCCURS` arrays, `REDEFINES`, or any non-obvious mapping.
+    2.  **FILE SECTION Entry (FD):**
+        - Create a complete `FD` entry for the file.
+        - For DB files, create record layouts based on the PARMLIB field definitions and their 'Suggested COBOL PIC'.
+        - For flat files, use the IMAGE statement field definitions and their 'Suggested COBOL PIC'.
+        - If any field or group in the M204 definition uses `OCCURS`, generate the corresponding COBOL field/group with `OCCURS n TIMES`.
+        - If any field uses overlays (`AT` or `REDEFINES`), generate the corresponding COBOL `REDEFINES` clause.
+        - **DO NOT include the `RECORD KEY` clause in the FD.** This clause belongs only in the `SELECT` statement.
+        - Add appropriate comments in the COBOL FD wherever necessary, especially for `OCCURS` arrays, `REDEFINES`, or any non-obvious mapping.
 
-**Output Format:**
+    **Output Format:**
 
-The `logical_file_name` in the output JSON should be a COBOL-friendly name derived from the M204 file name.
-The `file_control_entry` should be the complete SELECT statement.
-The `file_description_entry` should be the complete FD, including the 01 record level and all 05 field levels with their PICTURE clauses.
-If `working_storage_entries` are needed, include them.
+    The `logical_file_name` in the output JSON should be a COBOL-friendly name derived from the M204 file name.
+    The `file_control_entry` should be the complete SELECT statement.
+    The `file_description_entry` should be the complete FD, including the 01 record level and all 05 field levels with their PICTURE clauses, OCCURS, and REDEFINES as needed.
+    If `working_storage_entries` are needed, include them.
 
-Respond with a JSON object structured according to the FileDefinitionToCobolFDOutput model:
-```json
-{{
-  "logical_file_name": "string",
-  "file_control_entry": "string",
-  "file_description_entry": "string",
-  "working_storage_entries": "string (optional)",
-  "comments": "string (optional)"
-}}
-```
-Ensure the FD record layout (01 and 05 levels) is complete and uses the 'Suggested COBOL PIC' from the field information provided.
-"""
+    Respond with a JSON object structured according to the FileDefinitionToCobolFDOutput model:
+    ```json
+    {{
+    "logical_file_name": "string",
+    "file_control_entry": "string",
+    "file_description_entry": "string",
+    "working_storage_entries": "string (optional)",
+    "comments": "string (optional)"
+    }}
+    ```
+    Ensure the FD record layout (01 and 05 levels) is complete and uses the 'Suggested COBOL PIC', OCCURS, and REDEFINES from the field information provided.
+    """
 
         json_text_output: Optional[str] = None
         try:
@@ -596,20 +702,26 @@ Ensure the FD record layout (01 and 05 levels) is complete and uses the 'Suggest
                 json_text_output = response.text
             log.debug(f"LLM call for FD conversion: {m204_file.m204_file_name} completed (semaphore released)")
             json_text_output = strip_markdown_code_block(json_text_output)
-            return FileDefinitionToCobolFDOutput(**json.loads(json_text_output))
+            fd_output = FileDefinitionToCobolFDOutput(**json.loads(json_text_output))
+
+            # Format FD and WORKING-STORAGE sections for improved readability
+            fd_output.file_description_entry = self.format_cobol_fd_or_ws_section(fd_output.file_description_entry)
+            if fd_output.working_storage_entries:
+                fd_output.working_storage_entries = self.format_cobol_fd_or_ws_section(fd_output.working_storage_entries)
+
+            return fd_output
         except Exception as e:
             log.error(f"LLM error converting file definition for {m204_file.m204_file_name} to FD: {e}. Raw output: {json_text_output}", exc_info=True)
             select_name = (m204_file.m204_logical_dataset_name or m204_file.m204_file_name or f"FILE{m204_file.m204_file_id}").replace("-", "")[:8]
             safe_error_str = str(e).replace('{', '{{').replace('}', '}}')
+            fd_entry = f"   FD  {select_name}-FILE. *> ERROR IN CONVERSION\n      01  {select_name}-RECORD PIC X(80). *> Placeholder due to error\n"
+            fd_entry = self.format_cobol_fd_or_ws_section(fd_entry)
             return FileDefinitionToCobolFDOutput(
                 logical_file_name=select_name,
                 file_control_entry=f"       SELECT {select_name}-FILE ASSIGN TO {select_name}. *> ERROR IN CONVERSION\n",
-                file_description_entry=f"   FD  {select_name}-FILE. *> ERROR IN CONVERSION\n"
-                                     f"   01  {select_name}-RECORD PIC X(80). *> Placeholder due to error\n",
+                file_description_entry=fd_entry,
                 comments=f"LLM FD conversion failed: {safe_error_str}"
             )
-    
-
 
     def _clear_existing_artifacts_for_input_source(self, input_source_id: int):
         self.db.query(GeneratedCobolArtifact).filter(GeneratedCobolArtifact.input_source_id == input_source_id).delete(synchronize_session=False)
@@ -1063,7 +1175,6 @@ Generate the COBOL conversion maintaining exact JSON structure and following all
                 used_variables=[],
                 comments=f"LLM conversion failed: {safe_error_str}. Manual review required."
             )
-    
 
     @staticmethod
     def deduplicate_and_group_used_variables(
@@ -1138,12 +1249,32 @@ Generate the COBOL conversion maintaining exact JSON structure and following all
     
 
     
+    @staticmethod
+    def format_test_cases_as_text(test_case_outputs):
+        """
+        Formats a list of ParagraphTestCaseGenerationOutput objects into a readable text file.
+        """
+        lines = []
+        for tc in test_case_outputs:
+            lines.append(f"Paragraph: {tc.cobol_paragraph_name}")
+            for case in tc.test_cases:
+                lines.append(f"  Test Case ID: {case.test_case_id}")
+                lines.append(f"    Description: {case.description}")
+                if case.preconditions:
+                    lines.append(f"    Preconditions: {', '.join(case.preconditions)}")
+                lines.append(f"    Inputs: {json.dumps(case.inputs)}")
+                lines.append(f"    Expected Outputs: {json.dumps(case.expected_outputs)}")
+                lines.append(f"    Expected Behavior: {case.expected_behavior_description}")
+                lines.append("")
+            lines.append("="*60)
+        return "\n".join(lines)
+
     
     async def _generate_and_save_artifacts_for_single_input_source(
-        self, 
-        input_source: InputSource, 
-        generated_vsam_jcl_for_m204file_ids_in_project_run: set[int]
-    ) -> GeneratedArtifactsResponse:
+    self, 
+    input_source: InputSource, 
+    generated_vsam_jcl_for_m204file_ids_in_project_run: set[int]
+) -> GeneratedArtifactsResponse:
         log.info(f"Starting artifact generation for InputSource ID: {input_source.input_source_id}, Type: {input_source.source_type}")
         self._clear_existing_artifacts_for_input_source(input_source.input_source_id)
 
@@ -1196,24 +1327,45 @@ Generate the COBOL conversion maintaining exact JSON structure and following all
             working_storage_for_fds_str = ""
 
             log.info(f"Starting FD generation for {len(m204_files_in_this_source)} M204 files (M204 source).")
+            fd_conversion_results = []
             if llm_config._llm and m204_files_in_this_source:
                 fd_conversion_tasks = [self._llm_convert_file_definition_to_fd(m204_file) for m204_file in m204_files_in_this_source]
-                converted_fds_results = await asyncio.gather(*fd_conversion_tasks, return_exceptions=True)
-                for i, result in enumerate(converted_fds_results):
-                    m204_file_name_for_log = m204_files_in_this_source[i].m204_file_name or f"FileID_{m204_files_in_this_source[i].m204_file_id}"
-                    if isinstance(result, FileDefinitionToCobolFDOutput):
-                        file_control_entries_str += result.file_control_entry
-                        file_section_fds_str += result.file_description_entry + "\n"
-                        if result.working_storage_entries:
-                            working_storage_for_fds_str += result.working_storage_entries + "\n"
-                        if result.comments:
-                            file_section_fds_str += f"* FD Comment ({m204_file_name_for_log}): {result.comments}\n"
-                    elif isinstance(result, Exception):
-                        log.error(f"Error converting FD for {m204_file_name_for_log}: {result}", exc_info=True)
-                        file_section_fds_str += f"* --- ERROR CONVERTING FD FOR {m204_file_name_for_log} ---\n"
-            elif not llm_config._llm:
-                file_section_fds_str = "* LLM not configured for FD conversion.\n"
+                fd_conversion_results = await asyncio.gather(*fd_conversion_tasks, return_exceptions=True)
             else:
+                fd_conversion_results = [None for _ in m204_files_in_this_source]
+
+            # --- FILE-CONTROL Section: Deduplicate entries and use correct ASSIGN TO ---
+            added_ddnames = set()
+            for i, m204_file in enumerate(m204_files_in_this_source):
+                ddname = (m204_file.m204_file_name or f"FILE{m204_file.m204_file_id}").replace("-", "")[:8].upper()
+                if not ddname or not ddname[0].isalpha():
+                    ddname = f"F{str(m204_file.m204_file_id).zfill(7)}"
+                if ddname in added_ddnames:
+                    continue  # Skip duplicates
+                added_ddnames.add(ddname)
+                file_control_entries_str += f"       SELECT {ddname}-FILE ASSIGN TO {ddname}\n"
+                if m204_file.is_db_file:
+                    key_field = m204_file.primary_key_field_name or "KEYFIELD"
+                    file_control_entries_str += (
+                        f"           ORGANIZATION IS INDEXED\n"
+                        f"           ACCESS MODE IS DYNAMIC\n"
+                        f"           RECORD KEY IS {key_field}\n"
+                    )
+                # FD and working-storage from LLM if available
+                result = fd_conversion_results[i]
+                m204_file_name_for_log = m204_file.m204_file_name or f"FileID_{m204_file.m204_file_id}"
+                if isinstance(result, FileDefinitionToCobolFDOutput):
+                    file_section_fds_str += result.file_description_entry + "\n"
+                    if result.working_storage_entries:
+                        working_storage_for_fds_str += result.working_storage_entries + "\n"
+                    if result.comments:
+                        file_section_fds_str += f"* FD Comment ({m204_file_name_for_log}): {result.comments}\n"
+                elif isinstance(result, Exception):
+                    log.error(f"Error converting FD for {m204_file_name_for_log}: {result}", exc_info=True)
+                    file_section_fds_str += f"* --- ERROR CONVERTING FD FOR {m204_file_name_for_log} ---\n"
+            if not llm_config._llm:
+                file_section_fds_str = "* LLM not configured for FD conversion.\n"
+            elif not m204_files_in_this_source:
                 file_section_fds_str = "* No M204 files for FD generation.\n"
             log.info("FD generation process finished (M204 source).")
 
@@ -1366,33 +1518,33 @@ Generate the COBOL conversion maintaining exact JSON structure and following all
 
             # --- Assemble the Final COBOL Program ---
             cobol_content = f"""\
-IDENTIFICATION DIVISION.
-PROGRAM-ID. {cobol_program_id_base}.
-AUTHOR. ArtifactGenerator.
-DATE-WRITTEN. {datetime.date.today().strftime("%Y-%m-%d")}.
-*
-* COBOL program for M204 Input Source: {input_source_name_for_comments}
-*
-*
-ENVIRONMENT DIVISION.
-INPUT-OUTPUT SECTION.
-FILE-CONTROL.
-{file_control_entries_str if file_control_entries_str.strip() else "      * No FILE-CONTROL entries."}
-DATA DIVISION.
-FILE SECTION.
-{file_section_fds_str if file_section_fds_str.strip() else "   * No FDs."}
-WORKING-STORAGE SECTION.
-{working_storage_for_fds_str if working_storage_for_fds_str.strip() else "   * No specific W-S from FDs."}
-{working_storage_variables_str if working_storage_variables_str.strip() else ""}
-{working_storage_llm_vars_str if working_storage_llm_vars_str.strip() else ""}
-PROCEDURE DIVISION.
-MAIN-LOGIC SECTION.
-MAIN-PARAGRAPH.
-{procedure_division_main_logic}
-        STOP RUN.
+    IDENTIFICATION DIVISION.
+    PROGRAM-ID. {cobol_program_id_base}.
+    AUTHOR. ArtifactGenerator.
+    DATE-WRITTEN. {datetime.date.today().strftime("%Y-%m-%d")}.
+    *
+    * COBOL program for M204 Input Source: {input_source_name_for_comments}
+    *
+    *
+    ENVIRONMENT DIVISION.
+    INPUT-OUTPUT SECTION.
+    FILE-CONTROL.
+    {file_control_entries_str if file_control_entries_str.strip() else "      * No FILE-CONTROL entries."}
+    DATA DIVISION.
+    FILE SECTION.
+    {file_section_fds_str if file_section_fds_str.strip() else "   * No FDs."}
+    WORKING-STORAGE SECTION.
+    {working_storage_for_fds_str if working_storage_for_fds_str.strip() else "   * No specific W-S from FDs."}
+    {working_storage_variables_str if working_storage_variables_str.strip() else ""}
+    {working_storage_llm_vars_str if working_storage_llm_vars_str.strip() else ""}
+    PROCEDURE DIVISION.
+    MAIN-LOGIC SECTION.
+    MAIN-PARAGRAPH.
+    {procedure_division_main_logic}
+            STOP RUN.
 
-{main_loop_paragraphs_str if main_loop_paragraphs_str.strip() else ""}
-{procedure_division_subroutine_paragraphs if procedure_division_subroutine_paragraphs.strip() else ""}
+    {main_loop_paragraphs_str if main_loop_paragraphs_str.strip() else ""}
+    {procedure_division_subroutine_paragraphs if procedure_division_subroutine_paragraphs.strip() else ""}
             """
             cobol_output_schema = CobolOutputSchema(
                 input_source_id=current_input_source_with_details.input_source_id,
@@ -1420,7 +1572,6 @@ MAIN-PARAGRAPH.
                         test_case_outputs.append(tc_output)
                     except Exception as e:
                         log.error(f"Error generating test cases for paragraph '{para.paragraph_name}': {e}", exc_info=True)
-                        # Optionally, append a placeholder or skip
 
             # Procedure paragraphs
             for proc_result in converted_procs_results:
@@ -1435,15 +1586,14 @@ MAIN-PARAGRAPH.
                             test_case_outputs.append(tc_output)
                         except Exception as e:
                             log.error(f"Error generating test cases for procedure paragraph '{para.paragraph_name}': {e}", exc_info=True)
-                            # Optionally, append a placeholder or skip
 
-            # Store as a single unit test artifact file (JSON)
-            unit_test_file_name = f"unit_tests_{cobol_program_id_base}.json"
+            # Store as a single unit test artifact file (readable text)
+            unit_test_file_name = f"unit_tests_{cobol_program_id_base}.txt"
             try:
-                unit_test_content = json.dumps([tc.model_dump() for tc in test_case_outputs], indent=2)
+                unit_test_content = self.format_test_cases_as_text(test_case_outputs)
             except Exception as e:
-                log.error(f"Error serializing unit test cases: {e}", exc_info=True)
-                unit_test_content = json.dumps([], indent=2)  # Fallback to empty list
+                log.error(f"Error formatting unit test cases: {e}", exc_info=True)
+                unit_test_content = "No unit test cases generated due to error."
 
             unit_test_schema = UnitTestOutputSchema(
                 input_source_id=current_input_source_with_details.input_source_id,
@@ -1454,6 +1604,7 @@ MAIN-PARAGRAPH.
             unit_test_output_schemas.append(unit_test_schema)
             db_unit_test_artifacts_to_add.append(GeneratedUnitTestArtifact(**unit_test_schema.model_dump()))
             log.info(f"Generated LLM-based Unit Test file {unit_test_file_name} for M204 source.")
+
             # --- General JCL (run JCL) generation ---
             log.info("Starting general JCL (run JCL) generation (M204 source).")
             general_jcl_file_name = f"{cobol_program_id_base}_run.jcl"
@@ -1477,15 +1628,15 @@ MAIN-PARAGRAPH.
                     dd_statements_for_jcl.append(f"//{dd_name_final:<8} DD DSN={dsn},DISP=SHR")
             dd_statements_str = "\n".join(dd_statements_for_jcl) if dd_statements_for_jcl else "//* No M204 files for DD statements."
             general_jcl_content = f"""\
-/*JOBGENER JOB (ACCT),'RUN {cobol_program_id_base}',CLASS=A,MSGCLASS=X
-//* Run JCL for COBOL: {cobol_file_name} (From M204 Source: {input_source_name_for_comments})
-//STEP010  EXEC PGM={cobol_program_id_base}
-//STEPLIB  DD DSN=YOUR.COBOL.LOADLIB,DISP=SHR
-//SYSOUT   DD SYSOUT=*
-{dd_statements_str}
-//SYSIN    DD *
-/*
-"""
+    /*JOBGENER JOB (ACCT),'RUN {cobol_program_id_base}',CLASS=A,MSGCLASS=X
+    //* Run JCL for COBOL: {cobol_file_name} (From M204 Source: {input_source_name_for_comments})
+    //STEP010  EXEC PGM={cobol_program_id_base}
+    //STEPLIB  DD DSN=YOUR.COBOL.LOADLIB,DISP=SHR
+    //SYSOUT   DD SYSOUT=*
+    {dd_statements_str}
+    //SYSIN    DD *
+    /*
+    """
             jcl_general_schema = JclOutputSchema(
                 input_source_id=current_input_source_with_details.input_source_id,
                 file_name=general_jcl_file_name,
@@ -1582,8 +1733,8 @@ MAIN-PARAGRAPH.
             unit_test_files=unit_test_output_schemas
         )
         log.info(f"Finished artifact generation for InputSource ID: {input_source.input_source_id} ('{input_source_name_for_comments}'). Returning {len(response.cobol_files)} COBOL, {len(response.jcl_files)} JCL, {len(response.unit_test_files)} Unit Test files.")
-        return response
-
+        return response  
+    
     async def generate_artifacts_for_project(self, project_id: int) -> List[InputSourceArtifacts]:
         project = self.db.query(Project).filter(Project.project_id == project_id).first()
         if not project:

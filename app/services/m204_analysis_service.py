@@ -74,7 +74,11 @@ class ImageFieldToCobolOutput(BaseModel):
     m204_image_name: str = Field(description="The M204 IMAGE statement name.")
     m204_field_name: str = Field(description="The original M204 field name within the IMAGE.")
     suggested_cobol_field_name: str = Field(description="A suitable COBOL field name, following COBOL naming conventions (e.g., max 30 chars, alphanumeric, hyphens, avoid M204-specific symbols).")
-    reasoning: Optional[str] = Field(description="Brief reasoning for the suggestion.", default=None)
+    cobol_picture_clause: Optional[str] = Field(default=None, description="COBOL PICTURE clause for this field.")
+    field_byte_length: Optional[int] = Field(default=None, description="Length in bytes for COBOL/VSAM.")
+    cobol_occurs_clause: Optional[str] = Field(default=None, description="COBOL OCCURS clause if this field is an array.")
+    cobol_redefines_field: Optional[str] = Field(default=None, description="COBOL field name that this field REDEFINES, if any (from AT overlay).")
+    reasoning: Optional[str] = Field(default=None, description="Brief reasoning for the suggestion.")
 
 
 class M204IterativeDescriptionOutput(BaseModel):
@@ -1359,24 +1363,20 @@ async def _resolve_procedure_calls(db: Session, project_id: int, calls_in_file: 
 
 # --- IMAGE Statement Extraction ---
 
-
 async def _parse_image_definition(
     image_name_context: str,
     image_content: str
 ) -> Dict[str, Any]:
     """
     Parse IMAGE definition content to extract field information for COBOL FDs,
-    including LLM-suggested COBOL field names (LLM calls made in parallel,
-    bounded by a semaphore).
+    using LLM for all COBOL PIC, OCCURS, REDEFINES, and length suggestions.
     """
     import re
     import asyncio
     import json
 
-    # Semaphore to bound concurrent LLM calls per image
     llm_semaphore = asyncio.Semaphore(10)
 
-    # 1) Extract raw field lines
     parsed_field_details = []
     lines = image_content.strip().split('\n')
     for line in lines:
@@ -1388,45 +1388,60 @@ async def _parse_image_definition(
             r"([A-Z0-9_.#@$-]+)\s+IS\s+([A-Z]+)"
             r"(?:\s+LEN\s+(\d+))?"
             r"(?:\s+DIGITS\s+(\d+))?"
-            r"(?:\s+DP\s+(\d+))?",
+            r"(?:\s+DP\s+(\d+))?"
+            r"(?:\s+(OCCURS|ARRAY)\s*\(([^)]+)\))?"
+            r"(?:\s+AT\s+([A-Z0-9_.#@$-]+))?",
             line,
             re.IGNORECASE
         )
         if not field_match:
             continue
 
+        occurs_array = field_match.group(6)
+        occurs_dims = field_match.group(7)
+        at_field = field_match.group(8)
+
         parsed_field_details.append({
             "m204_field_name_original": field_match.group(1),
             "m204_type":               field_match.group(2).upper(),
-            "length":                  int(field_match.group(3))
-                                        if field_match.group(3) else None,
-            "digits":                  int(field_match.group(4))
-                                        if field_match.group(4) else None,
-            "decimal_places":          int(field_match.group(5))
-                                        if field_match.group(5) else None,
+            "length":                  int(field_match.group(3)) if field_match.group(3) else None,
+            "digits":                  int(field_match.group(4)) if field_match.group(4) else None,
+            "decimal_places":          int(field_match.group(5)) if field_match.group(5) else None,
+            "occurs_array":            occurs_array.upper() if occurs_array else None,
+            "occurs_dims":             occurs_dims,
+            "at_field":                at_field,
             "original_index":          len(parsed_field_details)
         })
 
-    # 2) Fan-out LLM calls in parallel, bounded by semaphore
     llm_results_map: Dict[int, Any] = {}
     if llm_config._llm and parsed_field_details:
-        field_namer_llm = (
-            llm_config._llm
-            .as_structured_llm(ImageFieldToCobolOutput)
-        )
+        field_namer_llm = llm_config._llm.as_structured_llm(ImageFieldToCobolOutput)
 
         async def call_llm(field_data):
             prompt = f"""
-You are an M204→COBOL migration expert. Suggest a COBOL-compliant
-field name for this M204 field.
-M204 IMAGE: {image_name_context}
-M204 Field: {field_data['m204_field_name_original']}
+You are an M204→COBOL migration expert. Suggest a COBOL-compliant field name, PICTURE clause, OCCURS clause, REDEFINES clause, and byte length for this M204 IMAGE field.
+M204 IMAGE Name: {image_name_context}
+M204 Field Name: {field_data['m204_field_name_original']}
 Type: {field_data['m204_type']}
 Length: {field_data['length'] or 'N/A'}
 Digits: {field_data['digits'] or 'N/A'}
-DP: {field_data['decimal_places'] or 'N/A'}
+Decimal Places: {field_data['decimal_places'] or 'N/A'}
+OCCURS/ARRAY: {field_data['occurs_array'] or 'N/A'}
+OCCURS/ARRAY Dimensions: {field_data['occurs_dims'] or 'N/A'}
+AT (Overlay): {field_data['at_field'] or 'N/A'}
 
-Respond with JSON per ImageFieldToCobolOutput.
+Respond with a JSON object containing:
+- "m204_image_name": string
+- "m204_field_name": string
+- "suggested_cobol_field_name": string
+- "cobol_picture_clause": string
+- "field_byte_length": integer
+- "cobol_occurs_clause": string (if applicable, else null)
+- "cobol_redefines_field": string (if applicable, else null)
+- "reasoning": string
+
+If the M204 field uses OCCURS or ARRAY, set 'cobol_occurs_clause' to the appropriate COBOL OCCURS clause.
+If the M204 field uses AT (overlay), set 'cobol_redefines_field' to the COBOL field name it redefines.
 """
             async with llm_semaphore:
                 return await field_namer_llm.acomplete(prompt=prompt)
@@ -1439,6 +1454,10 @@ Respond with JSON per ImageFieldToCobolOutput.
             orig = fd["m204_field_name_original"]
             fallback = orig.upper().replace('.', '-')
             suggested = fallback
+            pic = None
+            byte_len = fd.get("length")
+            occurs_clause = None
+            redefines_field = None
             reasoning = None
 
             if isinstance(result, Exception):
@@ -1449,16 +1468,12 @@ Respond with JSON per ImageFieldToCobolOutput.
             else:
                 try:
                     data = json.loads(strip_markdown_code_block(result.text))
-                    out = ImageFieldToCobolOutput(**data)
-                    if (out.m204_image_name == image_name_context
-                            and out.m204_field_name == orig):
-                        suggested = out.suggested_cobol_field_name
-                        reasoning = out.reasoning
-                    else:
-                        log.warning(
-                            f"LLM returned mismatched names for "
-                            f"{image_name_context}.{orig}; using fallback"
-                        )
+                    suggested = data.get("suggested_cobol_field_name", fallback)
+                    pic = data.get("cobol_picture_clause")
+                    byte_len = data.get("field_byte_length", byte_len)
+                    occurs_clause = data.get("cobol_occurs_clause")
+                    redefines_field = data.get("cobol_redefines_field")
+                    reasoning = data.get("reasoning")
                 except Exception:
                     log.error(
                         f"Error parsing LLM JSON for {image_name_context}.{orig}",
@@ -1467,80 +1482,43 @@ Respond with JSON per ImageFieldToCobolOutput.
 
             llm_results_map[fd["original_index"]] = {
                 "suggested": suggested,
+                "pic": pic,
+                "byte_len": byte_len,
+                "occurs_clause": occurs_clause,
+                "redefines_field": redefines_field,
                 "reasoning": reasoning
             }
 
-    # 3) Build final fields output
     final_fields_output = []
     for fd in parsed_field_details:
         idx = fd["original_index"]
-        m204_type = fd["m204_type"]
-        length = fd["length"]
-        digits = fd["digits"]
-        decp = fd["decimal_places"]
-
-        # Data type mapping
-        type_map = {
-            'STRING': {'cobol_type': 'CHARACTER',      'pic': 'PIC X'},
-            'PACKED': {'cobol_type': 'PACKED_DECIMAL', 'pic': 'PIC 9 COMP-3'},
-            'BINARY': {'cobol_type': 'BINARY',         'pic': 'PIC 9 COMP'},
-            'FLOAT':  {'cobol_type': 'FLOATING_POINT', 'pic': 'COMP-1'},
-            'DOUBLE': {'cobol_type': 'FLOATING_POINT', 'pic': 'COMP-2'},
-        }.get(m204_type, {'cobol_type': m204_type, 'pic': 'PIC X'})
-
-        # PIC and byte-length logic
-        suggested_pic = None
-        byte_len = length
-        if m204_type == 'STRING' and length:
-            suggested_pic = f"PIC X({length})"
-        elif m204_type == 'PACKED' and digits:
-            if decp:
-                suggested_pic = (
-                    f"PIC S9({digits-decp})V9({decp}) COMP-3"
-                )
-            else:
-                suggested_pic = f"PIC S9({digits}) COMP-3"
-            byte_len = (digits // 2) + 1
-        elif m204_type == 'BINARY' and length:
-            if length == 2:
-                suggested_pic = "PIC S9(4) COMP"
-            elif length == 4:
-                suggested_pic = "PIC S9(9) COMP"
-            elif length == 8:
-                suggested_pic = "PIC S9(18) COMP"
-            else:
-                suggested_pic = f"PIC S9({length*2-1}) COMP"
-        elif m204_type == 'FLOAT':
-            suggested_pic = "COMP-1"
-            byte_len = 4
-        elif m204_type == 'DOUBLE':
-            suggested_pic = "COMP-2"
-            byte_len = 8
-
         llm_sugg = llm_results_map.get(idx, {})
         final_fields_output.append({
             "field_name": fd["m204_field_name_original"],
             "suggested_cobol_field_name": llm_sugg.get("suggested"),
-            "data_type": type_map['cobol_type'],
-            "m204_type": m204_type,
-            "length": length,
-            "digits": digits,
-            "decimal_places": decp,
+            "data_type": fd["m204_type"],
+            "m204_type": fd["m204_type"],
+            "length": fd["length"],
+            "digits": fd["digits"],
+            "decimal_places": fd["decimal_places"],
+            "occurs_array": fd["occurs_array"],
+            "occurs_dims": fd["occurs_dims"],
+            "at_field": fd["at_field"],
             "position": idx + 1,
             "cobol_layout_suggestions": {
-                "cobol_picture_clause": suggested_pic,
-                "field_byte_length": byte_len,
+                "cobol_picture_clause": llm_sugg.get("pic"),
+                "field_byte_length": llm_sugg.get("byte_len"),
+                "cobol_occurs_clause": llm_sugg.get("occurs_clause"),
+                "cobol_redefines_field": llm_sugg.get("redefines_field"),
                 "reasoning": (
                     llm_sugg.get("reasoning")
-                    or f"Based on M204 type {m204_type}"
+                    or f"LLM-based suggestion for {fd['m204_type']}"
                 )
             }
         })
 
     return {"fields": final_fields_output,
             "total_fields": len(final_fields_output)}
-
-
 
 
 async def _extract_and_store_m204_image_statements(
@@ -1996,8 +1974,7 @@ Do not include markdown backticks or any other text outside the JSON structure.
 """
     json_text_output: Optional[str] = None
     try:
-        raw_llm_output = await llm_config._llm.acomplete(prompt=prompt_fstr)
-        log.debug(f"Raw output without structured llm : {raw_llm_output.text}")
+
         vsam_suggester_llm = llm_config._llm.as_structured_llm(M204FileVsamAnalysisOutput)
         completion_response = await vsam_suggester_llm.acomplete(prompt=prompt_fstr)
         json_text_output = completion_response.text

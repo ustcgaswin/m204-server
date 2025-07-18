@@ -32,26 +32,20 @@ from app.schemas.m204_analysis_schema import ( # For serializing nested data
 )
 from app.schemas.generic_analysis_schema import DDStatementResponseSchema
 
-
 from app.config.llm_config import llm_config
 from app.utils.logger import log
 from fastapi import HTTPException, status
 from datetime import datetime
 import os
 
-
 MAX_CONCURRENT_LLM_CALLS = 5   #for generating sections
 MAX_MERMAID_FIX_ATTEMPTS = 3 # Max attempts to fix a diagram
-
-
 
 _current_script_dir = os.path.dirname(os.path.abspath(__file__))
 # Go up two levels to get to the 'server' directory, which is our project root
 _server_root_dir = os.path.abspath(os.path.join(_current_script_dir, '..', '..'))
 # Construct the full path to the validator script
 MERMAID_VALIDATOR_PATH = os.path.join(_server_root_dir, "mermaid_validator.js")
-
-
 
 def _run_mermaid_validator_sync(mermaid_code: str) -> subprocess.CompletedProcess:
     """Synchronous helper to run the validator in a separate thread."""
@@ -93,9 +87,6 @@ async def _validate_mermaid_code(mermaid_code: str) -> tuple[bool, Optional[str]
         log.error(f"An exception occurred during Mermaid validation: {e}", exc_info=True)
         # Return True to skip validation on unexpected errors.
         return True, f"An exception occurred during validation: {e}, skipping validation.", None
-
-
-
 
 async def _attempt_to_fix_mermaid_code(invalid_code: str, error_message: str, error_line: int) -> Optional[str]:
     """
@@ -219,7 +210,6 @@ M204 Code to Parse:
         log.error(f"An unexpected error occurred during M204 loop structuring: {e}", exc_info=True)
         return None
 
-
 async def _fetch_project_data_for_llm(db: Session, project_id: int, options: RequirementGenerationOptionsSchema) -> Dict[str, Any]:
     """
     Fetches all relevant data for a project and pre-processes complex parts for the LLM prompt.
@@ -275,7 +265,6 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
             "structured_logic": structured_logic
         }
 
-
     # M204 Procedures
     if options.include_procedures:
         procedures_query = db.query(Procedure).filter(Procedure.project_id == project_id)
@@ -285,7 +274,6 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
             )
         procedures = procedures_query.all()
         project_data["procedures"] = [M204ProcedureResponseSchema.model_validate(p).model_dump(exclude_none=True) for p in procedures]
-
 
     # M204 Files
     if options.include_files:
@@ -317,9 +305,6 @@ async def _fetch_project_data_for_llm(db: Session, project_id: int, options: Req
         project_data["procedure_calls"] = [M204ProcedureCallResponseSchema.model_validate(pc).model_dump(exclude_none=True) for pc in procedure_calls]
 
     return project_data
-
-
-
 
 def _construct_llm_prompt_content(project_data: Dict[str, Any]) -> str:
     """
@@ -491,8 +476,6 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any]) -> str:
 
     return "\n".join(content_parts)
 
-
-
 def _get_sections_config() -> List[Dict[str, Any]]:
     """
     Defines the structure, instructions, and data dependencies for each section.
@@ -504,21 +487,22 @@ def _get_sections_config() -> List[Dict[str, Any]]:
     }
     
     # Define common data combinations
-    tech_overview_data = ["procedures", "m204_files", "dd_statements", "source_file_llm_summaries"]
     full_context_data = list(all_data_keys)
 
     return [
         {
-            "id": "program_overview",  
-            "title": "## 1. Program Overview", 
-            "required_data": ["source_file_llm_summaries", "m204_files"],
-            "instructions": """
-        (Provide a concise, technical overview of what the program does at a high level, based on the 'm204_detailed_description' fields from all InputSource records.
-        Do not include business-oriented or stakeholder-focused language.
-        After the overview, provide:
-        - A bullet list of all files involved in the program, as found in the M204 file definitions (list the file names).
-        - A separate bullet list of all files that are flagged as Model 204 database files (where is_db_file = True).
-        Do not include project metadata or business context.)
+        "id": "program_overview",
+        "title": "## 1. Program Overview",
+        "required_data": ["source_file_llm_summaries", "m204_files"],
+        "instructions": """
+        (Provide a high-level technical overview of the entire program’s purpose and architecture based on the 
+        ‘m204_detailed_description’ fields from all InputSource records. Focus on the program as a whole—its 
+        primary functionality, key components and how they interrelate, major workflows and integration points. 
+        Do not dive into the details of any single module or business context.)
+
+        After the overview, include:
+        - A bullet list of all files involved in the program, as found in the M204 file definitions (list file names).
+        - A separate bullet list of all files flagged as Model 204 database files (where is_db_file = True).
         """
         },
         {
@@ -778,119 +762,7 @@ The input provides the main processing loop as a block of M204 code (not as stru
    (Provide a concluding summary of the system in narrative paragraphs. Highlight any overarching patterns, complexities, or notable observations that don't fit neatly into other sections. Address points from the 'Additional Instructions/Custom Section from User' here if not covered elsewhere.)
 """
         },
-        {
-            "id": "technical_requirements_main",
-            "title": "# Technical Requirements",
-            "required_data": [], # This is just a title section
-            "instructions": """
-   (This section is intended for a high-level technical audience like Project Management and CTO.
-    It should provide a structured, detailed overview of the system's technical aspects based on the provided data.
-    Synthesize and abstract information from the preceding detailed sections, focusing on technical architecture, data flow, and key components. **Refer to the 'Source File LLM-Generated Summaries' to enrich the descriptions of JCL and M204 components.**)
-"""
-        },
-        {
-            "id": "tech_req_architecture",
-            "title": "### A. System Architecture Overview",
-            "required_data": tech_overview_data,
-            "instructions": """
-   (Describe the high-level components of the M204-based system and their primary roles.
-    Illustrate how M204 procedures (distinguishing between `m204_proc_type` like ONLINE, BATCH, INCLUDE, SUBROUTINE), the target COBOL programs to be generated from them (as indicated by `target_cobol_function_name`), JCL (from `DDStatement` data providing `job_name`, `step_name`, `dd_name`, `dsn`, and `disposition`), and M204 files/VSAM datasets (from `M204File` data, including `m204_file_name`, `target_vsam_dataset_name`, `target_vsam_type`) interact to form the overall system architecture. **Use the 'Source File LLM-Generated Summaries' to provide context on the purpose of specific JCL files or M204 source modules.**
-    Identify any distinct subsystems or processing layers if they can be inferred from procedure groupings, naming conventions, or data flow patterns observed in the input data and file summaries.)
-"""
-        },
-        {
-            "id": "tech_req_data_model",
-            "title": "### B. Data Model and Management",
-            "required_data": ["m204_files", "source_file_llm_summaries"],
-            "instructions": """
-   (Detail the key data entities managed by the system, as identified from `M204 File Definitions Data` (specifically `m204_file_name` and its associated `file_definition_json` if present). For each M204 file, describe its purpose (e.g., master data, transactional data, index files, work files) based on its name, attributes, and any field information available in `file_definition_json`. **Corroborate with 'Source File LLM-Generated Summaries' for M204 files.**
-    Explain how data is stored, referencing `M204File.is_db_file`, `M204File.target_vsam_dataset_name`, and `M204File.target_vsam_type` (e.g., KSDS, ESDS).
-    Describe significant characteristics of the data model by analyzing field data if available in `file_definition_json`:
-    - Key fields (e.g., those with `KEY` in JSON attributes).
-    - Data types and lengths (e.g., NUMERIC, TEXT, specific lengths from JSON attributes).
-    - Occurrences (e.g., `OCCURS` clauses in JSON attributes).
-    - Relationships implied by field names or usage across different files or procedures.
-    If detailed field information is not available, describe the data model at a higher level based on file names and their general attributes.
-    Summarize the overall data flow:
-    - Data Ingress: How data enters the system (e.g., through JCL DD statements with `disposition` SHR or OLD, or via ONLINE procedures).
-    - Data Processing: How data is transformed or used internally (e.g., by M204 procedures, manipulated using variables, stored/retrieved from M204 files).
-    - Data Egress: How data leaves the system (e.g., through JCL DD statements with `disposition` NEW or MOD, or reports generated via procedures).)
-"""
-        },
-        {
-            "id": "tech_req_core_processing",
-            "title": "### C. Core Processing Logic and Control Flow",
-            "required_data": ["procedures", "procedure_calls", "global_variables", "source_file_llm_summaries"],
-            "instructions": """
-   (Explain the main processing sequences and business logic implemented within the M204 procedures, referencing their `m204_proc_type` and their relationship to the target COBOL programs to be generated. **Contextualize with 'Source File LLM-Generated Summaries' for the M204 files containing these procedures.**
-    Highlight critical procedures or call chains by analyzing `Procedure Call Relationships Data` (using `calling_procedure_name`, `called_procedure_name`, `line_number` of call, and `is_external` flag). Discuss the significance of frequently called procedures or key external calls.
-    Describe how user interactions (for `ONLINE` procedures) or batch processes (inferred from `BATCH` procedure types and associated JCL `job_name`/`step_name` context) are handled.
-    Discuss the role of `M204Variable`s:
-    - Global/Public variables (`scope` is GLOBAL or PUBLIC): Their purpose in system-wide state management, data sharing between modules, or configuration. Refer to their `variable_name`, `variable_type`, and `cobol_mapped_variable_name`.
-    - Procedure-local variables (`scope` is LOCAL): Their use within specific procedures, including `m204_parameters_string` for input/output to procedures.
-    Analyze patterns in variable usage if discernible.)
-"""
-        },
-        {
-            "id": "tech_req_external_interfaces",
-            "title": "### D. External Interfaces and Dependencies",
-            "required_data": ["dd_statements", "m204_files", "procedure_calls", "source_file_llm_summaries"],
-            "instructions": """
-   (List and describe all identified external systems, datasets, or services that the M204 application interacts with.
-    Base this on:
-    - `JCL DD Statements Data`: Analyze `dsn`s that point to external (non-system specific) files or GDGs. Note the `disposition` (e.g., NEW, MOD for outputs; OLD, SHR for inputs) to understand data direction. **The 'Source File LLM-Generated Summaries' for JCLs might clarify the purpose of these external datasets.**
-    - `M204 File Definitions Data`: Check if `m204_attributes` or `target_vsam_dataset_name` suggest links to shared datasets with other applications or standard interface files.
-    - `Procedure Call Relationships Data`: `is_external` calls might indicate interfaces to other systems or shared utilities if `called_procedure_name` implies this.
-    Specify the nature of these interfaces (e.g., file-based batch data exchange, shared VSAM datasets, triggers to/from other systems if inferable). Discuss their importance to the system's overall functionality and data integrity.)
-"""
-        },
-        {
-            "id": "tech_req_tech_stack",
-            "title": "### E. Technology Stack and Environment",
-            "required_data": tech_overview_data,
-            "instructions": """
-   (Summarize the core technologies used, based on available data:
-    - **Model 204:** Note its role (e.g., primary application logic, database). Mention specific features used if inferable from `Procedure.m204_proc_type` (ONLINE, BATCH, INCLUDE, SUBROUTINE indicating User Language/SOUL usage), `M204File.m204_attributes`, or field attributes. **Refer to 'Source File LLM-Generated Summaries' for M204 files for broader context on how M204 is utilized.**
-    - **COBOL:** Its role as the **target language for modernization**. The generated COBOL programs (identified by `target_cobol_function_name`) will handle complex business logic and batch processing derived from the M204 procedures.
-    - **JCL:** Its function in orchestrating batch jobs, file management, and program execution, detailed by `DDStatement` data (`job_name`, `step_name`, `dsn`, `disposition`). **The 'Source File LLM-Generated Summaries' for JCLs will provide an overview of the job functionalities.**
-    - **VSAM:** The types of datasets used (e.g., KSDS, ESDS from `M204File.target_vsam_type`) and their purpose.
-    Discuss any technical constraints or environmental considerations inferred from the system data:
-    - Dataset Naming Conventions: Patterns observed in `dsn` or `target_vsam_dataset_name`.
-    - Batch Windows/Scheduling: Implied by JCL structure or batch procedure design.
-    - Security Mechanisms: Any hints from file attributes, variable naming, or procedure structure (though likely limited from this data).
-    - Character Sets/Encoding: If any hints in field attributes.)
-"""
-        },
-        {
-            "id": "tech_req_nfr_inferred",
-            "title": "### F. Key Non-Functional Aspects (Inferred)",
-            "required_data": full_context_data,
-            "instructions": """
-   (Based on the detailed analysis in section 9 and the overall system data, reiterate and detail any significant non-functional requirements or characteristics critical from a technical perspective. Be specific by referencing the data points that lead to these inferences.
-    - **Performance:**
-      - Identify potential bottlenecks or performance-critical areas (e.g., frequently accessed files indicated by `KEY` fields in `file_definition_json`, complex `ONLINE` procedures, large data volumes suggested by `OCCURS` clauses in `file_definition_json` or file structures).
-      - Discuss indexing strategies (`KEY` fields from `file_definition_json`) and their impact.
-    - **Data Integrity and Consistency:**
-      - Mechanisms implied by field data types and attributes (e.g., `NUMERIC` validation, length constraints from `file_definition_json`).
-      - Potential for referential integrity issues or consistency challenges if not explicitly managed.
-      - Transactional characteristics, if inferable from procedure logic or COBOL interactions.
-    - **Security:**
-      - Data sensitivity implied by file or field names (e.g., PII).
-      - Access controls suggested by M204 file attributes or security-related keywords if present (though direct security data is usually not in code artifacts alone).
-    - **Maintainability and Complexity:**
-      - Modularity (e.g., use of `INCLUDE` or `SUBROUTINE` procedures vs. monolithic procedures).
-      - Complexity of control flow (dense `ProcedureCall` graphs, deep nesting).
-      - Impact of `GLOBAL`/`PUBLIC` variables on understanding data flow and side effects.
-      - Readability of code snippets or variable names (e.g., `cobol_mapped_variable_name`).
-    - **Operational Stability and Reliability:**
-      - Error handling mechanisms (if visible in procedure snippets or implied by COBOL interactions).
-      - Dependencies on external files/systems outlined in JCL (points of failure).
-      - Recovery considerations for VSAM datasets based on `target_vsam_type` and usage patterns.
-"""
-        }
     ]
-
-
 
 async def _generate_llm_section(
     section_id: str,
@@ -1029,6 +901,53 @@ Ensure the entire output for this section is valid Markdown.
         log.debug(f"Prompt length for failed section '{section_id}': {len(prompt_for_section)}")
         return f"{section_title}\n\nError generating content for this section: {str(e_llm_section)}"
 
+
+
+async def _generate_individual_procedure_requirements(procedures: list) -> str:
+    """
+    For each procedure, call the LLM with only code and summary (no COBOL function name, no source file summary).
+    Returns Markdown content for each procedure, with the procedure name as a heading.
+    """
+    results = []
+    for proc in procedures:
+        proc_name = proc.get('m204_proc_name', 'N/A')
+        proc_type = proc.get('m204_proc_type', 'N/A')
+        proc_summary = proc.get('summary', '')
+        proc_code = proc.get('procedure_content', '')
+        proc_params = proc.get('m204_parameters_string', '')
+        proc_vars = proc.get('variables_in_procedure', [])
+
+        prompt = f"""
+You are a senior technical analyst. Generate a requirements paragraph for the following M204 procedure (subroutine).
+Do NOT mention the COBOL function name.
+Use the code and summary provided. Add bullet points for parameters and variables.
+
+Procedure Name: {proc_name}
+Type: {proc_type}
+Summary: {proc_summary}
+
+Procedure Code:
+```m204
+{proc_code}
+```
+
+Parameters: {proc_params}
+Variables:
+{json.dumps(proc_vars, indent=2)}
+"""
+        completion_response = await llm_config._llm.acomplete(prompt=prompt)
+        if completion_response and completion_response.text:
+            # Add procedure name as a heading before its content
+            results.append(f"### {proc_name}\n\n{completion_response.text.strip()}")
+        else:
+            results.append(f"### {proc_name}\n\nNo content generated.")
+
+    section_content = "\n\n".join(results)
+    return section_content
+
+
+
+
 async def generate_and_save_project_requirements_document(
     db: Session,
     project_id: int,
@@ -1065,31 +984,34 @@ async def generate_and_save_project_requirements_document(
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
 
     async def generate_with_semaphore(section_conf: Dict[str, Any]) -> str:
-        """Wrapper to acquire semaphore before calling the LLM generation function."""
         async with semaphore:
             section_id = section_conf["id"]
             section_title = section_conf["title"]
             section_instructions = section_conf["instructions"]
             required_data_keys = section_conf.get("required_data", [])
 
-            # Create a targeted data subset for the current section
             targeted_project_data = {
                 key: project_data_for_llm[key] 
                 for key in required_data_keys 
                 if key in project_data_for_llm
             }
-            
-            # Generate prompt content just for this section's data
             formatted_data_for_prompt = _construct_llm_prompt_content(targeted_project_data)
 
-            log.info(f"Acquired semaphore for section: {section_id} - '{section_title}'")
-            return await _generate_llm_section(
-                section_id=section_id,
-                section_title=section_title,
-                section_instructions=section_instructions,
-                formatted_data_for_prompt=formatted_data_for_prompt,
-                custom_prompt_section=custom_prompt_section
-            )
+            # Ensure top-level heading for procedures section
+            if section_id == "m204_procedures" and "procedures" in project_data_for_llm:
+                individual_content = await _generate_individual_procedure_requirements(
+                    project_data_for_llm["procedures"]
+                )
+                # Always prepend the top-level heading
+                return f"## 3. M204 Procedures\n\n{individual_content}"
+            else:
+                return await _generate_llm_section(
+                    section_id=section_id,
+                    section_title=section_title,
+                    section_instructions=section_instructions,
+                    formatted_data_for_prompt=formatted_data_for_prompt,
+                    custom_prompt_section=custom_prompt_section
+                )
 
     generation_tasks = [generate_with_semaphore(conf) for conf in sections_config]
 
@@ -1101,7 +1023,6 @@ async def generate_and_save_project_requirements_document(
     except Exception as e_gather:
         log.error(f"Error during parallel generation of sections: {e_gather}", exc_info=True)
         markdown_parts.append(f"\n\n## Error During Document Assembly\n\nAn error occurred while assembling the document sections: {str(e_gather)}")
-
 
     markdown_content = "\n\n".join(markdown_parts)
     log.info(f"All sections processed. Total Markdown content length: {len(markdown_content)}")
@@ -1137,6 +1058,8 @@ async def generate_and_save_project_requirements_document(
             log.warning(f"Could not parse generation_options_json for response for doc ID {db_document.requirement_document_id}: {e_parse_resp}")
             response_data.generation_options_used = None 
     return response_data
+
+
 
 # --- CRUD functions for RequirementDocument ---
 

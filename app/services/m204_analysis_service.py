@@ -413,7 +413,10 @@ Respond with a JSON object structured according to the ParagraphTestCaseGenerati
 The main keys must be "cobol_paragraph_name" (string, must be "{cobol_para_name}") and "test_cases" (a list of TestCase objects).
 Each TestCase must have "test_case_id", "description", "preconditions", "inputs", "expected_outputs", and "expected_behavior_description".
 If no specific test cases can be generated, return an empty list for "test_cases".
-"""
+"""             
+                
+                raw_llm_output = await llm_config._llm.acomplete(prompt=test_case_generation_prompt_fstr)
+                log.debug(f"Raw test case output for paragraph '{cobol_para_name}': {raw_llm_output.text}")
                 tasks.append(test_case_generator_llm.acomplete(prompt=test_case_generation_prompt_fstr))
 
             test_case_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -2138,8 +2141,8 @@ Do not include markdown backticks or any other text outside the JSON structure.
 """
     json_text_output: Optional[str] = None
     try:
-        raw_llm_output = llm_config._llm.acomplete(prompt=prompt_fstr)
-        log.debug(f"Raw output without structured llm : {raw_llm_output}")
+        raw_llm_output = await llm_config._llm.acomplete(prompt=prompt_fstr)
+        log.debug(f"Raw output without structured llm : {raw_llm_output.text}")
         vsam_suggester_llm = llm_config._llm.as_structured_llm(M204FileVsamAnalysisOutput)
         completion_response = await vsam_suggester_llm.acomplete(prompt=prompt_fstr)
         json_text_output = completion_response.text

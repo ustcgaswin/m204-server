@@ -57,88 +57,6 @@ def _run_mermaid_validator_sync(mermaid_code: str) -> subprocess.CompletedProces
         cwd=_server_root_dir
     )
 
-async def _validate_mermaid_code(mermaid_code: str) -> tuple[bool, Optional[str], Optional[int]]:
-    """
-    Validates Mermaid code using an external Node.js script.
-    Returns (is_valid, error_message, error_line_number).
-    This version uses asyncio.to_thread to be compatible with Windows.
-    """
-    if not mermaid_code.strip():
-        return False, "Mermaid code is empty.", 0
-    
-    try:
-        # Run the synchronous subprocess call in a separate thread
-        process = await asyncio.to_thread(_run_mermaid_validator_sync, mermaid_code)
-        
-        if process.returncode == 0:
-            log.info("Mermaid validation successful.")
-            return True, None, None
-        else:
-            error_output = process.stderr.decode('utf-8').strip()
-            line_num_output = process.stdout.decode('utf-8').strip()
-            error_line = int(line_num_output) if line_num_output.isdigit() else 0
-            log.warning(f"Mermaid validation failed at line {error_line}. Error: {error_output}")
-            return False, error_output, error_line
-    except FileNotFoundError:
-        log.error(f"Mermaid validator script not found at '{MERMAID_VALIDATOR_PATH}'. Please ensure Node.js is installed and the script is in the correct path.")
-        # Return True to skip validation and avoid fix attempts if the validator itself is broken.
-        return True, "Validator script not found, skipping validation.", None
-    except Exception as e:
-        log.error(f"An exception occurred during Mermaid validation: {e}", exc_info=True)
-        # Return True to skip validation on unexpected errors.
-        return True, f"An exception occurred during validation: {e}, skipping validation.", None
-
-async def _attempt_to_fix_mermaid_code(invalid_code: str, error_message: str, error_line: int) -> Optional[str]:
-    """
-    Uses the LLM to attempt to fix invalid Mermaid code based on a specific error.
-    """
-    if not llm_config._llm:
-        return None
-    
-    log.info(f"Attempting to fix invalid Mermaid code with LLM. Error at line {error_line}.")
-
-    lines = invalid_code.split('\n')
-    # Create a context window of +-3 lines around the error
-    start = max(0, error_line - 4)
-    end = min(len(lines), error_line + 3)
-    context_snippet = "\n".join(f"{i+1}: {line}" for i, line in enumerate(lines[start:end]))
-
-    prompt = f"""
-You are an expert in Mermaid.js syntax. The following Mermaid code is invalid.
-Your task is to fix it based on the provided error message and context, without changing the meaning or structure of the diagram.
-Your response must contain *only* the complete, corrected, raw Mermaid code inside a ```mermaid ... ``` block and nothing else.
-
-**Error Message:**
-{error_message}
-
-**Error occurred near line {error_line}. Here is a snippet of the code around the error line (with line numbers):**
-```
-{context_snippet}
-```
-
-**Full Invalid Mermaid Code:**
-```mermaid
-{invalid_code}
-```
-
-Please provide the full, corrected Mermaid code.
-"""
-    try:
-        completion_response = await llm_config._llm.acomplete(prompt=prompt)
-        if completion_response and completion_response.text:
-            # Extract code from ```mermaid ... ``` block
-            fixed_code_match = re.search(r"```mermaid\n(.*?)\n```", completion_response.text, re.DOTALL)
-            if fixed_code_match:
-                fixed_code = fixed_code_match.group(1).strip()
-                log.info("LLM provided a potential fix for the Mermaid code.")
-                return fixed_code
-            else:
-                log.warning("LLM response for Mermaid fix did not contain a valid code block.")
-                return None
-    except Exception as e:
-        log.error(f"An error occurred while asking LLM to fix Mermaid code: {e}", exc_info=True)
-    return None
-
 # --- Helper function to serialize SQLAlchemy models to dicts for LLM prompt ---
 def _serialize_model_instance(instance: Any, schema_class: Optional[Any] = None) -> Dict[str, Any]:
     """
@@ -496,8 +414,7 @@ def _get_sections_config() -> List[Dict[str, Any]]:
         "required_data": ["source_file_llm_summaries", "m204_files"],
         "instructions": """
         (Provide a high-level technical overview of the entire program’s purpose and architecture based on the 
-        ‘m204_detailed_description’ fields from all InputSource records. Focus on the program as a whole—its 
-        primary functionality, key components and how they interrelate, major workflows and integration points. 
+        ‘m204_detailed_description’ fields from all InputSource records. Focus on the program as a whole. 
         Do not dive into the details of any single module or business context.)
 
         After the overview, include:
@@ -545,6 +462,7 @@ The input provides the main processing loop as a block of M204 code (not as stru
 - Then, analyze the M204 code directly, outlining the sequence of operations and major conditional logic in a step-by-step, hierarchical bullet-point format.
     * For each significant operation (e.g., FIND, CALL, PRINT, variable assignment), state the code line and provide a plain-language explanation.
     * For each conditional (e.g., IF, ELSE IF, ELSE), clearly state the condition, then describe the logic within each branch, using indentation to show nesting and sequence.
+    * Dont include statements like print(***) or anything like that, the goal is to capture every rule or logic that is available
 - Explicitly identify the primary inputs, outputs, and any key decision points or repeated operations.
 
 """
@@ -655,8 +573,8 @@ The input provides the main processing loop as a block of M204 code (not as stru
             "instructions": """
    (Based on 'Global/Public M204 Variables Data':
     - Begin with an introductory paragraph about the role of global/public variables in the system.
-    - List each global or public variable using bullet points. Each bullet point should include its name, type, scope, suggested COBOL mapped name, and any defined attributes.
-    - Follow the list with a paragraph further explaining the potential collective purpose or usage patterns of these global variables based on their characteristics.)
+    - Present all global/public variables in a Markdown table with columns: Variable Name, Type, Scope, COBOL Mapped Name, Attributes.
+    - Follow the table with a paragraph further explaining the potential collective purpose or usage patterns of these global variables based on their characteristics.)
 """
         },
         {
@@ -764,6 +682,82 @@ The input provides the main processing loop as a block of M204 code (not as stru
         },
     ]
 
+async def _validate_mermaid_code(mermaid_code: str, section_title: str = "") -> tuple[bool, Optional[str], Optional[int]]:
+    """
+    Validates Mermaid code using an external Node.js script.
+    Returns (is_valid, error_message, error_line_number).
+    This version uses asyncio.to_thread to be compatible with Windows.
+    """
+    if not mermaid_code.strip():
+        return False, "Mermaid code is empty.", 0
+
+    try:
+        process = await asyncio.to_thread(_run_mermaid_validator_sync, mermaid_code)
+        if process.returncode == 0:
+            log.info(f"[Mermaid Validation][{section_title}] Mermaid validation successful.")
+            return True, None, None
+        else:
+            error_output = process.stderr.decode('utf-8').strip()
+            line_num_output = process.stdout.decode('utf-8').strip()
+            error_line = int(line_num_output) if line_num_output.isdigit() else 0
+            log.warning(f"[Mermaid Validation][{section_title}] Mermaid validation failed at line {error_line}. Error: {error_output}")
+            return False, error_output, error_line
+    except FileNotFoundError:
+        log.error(f"[Mermaid Validation][{section_title}] Mermaid validator script not found at '{MERMAID_VALIDATOR_PATH}'. Please ensure Node.js is installed and the script is in the correct path.")
+        return True, "Validator script not found, skipping validation.", None
+    except Exception as e:
+        log.error(f"[Mermaid Validation][{section_title}] An exception occurred during Mermaid validation: {e}", exc_info=True)
+        return True, f"An exception occurred during validation: {e}, skipping validation.", None
+
+async def _attempt_to_fix_mermaid_code(invalid_code: str, error_message: str, error_line: int, section_title: str = "") -> Optional[str]:
+    """
+    Uses the LLM to attempt to fix invalid Mermaid code based on a specific error.
+    """
+    if not llm_config._llm:
+        return None
+
+    log.info(f"[Mermaid Fix][{section_title}] Attempting to fix invalid Mermaid code with LLM. Error at line {error_line}.")
+
+    lines = invalid_code.split('\n')
+    start = max(0, error_line - 4)
+    end = min(len(lines), error_line + 3)
+    context_snippet = "\n".join(f"{i+1}: {line}" for i, line in enumerate(lines[start:end]))
+
+    prompt = f"""
+You are an expert in Mermaid.js syntax. The following Mermaid code is invalid.
+Your task is to fix it based on the provided error message and context, without changing the meaning or structure of the diagram.
+Your response must contain *only* the complete, corrected, raw Mermaid code inside a ```mermaid ... ``` block and nothing else.
+
+**Error Message:**
+{error_message}
+
+**Error occurred near line {error_line}. Here is a snippet of the code around the error line (with line numbers):**
+```
+{context_snippet}
+```
+
+**Full Invalid Mermaid Code:**
+```mermaid
+{invalid_code}
+```
+
+Please provide the full, corrected Mermaid code.
+"""
+    try:
+        completion_response = await llm_config._llm.acomplete(prompt=prompt)
+        if completion_response and completion_response.text:
+            fixed_code_match = re.search(r"```mermaid\n(.*?)\n```", completion_response.text, re.DOTALL)
+            if fixed_code_match:
+                fixed_code = fixed_code_match.group(1).strip()
+                log.info(f"[Mermaid Fix][{section_title}] LLM provided a potential fix for the Mermaid code.")
+                return fixed_code
+            else:
+                log.warning(f"[Mermaid Fix][{section_title}] LLM response for Mermaid fix did not contain a valid code block.")
+                return None
+    except Exception as e:
+        log.error(f"[Mermaid Fix][{section_title}] An error occurred while asking LLM to fix Mermaid code: {e}", exc_info=True)
+    return None
+
 async def _generate_llm_section(
     section_id: str,
     section_title: str,
@@ -811,7 +805,7 @@ Do not add any preamble or explanation before the section's heading.
 Ensure the entire output for this section is valid Markdown.
 """
     log.info(f"Generating section: '{section_title}' (ID: {section_id})")
-    
+
     try:
         completion_response = await llm_config._llm.acomplete(prompt=prompt_for_section)
         if completion_response and completion_response.text:
@@ -820,10 +814,9 @@ Ensure the entire output for this section is valid Markdown.
             log.debug(f"Raw LLM response for section '{section_id}':\n{section_content}")
 
             # --- START SANITIZATION AND MERMAID FIXING ---
-            # Sanitize the output: remove potential markdown code block wrappers
             if section_content.startswith("```markdown"):
                 section_content = section_content[len("```markdown"):].lstrip()
-            
+
             if section_content.endswith("```"):
                 section_content = section_content[:-len("```")].rstrip()
 
@@ -834,13 +827,12 @@ Ensure the entire output for this section is valid Markdown.
                 for i in range(1, len(parts)):
                     processed_content += "```mermaid"
                     if "```" not in parts[i]:
-                        log.warning(f"Found unclosed mermaid block in section '{section_id}'. Appending closing fence before validation.")
+                        log.warning(f"Found unclosed mermaid block in section '{section_title}'. Appending closing fence before validation.")
                         processed_content += parts[i].rstrip() + "\n```"
                     else:
                         processed_content += parts[i]
                 section_content = processed_content
-            
-            
+
             # --- MERMAID VALIDATION AND SELF-CORRECTION LOOP ---
             mermaid_match = re.search(r"```mermaid\n(.*?)\n```", section_content, re.DOTALL)
             if mermaid_match:
@@ -849,41 +841,37 @@ Ensure the entire output for this section is valid Markdown.
                 last_error_msg = "Diagram validation failed."
 
                 for attempt in range(MAX_MERMAID_FIX_ATTEMPTS):
-                    is_valid, error_msg, error_line = await _validate_mermaid_code(mermaid_code)
-                    
+                    is_valid, error_msg, error_line = await _validate_mermaid_code(mermaid_code, section_title)
+
                     if is_valid:
-                        log.info(f"Mermaid diagram in section '{section_id}' is valid after {attempt} fix attempts.")
-                        # If the code was fixed, replace it in the main content
+                        log.info(f"[Mermaid Validation][{section_title}] Mermaid diagram is valid after {attempt} fix attempts.")
                         if attempt > 0:
                             new_mermaid_block = f"```mermaid\n{mermaid_code}\n```"
                             section_content = section_content.replace(original_mermaid_block, new_mermaid_block)
-                        break # Exit the loop on success
-                    
-                    last_error_msg = error_msg or "Unknown validation error."
-                    log.warning(f"Mermaid fix attempt {attempt + 1}/{MAX_MERMAID_FIX_ATTEMPTS} for section '{section_id}' failed. Error: {last_error_msg}")
+                        break
 
-                    if attempt < MAX_MERMAID_FIX_ATTEMPTS - 1: # Don't try to fix on the last attempt
-                        fixed_code = await _attempt_to_fix_mermaid_code(mermaid_code, last_error_msg, error_line or 0)
+                    last_error_msg = error_msg or "Unknown validation error."
+                    log.warning(f"[Mermaid Validation][{section_title}] Mermaid fix attempt {attempt + 1}/{MAX_MERMAID_FIX_ATTEMPTS} failed. Error: {last_error_msg}")
+
+                    if attempt < MAX_MERMAID_FIX_ATTEMPTS - 1:
+                        fixed_code = await _attempt_to_fix_mermaid_code(mermaid_code, last_error_msg, error_line or 0, section_title)
                         if fixed_code:
-                            mermaid_code = fixed_code # Update code for the next validation cycle
+                            mermaid_code = fixed_code
                         else:
-                            log.error(f"LLM could not provide a fix for section '{section_id}'. Aborting fix attempts.")
-                            break # Abort if LLM fails to provide a fix
-                else: # This 'else' belongs to the 'for' loop, executes if the loop finishes without a 'break'
-                    log.error(f"Failed to validate Mermaid diagram for section '{section_id}' after {MAX_MERMAID_FIX_ATTEMPTS} attempts.")
+                            log.error(f"[Mermaid Fix][{section_title}] LLM could not provide a fix. Aborting fix attempts.")
+                            break
+                else:
+                    log.error(f"[Mermaid Validation][{section_title}] Failed to validate Mermaid diagram after {MAX_MERMAID_FIX_ATTEMPTS} attempts.")
                     error_block = f"```\n[Mermaid Diagram Generation Failed]\nThe LLM failed to generate a valid diagram after multiple correction attempts. The final error was:\n{last_error_msg}\n```"
                     section_content = section_content.replace(original_mermaid_block, error_block)
-
 
             if not section_content.lstrip().startswith(section_title):
                 log.warning(f"LLM output for section '{section_id}' did not start with the expected title. Expected: '{section_title}'. Got: '{section_content[:200]}'. Prepending title.")
                 section_content = f"{section_title}\n\n{section_content.lstrip()}"
             else:
-                # This logic helps ensure proper spacing after the title if the LLM doesn't add it.
                 lines = section_content.splitlines()
                 if len(lines) > 1 and lines[0].strip() == section_title.strip():
                     if not section_content.startswith(f"{section_title}\n\n"):
-                         # Add a newline if the next line isn't already blank or a list/code block
                         if lines[1].strip() and not (lines[1].strip().startswith(("*", "-", "```"))):
                             section_content = f"{section_title}\n\n{section_content[len(lines[0]):].lstrip()}"
 
@@ -902,12 +890,13 @@ Ensure the entire output for this section is valid Markdown.
         return f"{section_title}\n\nError generating content for this section: {str(e_llm_section)}"
 
 
-
 async def _generate_individual_procedure_requirements(procedures: list) -> str:
     """
     For each procedure, call the LLM with only code and summary (no COBOL function name, no source file summary).
     Returns Markdown content for each procedure, with the procedure name as a heading.
     """
+    if not procedures:
+        return "No M204 procedures (subroutines) are defined for this file/project."
     results = []
     for proc in procedures:
         proc_name = proc.get('m204_proc_name', 'N/A')
@@ -1004,6 +993,11 @@ async def generate_and_save_project_requirements_document(
                 )
                 # Always prepend the top-level heading
                 return f"## 3. M204 Procedures\n\n{individual_content}"
+            
+            if section_id == "procedure_call_flow":
+                if not project_data_for_llm.get("procedures"):
+                    return f"{section_title}\n\nNo procedure calls are defined because there are no procedures in this file/project."
+
             else:
                 return await _generate_llm_section(
                     section_id=section_id,

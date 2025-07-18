@@ -151,7 +151,10 @@ async def _extract_and_store_m204_open_statements(
     Extracts OPEN {FILENAME} statements from M204 source and stores them in the DB.
     """
     open_statements = []
-    open_pattern = re.compile(r"^\s*OPEN\s+([A-Z0-9_#@$-]+)", re.IGNORECASE | re.MULTILINE)
+    open_pattern = re.compile(
+        r"^\s*(OPENC?)\s+([A-Z0-9_#@$\-]+)",
+        re.IGNORECASE | re.MULTILINE
+    )
     lines = file_content.splitlines()
 
     for i, line in enumerate(lines):

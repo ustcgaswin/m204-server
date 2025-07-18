@@ -53,14 +53,19 @@ def strip_markdown_code_block(text: str) -> str:
         return match.group(1).strip()
     return text
 
+
+
 class TestCase(BaseModel):
     test_case_id: str = PydanticField(description="A unique identifier for the test case (e.g., TC_001, TC_VALID_INPUT).")
     description: str = PydanticField(description="A brief description of what this test case covers.")
-    preconditions: Optional[List[str]] = PydanticField(description="Any preconditions or setup required.", default_factory=list)
+    preconditions: Optional[List[str]] = PydanticField(default=None, description="Any preconditions or setup required.")
     inputs: Dict[str, Any] = PydanticField(description="Key-value pairs of input parameters or %variables and their test values.")
     expected_outputs: Dict[str, Any] = PydanticField(description="Key-value pairs of expected output %variables, screen elements, or file states and their values.")
     expected_behavior_description: str = PydanticField(description="A textual description of the expected behavior, side effects, or outcome.")
 
+class ParagraphTestCaseGenerationOutput(BaseModel):
+    cobol_paragraph_name: str = PydanticField(description="The COBOL paragraph name for which tests are being generated.")
+    test_cases: List[TestCase] = PydanticField(description="A list of suggested unit test cases for the paragraph.")
 class M204ProcedureToCobolOutput(BaseModel):
     m204_procedure_name: str = PydanticField(description="Original M204 procedure name.")
     cobol_code_block: str = PydanticField(description="Generated COBOL code block.")
@@ -111,10 +116,84 @@ class VsamJclGenerationOutput(BaseModel):
     generation_comments: Optional[str] = PydanticField(description="Any comments or notes from the LLM regarding the JCL generation process or assumptions made.", default=None)
 
 
+
+
 class ArtifactsService:
     def __init__(self, db: Session):
         self.db = db
         self.llm_semaphore = asyncio.Semaphore(LLM_API_CALL_BATCH_SIZE)
+
+
+    async def _llm_generate_test_cases_for_paragraph(self, paragraph_name: str, cobol_code: str, used_variables: Optional[List[Any]] = None) -> ParagraphTestCaseGenerationOutput:
+        """
+        Uses LLM to generate unit test cases for a COBOL paragraph.
+        """
+        if not llm_config._llm:
+            # Return a placeholder if LLM is not available
+            return ParagraphTestCaseGenerationOutput(
+                cobol_paragraph_name=paragraph_name,
+                test_cases=[]
+            )
+        prompt = f"""
+You are an expert COBOL unit test designer. Your task is to generate a set of high-quality, realistic unit test cases for the following COBOL paragraph.
+
+COBOL Paragraph Name: {paragraph_name}
+COBOL Code:
+```cobol
+{cobol_code}
+```
+{"Used variables:\n" + str(used_variables) if used_variables else ""}
+
+**Instructions:**
+- Each test case should cover a distinct scenario, including edge cases, typical flows, and error conditions.
+- For each test case, provide:
+    - `test_case_id`: A unique identifier (e.g., TC_001, TC_VALID_INPUT).
+    - `description`: A brief summary of what the test case covers.
+    - `preconditions`: Any setup or initial state required (optional).
+    - `inputs`: Key-value pairs of input parameters or variables and their test values.
+    - `expected_outputs`: Key-value pairs of expected output variables, screen elements, or file states and their values.
+    - `expected_behavior_description`: A textual description of the expected behavior, side effects, or outcome.
+
+**Output Format:**
+Respond ONLY with a JSON object matching this structure:
+{{
+  "cobol_paragraph_name": "{paragraph_name}",
+  "test_cases": [
+    {{
+      "test_case_id": "TC_001",
+      "description": "Valid input: Customer record exists and is processed.",
+      "preconditions": ["Customer file is open", "Record exists for CUST-ID=12345678"],
+      "inputs": {{"CUST-ID": "12345678"}},
+      "expected_outputs": {{"STATUS": "PROCESSED", "ERROR-FLAG": "N"}},
+      "expected_behavior_description": "The paragraph should process the customer record and set STATUS to PROCESSED with no error."
+    }},
+    {{
+      "test_case_id": "TC_002",
+      "description": "Edge case: Customer record not found.",
+      "preconditions": ["Customer file is open", "No record exists for CUST-ID=99999999"],
+      "inputs": {{"CUST-ID": "99999999"}},
+      "expected_outputs": {{"STATUS": "NOT-FOUND", "ERROR-FLAG": "Y"}},
+      "expected_behavior_description": "The paragraph should handle missing records gracefully and set ERROR-FLAG to Y."
+    }}
+    // ... more test cases ...
+  ]
+}}
+Do not include any explanatory text, markdown, or comments outside the JSON object.
+I want just the json
+"""
+        try:
+            raw_response = await llm_config._llm.acomplete(prompt=prompt)
+            log.debug(f"raw response for test case generation: {raw_response.text} ")
+            llm_structured = llm_config._llm.as_structured_llm(ParagraphTestCaseGenerationOutput)
+            response = await llm_structured.acomplete(prompt=prompt)
+            output_json = json.loads(strip_markdown_code_block(response.text.strip()))
+            return ParagraphTestCaseGenerationOutput(**output_json)
+        except Exception as e:
+            log.error(f"Error generating test cases for paragraph '{paragraph_name}': {e}", exc_info=True)
+            return ParagraphTestCaseGenerationOutput(
+                cobol_paragraph_name=paragraph_name,
+                test_cases=[]
+            )
 
     def _sanitize_filename_base(self, name: str, default_prefix="PROG") -> str:
         if not name:
@@ -1107,16 +1186,6 @@ Generate the COBOL conversion maintaining exact JSON structure and following all
 
         log.info(f"Found {len(related_procedures)} procedures and {len(m204_files_in_this_source)} M204 files for this input source ('{input_source_name_for_comments}').")
 
-        if m204_files_in_this_source:
-            log.info(f"M204 Files defined in InputSource ID {current_input_source_with_details.input_source_id} ('{input_source_name_for_comments}'):")
-            for m204_file_obj_log in m204_files_in_this_source:
-                log.info(
-                    f"  - M204File ID: {m204_file_obj_log.m204_file_id}, "
-                    f"Name: '{m204_file_obj_log.m204_file_name}', "
-                    f"Is DB File: {m204_file_obj_log.is_db_file}, "
-                    f"Target VSAM DSN: '{m204_file_obj_log.target_vsam_dataset_name}'"
-                )
-        
         # --- COBOL, Unit Test, and Run JCL Generation (Only for 'm204' source type) ---
         if current_input_source_with_details.source_type == 'm204':
             cobol_file_name = f"{cobol_program_id_base}.cbl"
@@ -1335,47 +1404,57 @@ MAIN-PARAGRAPH.
             db_cobol_artifacts_to_add.append(GeneratedCobolArtifact(**cobol_output_schema.model_dump()))
             log.info(f"Generated COBOL file {cobol_file_name} for M204 source.")
 
-            log.info("Starting unit test plan generation (M204 source).")
-            unit_test_file_name = f"test_{cobol_program_id_base}.txt"
-            unit_test_content_parts = [f"Unit Test Plan for COBOL: {cobol_file_name}\nFrom M204 Source: {input_source_name_for_comments}\n"]
-            if not related_procedures:
-                unit_test_content_parts.append("- No M204 procedures for test cases.\n")
-            for proc in related_procedures:
-                unit_test_content_parts.append(f"\n--- Test Cases for M204 Procedure: {proc.m204_proc_name} ---\n")
-                if proc.suggested_test_cases_json:
+            # --- LLM-based Unit Test Generation for COBOL Paragraphs ---
+            log.info("Starting LLM-based unit test generation for COBOL paragraphs (M204 source).")
+            test_case_outputs = []
+
+            # Main loop paragraphs
+            if main_loop_result and hasattr(main_loop_result, "paragraphs"):
+                for para in main_loop_result.paragraphs:
                     try:
-                        test_cases_data = json.loads(proc.suggested_test_cases_json) if isinstance(proc.suggested_test_cases_json, str) else proc.suggested_test_cases_json
-                        if isinstance(test_cases_data, list):
-                            for tc_data in test_cases_data:
-                                if isinstance(tc_data, dict):
-                                    try:
-                                        tc = TestCase(**tc_data)
-                                        unit_test_content_parts.extend([
-                                            f"ID: {tc.test_case_id}\n  Desc: {tc.description}\n",
-                                            ("  Inputs: " + str(tc.inputs) + "\n"),
-                                            ("  Expected: " + str(tc.expected_outputs) + "\n")
-                                        ])
-                                    except Exception as e_tc:
-                                        unit_test_content_parts.append(f"  Error parsing TC: {e_tc}\n")
-                                else:
-                                    unit_test_content_parts.append("  Invalid TC item (not dict).\n")
-                        else:
-                            unit_test_content_parts.append("  Invalid test cases format (not list).\n")
-                    except Exception as e_json:
-                        unit_test_content_parts.append(f"  Error parsing test cases JSON: {e_json}\n")
-                else:
-                    unit_test_content_parts.append("  No pre-defined test cases.\n")
-            final_unit_test_content = "".join(unit_test_content_parts)
+                        tc_output = await self._llm_generate_test_cases_for_paragraph(
+                            para.paragraph_name,
+                            para.cobol_code,
+                            getattr(main_loop_result, "used_variables", None)
+                        )
+                        test_case_outputs.append(tc_output)
+                    except Exception as e:
+                        log.error(f"Error generating test cases for paragraph '{para.paragraph_name}': {e}", exc_info=True)
+                        # Optionally, append a placeholder or skip
+
+            # Procedure paragraphs
+            for proc_result in converted_procs_results:
+                if isinstance(proc_result, M204ProcedureToCobolParagraphsOutput):
+                    for para in proc_result.paragraphs:
+                        try:
+                            tc_output = await self._llm_generate_test_cases_for_paragraph(
+                                para.paragraph_name,
+                                para.cobol_code,
+                                getattr(proc_result, "used_variables", None)
+                            )
+                            test_case_outputs.append(tc_output)
+                        except Exception as e:
+                            log.error(f"Error generating test cases for procedure paragraph '{para.paragraph_name}': {e}", exc_info=True)
+                            # Optionally, append a placeholder or skip
+
+            # Store as a single unit test artifact file (JSON)
+            unit_test_file_name = f"unit_tests_{cobol_program_id_base}.json"
+            try:
+                unit_test_content = json.dumps([tc.model_dump() for tc in test_case_outputs], indent=2)
+            except Exception as e:
+                log.error(f"Error serializing unit test cases: {e}", exc_info=True)
+                unit_test_content = json.dumps([], indent=2)  # Fallback to empty list
+
             unit_test_schema = UnitTestOutputSchema(
                 input_source_id=current_input_source_with_details.input_source_id,
                 file_name=unit_test_file_name,
-                content=final_unit_test_content,
+                content=unit_test_content,
                 artifact_type="unit_test"
             )
             unit_test_output_schemas.append(unit_test_schema)
             db_unit_test_artifacts_to_add.append(GeneratedUnitTestArtifact(**unit_test_schema.model_dump()))
-            log.info(f"Generated Unit Test file {unit_test_file_name} for M204 source.")
-
+            log.info(f"Generated LLM-based Unit Test file {unit_test_file_name} for M204 source.")
+            # --- General JCL (run JCL) generation ---
             log.info("Starting general JCL (run JCL) generation (M204 source).")
             general_jcl_file_name = f"{cobol_program_id_base}_run.jcl"
             dd_statements_for_jcl = []
@@ -1504,7 +1583,6 @@ MAIN-PARAGRAPH.
         )
         log.info(f"Finished artifact generation for InputSource ID: {input_source.input_source_id} ('{input_source_name_for_comments}'). Returning {len(response.cobol_files)} COBOL, {len(response.jcl_files)} JCL, {len(response.unit_test_files)} Unit Test files.")
         return response
-
 
     async def generate_artifacts_for_project(self, project_id: int) -> List[InputSourceArtifacts]:
         project = self.db.query(Project).filter(Project.project_id == project_id).first()

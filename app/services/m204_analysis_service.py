@@ -42,10 +42,6 @@ class M204ConceptIdentificationOutput(BaseModel):
     brief_reasoning: str = Field(description="A very brief explanation of why these concepts are relevant to understanding the procedure's core functionality.")
 
 
-class CobolParagraphSuggestion(BaseModel):
-    """Describes a single suggested COBOL paragraph derived from the M204 procedure."""
-    cobol_paragraph_name: str = Field(description="A valid and descriptive COBOL paragraph name (e.g., '1000-PROCESS-RECORD').")
-    paragraph_summary: str = Field(description="A detailed summary of the logic and functionality contained within this specific COBOL paragraph.")
 
 
 class M204DetailedAnalysisOutput(BaseModel):
@@ -54,11 +50,6 @@ class M204DetailedAnalysisOutput(BaseModel):
     detailed_analysis: str = Field(description="A comprehensive, multi-line string analyzing the M204 procedure. This should include sections for Purpose, Inputs, Outputs & Side-effects, Database Operations, and a detailed step-by-step logical flow with business rules.")
 
 
-class CobolStructureSuggestionOutput(BaseModel):
-    """Structured output for suggesting a COBOL paragraph structure for an M204 procedure."""
-    procedure_name: str = Field(description="The original M204 procedure name.")
-    cobol_paragraph_suggestions: List[CobolParagraphSuggestion] = Field(description="An array of suggested COBOL paragraphs that the M204 procedure can be broken down into.")
-    cobol_entry_point_name: str = Field(description="A suitable COBOL entry point name for the entire procedure (e.g., the name of the first paragraph to be called).")
 
 
 class M204VariableToCobolOutput(BaseModel):
@@ -74,21 +65,6 @@ class M204FileVsamAnalysisOutput(BaseModel):
     suggested_vsam_type: str = Field(description="Suggested VSAM organization (e.g., KSDS, ESDS, RRDS, LDS).")
     field_specific_suggestions: List[M204FieldVsamSuggestion] = Field(description="List of VSAM-specific suggestions for relevant M204 fields in this file.")
     overall_reasoning: Optional[str] = Field(description="Overall reasoning for the VSAM structure suggestion for the file.", default=None)
-
-class TestCase(BaseModel):
-    """Defines the structure for a single unit test case."""
-    test_case_id: str = Field(description="A unique identifier for the test case (e.g., TC_001, TC_VALID_INPUT).")
-    description: str = Field(description="A brief description of what this test case covers.")
-    preconditions: Optional[List[str]] = Field(default=None, description="Any preconditions or setup required (e.g., specific data in files, %variables set).")
-    inputs: Dict[str, Any] = Field(description="Key-value pairs of input parameters or %variables and their test values.")
-    expected_outputs: Dict[str, Any] = Field(description="Key-value pairs of expected output %variables, screen elements, or file states and their values.")
-    expected_behavior_description: str = Field(description="A textual description of the expected behavior, side effects, or outcome (e.g., 'Record X is written to FILEA', 'Error message Y is displayed').")
-
-
-class ParagraphTestCaseGenerationOutput(BaseModel):
-    """Structured output for LLM-generated unit test cases for a single COBOL paragraph."""
-    cobol_paragraph_name: str = Field(description="The COBOL paragraph name for which tests are being generated.")
-    test_cases: List[TestCase] = Field(description="A list of suggested unit test cases for the paragraph.")
 
 
 
@@ -205,6 +181,7 @@ async def _extract_and_store_m204_open_statements(
 
 
 
+
 async def _analyze_single_procedure_llm(
     proc_name: str,
     params_str: Optional[str],
@@ -215,17 +192,14 @@ async def _analyze_single_procedure_llm(
     rag_service: Optional[RagService]
 ) -> Dict[str, Any]:
     """
-    Performs LLM analysis (concept ID, RAG, detailed analysis, COBOL paragraph breakdown, and test case generation)
-    for a single M204 procedure in sequential, focused steps.
+    Performs LLM analysis for a single M204 procedure:
+    - Identifies key M204 concepts
+    - Generates a detailed analysis/summary
     """
     generated_summary: Optional[str] = f"AI analysis could not be completed for {proc_name}."
-    suggested_cobol_entry_point: Optional[str] = proc_name
-    cobol_paragraph_suggestions: List[Dict[str, Any]] = []
-    suggested_test_cases_json: Optional[List[Dict[str, Any]]] = None
     rag_context_for_summary: str = "No RAG context was available or generated for summarization."
     json_text_output_concept: Optional[str] = "N/A"
     json_text_output_analysis: Optional[str] = "N/A"
-    json_text_output_cobol: Optional[str] = "N/A"
 
     try:
         log.info(f"M204_LLM_TASK_START: Analyzing procedure: {proc_name} from file: {original_filename_for_debug} (InputSourceID: {input_source_id_for_debug})")
@@ -233,13 +207,10 @@ async def _analyze_single_procedure_llm(
         truncated_proc_content = current_procedure_content
 
         if not llm_config._llm:
-            log.warning(f"M204_LLM_TASK: LLM not available. Skipping full LLM analysis for procedure {proc_name}.")
+            log.warning(f"M204_LLM_TASK: LLM not available. Skipping LLM analysis for procedure {proc_name}.")
             return {
                 "proc_name": proc_name,
-                "generated_summary": "LLM not available for analysis.",
-                "suggested_cobol_entry_point": proc_name,
-                "suggested_test_cases_json": None,
-                "cobol_paragraph_suggestions": []
+                "generated_summary": "LLM not available for analysis."
             }
 
         # STEP 1: Identify M204 Concepts for RAG
@@ -334,129 +305,15 @@ Respond with a JSON object structured according to the M204DetailedAnalysisOutpu
             log.error(f"M204_LLM_TASK: Error during detailed analysis LLM call for {proc_name}: {e_analysis_llm}. Raw output: '{json_text_output_analysis}'", exc_info=True)
             generated_summary = f"Error during AI analysis for {proc_name}. Check logs."
 
-        # STEP 4: Suggest a COBOL paragraph structure based on the M204 code and its analysis
-        cobol_structure_prompt_fstr = f"""
-You are an expert M204 to COBOL migration specialist. Your task is to break down the given M204 procedure into a logical set of COBOL paragraphs.
-Use the original M204 code and its detailed analysis as context.
-
-M204 Procedure Name: {proc_name}
-M204 Procedure Parameters: {params_str or "None"}
-
-Detailed M204 Procedure Analysis:
---- ANALYSIS START ---
-{generated_summary}
---- ANALYSIS END ---
-
-Original M204 Procedure Content:
-```m204
-{truncated_proc_content}
-```
-
-Based on all the provided context, provide:
-1.  A breakdown of the M204 procedure into a list of logical COBOL paragraphs. For each paragraph, provide a valid COBOL name and a detailed summary of its specific functionality.
-2.  A suitable COBOL entry point name for the entire procedure (e.g., the name of the first paragraph to be called).
-
-Respond with a JSON object structured according to the CobolStructureSuggestionOutput model. The main keys must be:
-- "procedure_name": string (Must be "{proc_name}")
-- "cobol_paragraph_suggestions": list of objects (Each object with "cobol_paragraph_name" and "paragraph_summary")
-- "cobol_entry_point_name": string (The suggested COBOL entry point name)
-"""
-        cobol_structure_output_model: Optional[CobolStructureSuggestionOutput] = None
-        log.info(f"M204_LLM_TASK: Step 4: Generating COBOL paragraph breakdown for {proc_name}.")
-        try:
-            cobol_suggester_llm = llm_config._llm.as_structured_llm(CobolStructureSuggestionOutput)
-            completion_response_cobol = await cobol_suggester_llm.acomplete(prompt=cobol_structure_prompt_fstr)
-            json_text_output_cobol = completion_response_cobol.text
-            loaded_cobol_data = json.loads(strip_markdown_code_block(json_text_output_cobol))
-            cobol_structure_output_model = CobolStructureSuggestionOutput(**loaded_cobol_data)
-        except Exception as e_cobol_llm:
-            log.error(f"M204_LLM_TASK: Error during COBOL paragraph breakdown LLM call for {proc_name}: {e_cobol_llm}. Raw output: '{json_text_output_cobol}'", exc_info=True)
-
-        if cobol_structure_output_model:
-            suggested_cobol_entry_point = cobol_structure_output_model.cobol_entry_point_name
-            if cobol_structure_output_model.cobol_paragraph_suggestions:
-                cobol_paragraph_suggestions = [p.model_dump() for p in cobol_structure_output_model.cobol_paragraph_suggestions]
-            log.info(f"M204_LLM_TASK: {len(cobol_paragraph_suggestions)} COBOL paragraphs generated for {proc_name}.")
-
-        # STEP 5: Generate Unit Test Cases for each suggested COBOL paragraph
-        if cobol_paragraph_suggestions:
-            log.info(f"M204_LLM_TASK: Step 5: Generating test cases for {len(cobol_paragraph_suggestions)} COBOL paragraphs for procedure {proc_name}.")
-            test_case_generator_llm = llm_config._llm.as_structured_llm(ParagraphTestCaseGenerationOutput)
-            tasks = []
-
-            for para_suggestion in cobol_paragraph_suggestions:
-                cobol_para_name = para_suggestion.get("cobol_paragraph_name")
-                para_summary = para_suggestion.get("paragraph_summary")
-
-                test_case_generation_prompt_fstr = f"""
-You are an expert COBOL software tester. Based on the summary of a single COBOL paragraph, generate a list of representative unit test cases.
-The paragraph is part of a larger M204 procedure that is being converted to COBOL.
-
-Original M204 Procedure Name: {proc_name}
-Original M204 Procedure Parameters: {params_str or "None"}
-Original M204 Procedure Content:
-```m204
-{truncated_proc_content}
-```
-
-Target COBOL Paragraph Name: {cobol_para_name}
-Target COBOL Paragraph Summary:
-{para_summary}
-
-Generate test cases specifically for the logic described in the paragraph summary. Focus on:
-- Happy path scenarios for this paragraph.
-- Edge cases relevant to this paragraph's logic.
-- Error handling described in the summary.
-- Different logical branches mentioned in the summary.
-
-Respond with a JSON object structured according to the ParagraphTestCaseGenerationOutput model.
-The main keys must be "cobol_paragraph_name" (string, must be "{cobol_para_name}") and "test_cases" (a list of TestCase objects).
-Each TestCase must have "test_case_id", "description", "preconditions", "inputs", "expected_outputs", and "expected_behavior_description".
-If no specific test cases can be generated, return an empty list for "test_cases".
-"""             
-                
-                raw_llm_output = await llm_config._llm.acomplete(prompt=test_case_generation_prompt_fstr)
-                log.debug(f"Raw test case output for paragraph '{cobol_para_name}': {raw_llm_output.text}")
-                tasks.append(test_case_generator_llm.acomplete(prompt=test_case_generation_prompt_fstr))
-
-            test_case_results = await asyncio.gather(*tasks, return_exceptions=True)
-            generated_test_cases_by_paragraph = []
-
-            for i, result_or_exc in enumerate(test_case_results):
-                para_name = cobol_paragraph_suggestions[i].get("cobol_paragraph_name", "UNKNOWN_PARA")
-                if isinstance(result_or_exc, Exception):
-                    log.error(f"M204_LLM_TASK: Error generating test cases for paragraph {para_name}: {result_or_exc}", exc_info=True)
-                else:
-                    try:
-                        loaded_data = json.loads(strip_markdown_code_block(result_or_exc.text))
-                        test_case_output = ParagraphTestCaseGenerationOutput(**loaded_data)
-                        if test_case_output.test_cases:
-                            generated_test_cases_by_paragraph.append(test_case_output.model_dump())
-                            log.info(f"M204_LLM_TASK: Generated {len(test_case_output.test_cases)} test cases for paragraph {para_name}.")
-                    except Exception as e_test_case_llm:
-                        raw_output = getattr(result_or_exc, 'text', str(result_or_exc))
-                        log.error(
-                            f"M204_LLM_TASK: Error parsing test case LLM response for paragraph {para_name}: {e_test_case_llm}. "
-                            f"Raw output: '{raw_output}'",
-                            exc_info=True
-                        )
-            if generated_test_cases_by_paragraph:
-                suggested_test_cases_json = generated_test_cases_by_paragraph
-        else:
-            log.info(f"M204_LLM_TASK: No COBOL paragraphs were suggested for {proc_name}, skipping test case generation.")
-            suggested_test_cases_json = []
-
     except Exception as e_llm_main:
-        log.error(f"M204_LLM_TASK: Main error during multi-step LLM analysis for procedure {proc_name}: {e_llm_main}", exc_info=True)
+        log.error(f"M204_LLM_TASK: Main error during LLM analysis for procedure {proc_name}: {e_llm_main}", exc_info=True)
 
     log.info(f"M204_LLM_TASK_END: Finished analyzing procedure: {proc_name} from file: {original_filename_for_debug}")
     return {
         "proc_name": proc_name,
-        "generated_summary": generated_summary,
-        "suggested_cobol_entry_point": suggested_cobol_entry_point,
-        "cobol_paragraph_suggestions": cobol_paragraph_suggestions,
-        "suggested_test_cases_json": suggested_test_cases_json
+        "generated_summary": generated_summary
     }
+
 
 
 async def _task_generate_and_store_m204_description(
@@ -777,8 +634,6 @@ async def _extract_and_store_m204_procedures(
             procedure_content=proc_data["current_procedure_content"],
             summary=proc_data["generated_summary"],
             target_cobol_function_name=proc_data["suggested_cobol_function_name"],
-            suggested_test_cases_json=proc_data.get("suggested_test_cases_json"),
-            cobol_paragraph_suggestions_json=proc_data.get("cobol_paragraph_suggestions")
         )
 
         if existing_proc:

@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
-# --- Test Case Schema (as it might be part of the procedure's data) ---
+# --- Test Case Schema (optional, not used in current pipeline) ---
 class TestCaseSchema(BaseModel):
     test_case_id: str
     description: str
@@ -11,30 +11,39 @@ class TestCaseSchema(BaseModel):
     expected_outputs: Dict[str, Any]
     expected_behavior_description: str
 
-# --- M204 Variable Schemas (Forward declaration for M204ProcedureResponseSchema) ---
+# --- M204 Variable Schemas ---
 class M204VariableBaseSchema(BaseModel):
     variable_name: str
     variable_type: Optional[str] = None
     scope: Optional[str] = None
-    attributes: Optional[Dict[str, Any]] = None # Renamed from attributes_json for consistency
+    attributes: Optional[Dict[str, Any]] = None
     definition_line_number: Optional[int] = None
-    # Renamed from suggested_cobol_name to be more generic if other targets are considered
-    cobol_mapped_variable_name: Optional[str] = None # Was suggested_cobol_name
-    cobol_variable_type: Optional[str] = None # e.g., PIC X(10), PIC 9(5)V99
-    # is_explicitly_defined: Optional[bool] = None # Removed as it's not in the model and context implies true
+    cobol_mapped_variable_name: Optional[str] = None
+    cobol_variable_type: Optional[str] = None
 
 class M204VariableResponseSchema(M204VariableBaseSchema):
-    variable_id: int # Changed from m204_variable_id
+    variable_id: int
     project_id: int
     input_source_id: int
     procedure_id: Optional[int] = None
-    procedure_name: Optional[str] = None # Property from the model
+    procedure_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
-    # cobol_variable_type is inherited from M204VariableBaseSchema
 
     class Config:
         from_attributes = True
+
+class M204VariableCreateSchema(M204VariableBaseSchema):
+    project_id: int
+    input_source_id: int
+    procedure_id: Optional[int] = None
+
+class M204VariableUpdateSchema(BaseModel):
+    cobol_mapped_variable_name: Optional[str] = None
+    cobol_variable_type: Optional[str] = None
+    variable_type: Optional[str] = None
+    scope: Optional[str] = None
+    attributes: Optional[Dict[str, Any]] = None
 
 # --- Procedure Schemas ---
 class M204ProcedureBaseSchema(BaseModel):
@@ -46,8 +55,7 @@ class M204ProcedureBaseSchema(BaseModel):
     end_line_in_source: Optional[int] = None
     procedure_content: Optional[str] = None
     summary: Optional[str] = None
-    target_cobol_function_name: Optional[str] = None # MODIFIED HERE
-    suggested_test_cases_json: Optional[List[Dict[str, Any]]] = Field(default=None, description="Test cases grouped by suggested COBOL paragraph.")
+    target_cobol_function_name: Optional[str] = None
 
 class M204ProcedureCreateSchema(M204ProcedureBaseSchema):
     project_id: int
@@ -61,10 +69,9 @@ class M204ProcedureUpdateSchema(BaseModel):
     end_line_in_source: Optional[int] = None
     procedure_content: Optional[str] = None
     summary: Optional[str] = None
-    target_cobol_function_name: Optional[str] = None # MODIFIED HERE
-    suggested_test_cases_json: Optional[List[Dict[str, Any]]] = None
-    is_subroutine: Optional[bool] = None # Added from model
-    is_public: Optional[bool] = None # Added from model
+    target_cobol_function_name: Optional[str] = None
+    is_subroutine: Optional[bool] = None
+    is_public: Optional[bool] = None
 
 class M204ProcedureResponseSchema(M204ProcedureBaseSchema):
     proc_id: int
@@ -73,20 +80,18 @@ class M204ProcedureResponseSchema(M204ProcedureBaseSchema):
     is_runnable_main: Optional[bool] = None
     created_at: datetime
     updated_at: datetime
-    variables: List[M204VariableResponseSchema] = Field(default_factory=list) # From relationship
-    suggested_test_cases_json: Optional[List[TestCaseSchema]] = Field(default=None, validation_alias='suggested_test_cases_json')
+    variables: List[M204VariableResponseSchema] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
 
 # --- M204 File Schemas ---
 class M204FileBaseSchema(BaseModel):
-    m204_file_name: str # This is the DDNAME or derived name
-    m204_logical_dataset_name: Optional[str] = None # M204 logical name (e.g., from DEFINE DATASET or IMAGE)
-    # defined_at_line: Optional[int] = None # Covered by definition_line_number_start/end
+    m204_file_name: str
+    m204_logical_dataset_name: Optional[str] = None
     definition_line_number_start: Optional[int] = None
     definition_line_number_end: Optional[int] = None
-    m204_attributes: Optional[str] = None # Raw attributes from DEFINE DATASET
+    m204_attributes: Optional[str] = None
     is_db_file: Optional[bool] = None
     file_definition_json: Optional[Dict[str, Any]] = None
     target_vsam_dataset_name: Optional[str] = None
@@ -118,30 +123,11 @@ class M204FileResponseSchema(M204FileBaseSchema):
     class Config:
         from_attributes = True
 
-# --- M204 Variable Schemas (Full definition) ---
-# M204VariableBaseSchema and M204VariableResponseSchema are already defined above.
-
-class M204VariableCreateSchema(M204VariableBaseSchema):
-    project_id: int
-    input_source_id: int
-    procedure_id: Optional[int] = None
-    # cobol_variable_type is inherited from M204VariableBaseSchema
-
-class M204VariableUpdateSchema(BaseModel):
-    cobol_mapped_variable_name: Optional[str] = None
-    cobol_variable_type: Optional[str] = None # e.g., PIC X(10), PIC 9(5)V99
-    variable_type: Optional[str] = None
-    scope: Optional[str] = None
-    attributes: Optional[Dict[str, Any]] = None
-    # is_explicitly_defined: Optional[bool] = None # Removed
-
 # --- M204 Procedure Call Schemas ---
 class M204ProcedureCallBaseSchema(BaseModel):
     called_procedure_name: str
     line_number: int
     is_external: Optional[bool] = None
-    # call_arguments_string: Optional[str] = None # Removed as per model simplification
-    # parsed_arguments_json: Optional[Dict[str, Any]] = None # Removed as per model simplification
 
 class M204ProcedureCallCreateSchema(M204ProcedureCallBaseSchema):
     project_id: int
@@ -173,7 +159,7 @@ class M204OpenStatementResponseSchema(M204OpenStatementBaseSchema):
     open_statement_id: int
     project_id: int
     input_source_id: int
-    # Add created_at/updated_at if you add them to the model
+
     class Config:
         from_attributes = True
 
@@ -181,7 +167,6 @@ class M204OpenStatementResponseSchema(M204OpenStatementBaseSchema):
 class M204AnalysisResultDataSchema(BaseModel):
     procedures_found: List[M204ProcedureResponseSchema] = Field(default_factory=list)
     defined_files_found: List[M204FileResponseSchema] = Field(default_factory=list)
-    # defined_fields_found: List[M204FieldResponseSchema] = Field(default_factory=list) # Removed
     variables_found: List[M204VariableResponseSchema] = Field(default_factory=list)
     procedure_calls_found: List[M204ProcedureCallResponseSchema] = Field(default_factory=list)
     open_statements_found: List[M204OpenStatementResponseSchema] = Field(default_factory=list)

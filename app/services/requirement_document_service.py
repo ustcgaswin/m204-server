@@ -1011,6 +1011,13 @@ async def generate_and_save_project_requirements_document(
     try:
         log.info(f"Executing {len(generation_tasks)} section generation tasks with a concurrency limit of {MAX_CONCURRENT_LLM_CALLS}.")
         generated_sections_content = await asyncio.gather(*generation_tasks)
+         # Log which sections are None
+        for idx, part in enumerate(generated_sections_content):
+            if part is None:
+                section_id = sections_config[idx].get("id", "unknown")
+                section_title = sections_config[idx].get("title", "unknown")
+                log.warning(f"Section '{section_id}' ('{section_title}') returned None and will be skipped in the final document.")
+        markdown_parts.extend(generated_sections_content)
         markdown_parts.extend(generated_sections_content)
         log.info("All parallel section generation tasks completed.")
     except Exception as e_gather:

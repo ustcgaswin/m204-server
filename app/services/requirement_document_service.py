@@ -906,9 +906,15 @@ async def _generate_individual_procedure_requirements(procedures: list) -> str:
         proc_vars = proc.get('variables_in_procedure', [])
 
         prompt = f"""
-You are a senior technical analyst. Generate a requirements paragraph for the following M204 procedure (subroutine).
-Do NOT mention the COBOL function name.
-Use the code and summary provided. Add bullet points for parameters and variables.
+You are a senior technical analyst. For the following M204 procedure (subroutine):
+
+- Write a descriptive paragraph summarizing its purpose, type, and any summary provided.
+- Then, analyze the code and capture all rules, logic, and decision points in a hierarchical bullet-point format.
+    * For each significant operation (e.g., FIND, CALL, PRINT, variable assignment), state the code line and provide a plain-language explanation.
+    * For each conditional (e.g., IF, ELSE IF, ELSE), clearly state the condition, then describe the logic within each branch, using indentation to show nesting and sequence.
+    * Include relevant code snippets from the source for clarity.
+- Add bullet points for parameters and variables.
+
 
 Procedure Name: {proc_name}
 Type: {proc_type}

@@ -8,6 +8,8 @@ import os
 import asyncio
 import re
 
+
+from app.utils.async_retry import async_retry
 from app.models.m204_file_model import M204File
 from app.models.project_model import Project
 from app.models.procedure_model import Procedure
@@ -188,10 +190,14 @@ Respond ONLY with a valid JSON object matching this structure:
 IMPORTANT: Do not include any explanatory text, markdown, comments, or code blocks. Return ONLY the raw JSON object.
 """
         try:
-            raw_response = await llm_config._llm.acomplete(prompt=prompt)
-            log.debug(f"raw response for test case generation: {raw_response.text} ")
             llm_structured = llm_config._llm.as_structured_llm(ParagraphTestCaseGenerationOutput)
-            response = await llm_structured.acomplete(prompt=prompt)
+            response = await async_retry(
+                llm_structured.acomplete,
+                prompt=prompt,
+                max_attempts=3,
+                delay=2.0,
+                exceptions=(ValueError, TypeError, Exception)
+            )
             output_json = json.loads(strip_markdown_code_block(response.text.strip()))
             return ParagraphTestCaseGenerationOutput(**output_json)
         except Exception as e:
@@ -1122,7 +1128,13 @@ Generate the COBOL conversion maintaining exact JSON structure and following all
             async with self.llm_semaphore:
                 log.debug(f"Attempting LLM call for M204 main loop to COBOL from file: {m204_file_name} (semaphore acquired)")
                 llm_call = llm_config._llm.as_structured_llm(MainLoopToCobolOutput)
-                response = await llm_call.acomplete(prompt=prompt_fstr)
+                response = await async_retry(
+                    llm_call.acomplete,
+                    prompt=prompt_fstr,
+                    max_attempts=3,
+                    delay=2.0,
+                    exceptions=(ValueError, TypeError, Exception)
+                )
                 json_text_output = response.text
 
                 # Log the raw output before any processing for debugging purposes
@@ -1270,11 +1282,12 @@ Generate the COBOL conversion maintaining exact JSON structure and following all
         return "\n".join(lines)
 
     
+    
     async def _generate_and_save_artifacts_for_single_input_source(
-    self, 
-    input_source: InputSource, 
-    generated_vsam_jcl_for_m204file_ids_in_project_run: set[int]
-) -> GeneratedArtifactsResponse:
+        self, 
+        input_source: InputSource, 
+        generated_vsam_jcl_for_m204file_ids_in_project_run: set[int]
+    ) -> GeneratedArtifactsResponse:
         log.info(f"Starting artifact generation for InputSource ID: {input_source.input_source_id}, Type: {input_source.source_type}")
         self._clear_existing_artifacts_for_input_source(input_source.input_source_id)
 
@@ -1344,13 +1357,35 @@ Generate the COBOL conversion maintaining exact JSON structure and following all
                     continue  # Skip duplicates
                 added_ddnames.add(ddname)
                 file_control_entries_str += f"       SELECT {ddname}-FILE ASSIGN TO {ddname}\n"
+                # --- UPDATED LOGIC: VSAM type-specific FILE-CONTROL entries ---
                 if m204_file.is_db_file:
+                    vsam_type = (m204_file.target_vsam_type or "").upper()
                     key_field = m204_file.primary_key_field_name or "KEYFIELD"
-                    file_control_entries_str += (
-                        f"           ORGANIZATION IS INDEXED\n"
-                        f"           ACCESS MODE IS DYNAMIC\n"
-                        f"           RECORD KEY IS {key_field}\n"
-                    )
+                    if vsam_type == "KSDS":
+                        file_control_entries_str += (
+                            f"           ORGANIZATION IS INDEXED\n"
+                            f"           ACCESS MODE IS DYNAMIC\n"
+                            f"           RECORD KEY IS {key_field}\n"
+                        )
+                    elif vsam_type == "ESDS":
+                        file_control_entries_str += (
+                            "           ORGANIZATION IS SEQUENTIAL\n"
+                            "           ACCESS MODE IS SEQUENTIAL\n"
+                        )
+                        # No RECORD KEY for ESDS
+                    elif vsam_type == "RRDS":
+                        file_control_entries_str += (
+                            f"           ORGANIZATION IS RELATIVE\n"
+                            f"           ACCESS MODE IS DYNAMIC\n"
+                            f"           RELATIVE KEY IS {key_field}\n"
+                        )
+                    else:
+                        # Unknown VSAM type, fallback to KSDS logic
+                        file_control_entries_str += (
+                            f"           ORGANIZATION IS INDEXED\n"
+                            f"           ACCESS MODE IS DYNAMIC\n"
+                            f"           RECORD KEY IS {key_field}\n"
+                        )
                 # FD and working-storage from LLM if available
                 result = fd_conversion_results[i]
                 m204_file_name_for_log = m204_file.m204_file_name or f"FileID_{m204_file.m204_file_id}"
@@ -1376,6 +1411,7 @@ Generate the COBOL conversion maintaining exact JSON structure and following all
                 ws_parts = ["01  M204-VARIABLES."]
                 for var in current_input_source_with_details.m204_variables_defined:
                     cobol_name = var.cobol_mapped_variable_name or f"M204-VAR-{var.variable_name.upper().replace('%', '').replace('_', '-')}"
+
                     cobol_type = var.cobol_variable_type or "PIC X(80)"
                     cobol_name = re.sub(r'[^A-Z0-9-]', '', cobol_name.upper())
                     if not cobol_name or not cobol_name[0].isalpha():
@@ -1517,7 +1553,7 @@ Generate the COBOL conversion maintaining exact JSON structure and following all
                 procedure_division_main_logic = "           DISPLAY 'No M204 procedures or main loop mapped'."
 
             # --- Assemble the Final COBOL Program ---
-            cobol_content = f"""\
+            cobol_content = f"""\ 
     IDENTIFICATION DIVISION.
     PROGRAM-ID. {cobol_program_id_base}.
     AUTHOR. ArtifactGenerator.
@@ -1627,7 +1663,7 @@ Generate the COBOL conversion maintaining exact JSON structure and following all
                         dsn = f"USER.M204.{dd_name_final}.DATA"
                     dd_statements_for_jcl.append(f"//{dd_name_final:<8} DD DSN={dsn},DISP=SHR")
             dd_statements_str = "\n".join(dd_statements_for_jcl) if dd_statements_for_jcl else "//* No M204 files for DD statements."
-            general_jcl_content = f"""\
+            general_jcl_content = f"""\ 
     /*JOBGENER JOB (ACCT),'RUN {cobol_program_id_base}',CLASS=A,MSGCLASS=X
     //* Run JCL for COBOL: {cobol_file_name} (From M204 Source: {input_source_name_for_comments})
     //STEP010  EXEC PGM={cobol_program_id_base}
@@ -1734,7 +1770,9 @@ Generate the COBOL conversion maintaining exact JSON structure and following all
         )
         log.info(f"Finished artifact generation for InputSource ID: {input_source.input_source_id} ('{input_source_name_for_comments}'). Returning {len(response.cobol_files)} COBOL, {len(response.jcl_files)} JCL, {len(response.unit_test_files)} Unit Test files.")
         return response  
-    
+
+
+
     async def generate_artifacts_for_project(self, project_id: int) -> List[InputSourceArtifacts]:
         project = self.db.query(Project).filter(Project.project_id == project_id).first()
         if not project:

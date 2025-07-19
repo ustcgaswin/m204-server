@@ -356,32 +356,28 @@ async def fix_mermaid_diagram(request: MermaidFixRequestSchema) -> str:
     log.info(f"MERMAID_FIXER: Attempting to fix Mermaid diagram. Error: {request.error_message}")
 
     prompt = f"""
-You are an expert in Mermaid.js syntax. Your task is to fix a Mermaid diagram that has a syntax error.
-I will provide you with the broken Mermaid code and the error message from the renderer.
-Analyze the code and the error to identify the problem.
-Correct the syntax and provide the complete, valid Mermaid code.
+You are an expert in Mermaid.js syntax. I will give you a small snippet of Mermaid code where an error occurred, along with the renderer’s error message. Your task is to:
 
-**IMPORTANT RULES:**
-1.  Pay close attention to the error message. It often points to the exact line or cause of the issue. Common errors include unclosed subgraphs, incorrect arrow types, missing keywords, or invalid node identifiers.
-2.  Preserve the original intent, nodes, and connections of the diagram. Your goal is to make the minimum necessary changes to fix the syntax errors. Do not add, remove, or fundamentally alter the relationships between diagram elements.
-3.  The corrected code in the `fixed_mermaid_code` field must not be wrapped in markdown like ```mermaid ... ```. It should be the raw diagram code.
+1. Diagnose the syntax issue using the error message.
+2. Apply the minimal change(s) needed to fix it.
+3. Preserve all original node IDs, labels, connections, indentation, and line breaks.
+4. Return only the fixed snippet—do NOT include the graph declaration (e.g. `graph TD`),
+   surrounding context, markdown fences, or any extra keys.
 
-**Broken Mermaid Code:**
+INPUT SNIPPET:
 ```mermaid
-{request.mermaid_code}
+{request.snippet_code}
 ```
 
-**Error Message:**
+ERROR MESSAGE:
 ```
 {request.error_message}
 ```
 
-Respond with a JSON object structured according to the `MermaidCorrectionResponse` model.
-
-**Example Response Format:**
+RESPOND WITH A JSON OBJECT:
 ```json
 {{
-  "fixed_mermaid_code": "graph TD\\n    A[Start] --> B{{Database}};\\n    B --> C{{End}};"
+  "fixed_snippet": "<raw corrected Mermaid code here>"
 }}
 ```
 """

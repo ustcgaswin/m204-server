@@ -6,6 +6,7 @@ import json
 from openai import APIError
 import re
 import subprocess
+import tiktoken
 
 from app.models.project_model import Project
 from app.models.procedure_model import Procedure
@@ -46,6 +47,12 @@ _current_script_dir = os.path.dirname(os.path.abspath(__file__))
 _server_root_dir = os.path.abspath(os.path.join(_current_script_dir, '..', '..'))
 # Construct the full path to the validator script
 MERMAID_VALIDATOR_PATH = os.path.join(_server_root_dir, "mermaid_validator.js")
+
+
+
+def count_tokens(text: str) -> int:
+    enc = tiktoken.get_encoding("cl100k_base")
+    return len(enc.encode(text))
 
 def _run_mermaid_validator_sync(mermaid_code: str) -> subprocess.CompletedProcess:
     """Synchronous helper to run the validator in a separate thread."""
@@ -394,61 +401,127 @@ def _construct_llm_prompt_content(project_data: Dict[str, Any]) -> str:
 
     return "\n".join(content_parts)
 
+
+def json_to_mermaid(data: dict) -> str:
+    """
+    Convert a flowchart JSON (with 'nodes' and 'edges') into Mermaid code.
+    Adds validation and error handling for missing fields and unknown node types.
+    """
+    lines = ["graph TD"]
+    delimiters = {
+        "start": lambda node_id, node_label: f"{node_id}(({node_label}))",
+        "end":   lambda node_id, node_label: f"{node_id}(({node_label}))",
+        "action":   lambda node_id, node_label: f"{node_id}[{node_label}]",
+        "decision": lambda node_id, node_label: f"{node_id}{{{node_label}}}",
+        "io":       lambda node_id, node_label: f"{node_id}[/{node_label}/]",
+    }
+
+    # Validate nodes
+    for node in data.get("nodes", []):
+        node_id = node.get("id")
+        node_label = node.get("label")
+        node_type = node.get("type")
+        if not node_id or not node_label or not node_type:
+            # Log and skip invalid node
+            log.warning(f"Skipping node with missing fields: {node}")
+            continue
+        if node_type not in delimiters:
+            log.warning(f"Unknown node type '{node_type}' for node '{node_id}'. Skipping node.")
+            continue
+        lines.append("  " + delimiters[node_type](node_id, node_label))
+
+    # Validate edges
+    for edge in data.get("edges", []):
+        src_id = edge.get("from")
+        dst_id = edge.get("to")
+        cond = edge.get("condition")
+        if not src_id or not dst_id:
+            log.warning(f"Skipping edge with missing 'from' or 'to': {edge}")
+            continue
+        arrow = f"{src_id} -->"
+        if cond is not None:
+            arrow += f"|{cond}|"
+        arrow += f" {dst_id}"
+        lines.append("  " + arrow)
+
+    return "\n".join(lines)
+
 def _get_sections_config() -> List[Dict[str, Any]]:
     """
     Defines the structure, instructions, and data dependencies for each section.
+    For diagram sections, instructs the LLM to emit only JSON (not Mermaid).
     """
-    # Define a set of all possible data keys for validation/reference
     all_data_keys = {
         "project_info", "source_file_llm_summaries", "main_processing_loop",
         "procedures", "m204_files", "global_variables", "dd_statements", "procedure_calls"
     }
-    
-    # Define common data combinations
     full_context_data = list(all_data_keys)
+
+    # --- JSON diagram prompt ---
+    diagram_json_prompt = """
+Generate a JSON structure that describes the flowchart for this section.
+Use exactly this schema:
+
+{
+  "nodes": [
+    {
+      "id":   "unique_identifier",          
+      "type": "start|action|decision|io|end",
+      "label":"Your node label"
+    },
+    …
+  ],
+  "edges": [
+    {
+      "from":      "source_node_id",
+      "to":        "target_node_id",
+      "condition": "Yes|No|null"
+    },
+    …
+  ]
+}
+
+Requirements:
+- Do NOT emit any Mermaid code—only JSON.
+- Every node used in edges must appear in nodes[].
+- Decisions (“type”: “decision”) will have edges whose “condition” is “Yes” or “No”.
+- Other edges should set “condition” to null.
+- **For procedures, always use the procedure name (not numeric ID) as the node label.**
+- Follow this example (you don’t need to copy the example nodes/edges, just the schema):
+
+Example snippet:
+{
+  "nodes":[
+    { "id":"A","type":"start","label":"Start Loop" },
+    { "id":"B","type":"decision","label":"Is X>0?" }
+  ],
+  "edges":[
+    { "from":"A","to":"B","condition":null }
+  ]
+}
+"""
 
     return [
         {
-        "id": "program_overview",
-        "title": "## 1. Program Overview",
-        "required_data": ["source_file_llm_summaries", "m204_files"],
-        "instructions": """
-        (Provide a high-level technical overview of the entire program’s purpose and architecture based on the 
-        ‘m204_detailed_description’ fields from all InputSource records. Focus on the program as a whole. 
-        Do not dive into the details of any single module or business context.)
+            "id": "program_overview",
+            "title": "## 1. Program Overview",
+            "required_data": ["source_file_llm_summaries", "m204_files"],
+            "instructions": """
+(Provide a high-level technical overview of the entire program’s purpose and architecture based on the 
+‘m204_detailed_description’ fields from all InputSource records. Focus on the program as a whole. 
+Do not dive into the details of any single module or business context.)
 
-        After the overview, include:
-        - A bullet list of all files involved in the program, as found in the M204 file definitions (list file names).
-        - A separate bullet list of all files flagged as Model 204 database files (where is_db_file = True).
-        """
+After the overview, include:
+- A bullet list of all files involved in the program, as found in the M204 file definitions (list file names).
+- A separate bullet list of all files flagged as Model 204 database files (where is_db_file = True).
+"""
         },
         {
             "id": "conceptual_data_model",
             "title": "### 1.1. Conceptual Data Model Diagram",
             "required_data": ["m204_files", "dd_statements", "procedures", "procedure_calls", "source_file_llm_summaries"],
-            "instructions": """
-      (Based on the overall system data, including 'M204 Procedures Data', 'M204 File Definitions Data', 'JCL DD Statements Data', and 'Source File LLM-Generated Summaries', generate a high-level Mermaid flowchart diagram (e.g., using `graph TD;` for Top-Down or `graph LR;` for Left-to-Right) illustrating the primary data flows or control sequences within the system.
-       The diagram should identify:
-       - Key processes (e.g., JCL Jobs, important M204 Procedures like ONLINE or BATCH ones). Represent them as nodes (e.g., `jobName["JCL Job: MYJOB"]`, `procName{M204 Proc: MYPROC}`).
-       - Major data stores (e.g., M204 Files or their associated VSAM datasets). Represent them using a database shape (e.g., `fileName[("M204 File: MYFILE")]`).
-       - Data flows between these processes and data stores, or control flow from one process to another. Use arrows to indicate the direction (e.g., `-->` for flow, `-- Text -->` for flow with description).
-       Use information from 'JCL DD Statements Data' (`dsn`, `disposition`, `job_name`, `step_name`) to show JCLs interacting with datasets and initiating processes.
-       Use information from 'M204 Procedures Data' (e.g., `m204_proc_name`, `m204_proc_type`) and 'Procedure Call Relationships Data' to infer how procedures process data or trigger other procedures/COBOL programs.
-       Refer to 'Source File LLM-Generated Summaries' to understand the purpose of JCLs and M204 modules and how they contribute to data or control flow.
-       The goal is to provide an overview of how data enters, is processed by, and exits the system, or how key operational sequences unfold. Focus on the most significant flows and control paths.
-       **Enclose the syntactically correct Mermaid code for the flowchart within a fenced code block like this:**
-       ```mermaid
-       graph TD;
-           ExternalInput[External Input Source] --> JCL_PROCESS_DATA{JCL Job: PROCESS_DATA};
-           JCL_PROCESS_DATA -- Reads --> M204_INPUT_FILE[("M204 File: INPUT_FILE")];
-           JCL_PROCESS_DATA -- Executes --> M204_PROC_VALIDATE[M204 Procedure: VALIDATE_INPUT];
-           M204_PROC_VALIDATE -- Writes Validated Data --> M204_STAGING_FILE[("M204 File: STAGING_AREA")];
-           M204_ONLINE_PROC{M204 Online Proc: UPDATE_MASTER} -- Reads/Writes --> M204_MASTER_FILE[("M204 File: MASTER_DATA")];
-           M204_STAGING_FILE -- Input for Update --> M204_ONLINE_PROC;
-           M204_MASTER_FILE -- Data Extract --> ExternalReport[External Report Output];
-       ```
-       If the provided data is insufficient to create a meaningful data flow or control flow diagram for this overview, include the heading and state "Data insufficient to generate a system data/control flow diagram." instead of providing malformed Mermaid code.
-       This diagram is intended as a high-level overview and should complement more specific diagrams like JCL job flow or detailed procedure call diagrams found in other sections.)
+            "instructions": diagram_json_prompt + """
+Describe the high-level conceptual data flow and control flow for the system, including key processes (JCL jobs, M204 procedures), major data stores (M204 files, VSAM datasets), and their relationships. Use the provided system data. If insufficient, emit an empty JSON object.
 """
         },
         {
@@ -464,41 +537,14 @@ The input provides the main processing loop as a block of M204 code (not as stru
     * For each conditional (e.g., IF, ELSE IF, ELSE), clearly state the condition, then describe the logic within each branch, using indentation to show nesting and sequence.
     * Dont include statements like print(***) or anything like that, the goal is to capture every rule or logic that is available
 - Explicitly identify the primary inputs, outputs, and any key decision points or repeated operations.
-
 """
         },
         {
             "id": "main_processing_loop_diagram",
             "title": "### 2.1. Main Processing Loop Flowchart",
             "required_data": ["main_processing_loop"],
-            "instructions": """
-      (If 'Structured Main Processing Loop Logic (JSON)' is provided, generate a Mermaid flowchart by walking the JSON tree. `action` types should be rectangular process nodes. `conditional` types should be decision diamonds, with arrows pointing to the first operation in each `branch`. Connect all operations sequentially to represent the full logic flow.
-       If only raw 'Main Processing Loop Content' is provided (as a fallback), generate the diagram by analyzing the M204 code directly.
-       Represent:
-       - The start and end of the loop.
-       - Key conditional checks (e.g., `IF` statements) as decision diamonds, including all levels of nesting.
-       - Major processing steps (e.g., `FIND`, `CALL`) as rectangular nodes.
-       - I/O operations as parallelogram nodes.
-       **Enclose the syntactically correct Mermaid code within a fenced code block. Here is an example showing multiple nested conditions:**
-       ```mermaid
-       graph TD;
-           A[Start Loop] --> B{Is Record Type 'A'?};
-           B -- Yes --> C{Is Field X > 100?};
-           C -- Yes --> D{Is Status 'NEW'?};
-           D -- Yes --> E[Process New 'A' Record > 100];
-           D -- No --> F[Process Existing 'A' Record > 100];
-           C -- No --> G[Process 'A' Record <= 100];
-           B -- No --> H{Is Record Type 'B'?};
-           H -- Yes --> I[Process 'B' Record];
-           H -- No --> J[Process Other Record Types];
-           E --> K[End of Iteration];
-           F --> K;
-           G --> K;
-           I --> K;
-           J --> K;
-           K --> A;
-       ```
-      
+            "instructions": diagram_json_prompt + """
+Describe the flowchart for the main processing loop, using the structured logic if available. If only raw code is provided, analyze and emit the JSON structure for the flowchart. If insufficient, emit an empty JSON object.
 """
         },
         {
@@ -506,64 +552,49 @@ The input provides the main processing loop as a block of M204 code (not as stru
             "title": "## 3. M204 Procedures",
             "required_data": ["procedures", "source_file_llm_summaries"],
             "instructions": """
-   (Based on 'M204 Procedures Data' and relevant 'Source File LLM-Generated Summaries' for M204 files:
-    - For each procedure, write a descriptive paragraph. This paragraph should cover its name, type, and its target COBOL program name for generation (if specified).
-    - If a procedure summary is available in the input, incorporate it into the descriptive paragraph.
-    - Detail parameters and any variables defined within the procedure using bullet points *underneath* the main descriptive paragraph for that procedure.
-    - For example:
-      "The procedure **SAMPLE_PROC** is an **ONLINE** type procedure, found in the M204 source file `SOURCEA.M204`. It is designated to be modernized into the COBOL program **SAMPLE-PROG-FUNC**. The primary function of this procedure appears to be real-time data modification based on user input.
-      * Parameters: `ACCOUNT_NUMBER, UPDATE_DATA`
-      * Variables defined in procedure:
-        * `%OLD_VALUE` (Type: `STRING`, Scope: `LOCAL`, COBOL Mapped Name: `WS-OLD-VAL`)
-        * `%NEW_VALUE` (Type: `STRING`, Scope: `LOCAL`, COBOL Mapped Name: `WS-NEW-VAL`)"
-    - Conclude this section with a brief summary paragraph discussing any observed overall purpose or common themes across the procedures, informed by individual procedure details and the broader M204 source file summaries.)
+(Based on 'M204 Procedures Data' and relevant 'Source File LLM-Generated Summaries' for M204 files:
+- For each procedure, write a descriptive paragraph. This paragraph should cover its name, type, and its target COBOL program name for generation (if specified).
+- If a procedure summary is available in the input, incorporate it into the descriptive paragraph.
+- Detail parameters and any variables defined within the procedure using bullet points *underneath* the main descriptive paragraph for that procedure.
+- For example:
+  "The procedure **SAMPLE_PROC** is an **ONLINE** type procedure, found in the M204 source file `SOURCEA.M204`. It is designated to be modernized into the COBOL program **SAMPLE-PROG-FUNC**. The primary function of this procedure appears to be real-time data modification based on user input.
+  * Parameters: `ACCOUNT_NUMBER, UPDATE_DATA`
+  * Variables defined in procedure:
+    * `%OLD_VALUE` (Type: `STRING`, Scope: `LOCAL`, COBOL Mapped Name: `WS-OLD-VAL`)
+    * `%NEW_VALUE` (Type: `STRING`, Scope: `LOCAL`, COBOL Mapped Name: `WS-NEW-VAL`)"
+- Conclude this section with a brief summary paragraph discussing any observed overall purpose or common themes across the procedures, informed by individual procedure details and the broader M204 source file summaries.)
 """
         },
         {
-        "id": "m204_file_definitions",
-        "title": "## 4. M204 File Definitions",
-        "required_data": ["m204_files", "source_file_llm_summaries"],
-        "instructions": """
-        Based on the 'M204 File Definitions and Main Processing Loops Data' and any relevant 'Source File LLM-Generated Summaries' for M204 files:
+            "id": "m204_file_definitions",
+            "title": "## 4. M204 File Definitions",
+            "required_data": ["m204_files", "source_file_llm_summaries"],
+            "instructions": """
+Based on the 'M204 File Definitions and Main Processing Loops Data' and any relevant 'Source File LLM-Generated Summaries' for M204 files:
 
-        1. For each M204 file, write a descriptive paragraph covering:
-        - File name in **bold**.
-        - The exact DEFINE statement or M204 attributes (e.g. `(attribute_list)`).
-        - Whether it is flagged as a database file under Model 204.
-        - Its target VSAM dataset name in **bold** and type (e.g. `KSDS`, `RRDS`), or `N/A` if none.
-        - A brief note on its purpose or role, drawing on any available LLM-generated summary.
+1. For each M204 file, write a descriptive paragraph covering:
+- File name in **bold**.
+- The exact DEFINE statement or M204 attributes (e.g. `(attribute_list)`).
+- Whether it is flagged as a database file under Model 204.
+- Its target VSAM dataset name in **bold** and type (e.g. `KSDS`, `RRDS`), or `N/A` if none.
+- A brief note on its purpose or role, drawing on any available LLM-generated summary.
 
-        2. If `file_definition_json` includes field definitions, list them as bullet points under “Fields:”:
-        * `FIELD_NAME` (Attributes: `attr1, attr2, …`)
-        Otherwise, state:
-        “Detailed field structure not available in the provided data for this file.”
+2. If `file_definition_json` includes field definitions, list them as bullet points under “Fields:”:
+* `FIELD_NAME` (Attributes: `attr1, attr2, …`)
+Otherwise, state:
+“Detailed field structure not available in the provided data for this file.”
 
-        3. After all files, conclude with a summary paragraph that:
-        - Groups the files into general categories (e.g., master/reference data, transactional staging, system/utility datasets, control/audit logs).
-        - Highlights the types of data each category manages, inferred from file names, attributes, and source summaries.
-        """
+3. After all files, conclude with a summary paragraph that:
+- Groups the files into general categories (e.g., master/reference data, transactional staging, system/utility datasets, control/audit logs).
+- Highlights the types of data each category manages, inferred from file names, attributes, and source summaries.
+"""
         },
         {
             "id": "m204_file_vsam_jcl_diagram",
             "title": "### 4.1. M204 File and Associated VSAM/JCL Diagram",
             "required_data": ["m204_files", "dd_statements"],
-            "instructions": """
-      (Based on 'M204 File Definitions Data' (`m204_file_name`, `target_vsam_dataset_name`) and 'JCL DD Statements Data' (`dd_name`, `dsn`), generate a Mermaid flowchart diagram.
-       The diagram should show each M204 file and its target VSAM dataset name.
-       If a JCL DD Statement's `dsn` matches an M204 file's `target_vsam_dataset_name`, create a link from the JCL DD statement node to the M204 file node.
-       Represent M204 files as `M204: <m204_file_name> (VSAM: <target_vsam_dataset_name>)`.
-       Represent JCL DD statements as `JCL DD: <dd_name> (DSN: <dsn>)`.
-       **Enclose the syntactically correct Mermaid code within a fenced code block like this:**
-       ```mermaid
-       graph TD;
-           M204_CUST["M204: CUSTFILE (VSAM: PROD.DATA.CUST)"];
-           M204_ACCT["M204: ACCTFILE (VSAM: PROD.DATA.ACCT)"];
-           DD_INPCUST["JCL DD: INPCUST (DSN: PROD.DATA.CUST)"];
-           DD_OTACCT["JCL DD: OTACCT (DSN: PROD.DATA.ACCT)"];
-           DD_INPCUST --> M204_CUST;
-           DD_OTACCT --> M204_ACCT;
-       ```
-     
+            "instructions": diagram_json_prompt + """
+Describe the relationships between M204 files, VSAM datasets, and JCL DD statements. Emit only the JSON structure for the diagram. If insufficient, emit an empty JSON object.
 """
         },
         {
@@ -571,10 +602,10 @@ The input provides the main processing loop as a block of M204 code (not as stru
             "title": "## 5. Global/Public M204 Variables",
             "required_data": ["global_variables"],
             "instructions": """
-   (Based on 'Global/Public M204 Variables Data':
-    - Begin with an introductory paragraph about the role of global/public variables in the system.
-    - Present all global/public variables in a Markdown table with columns: Variable Name, Type, Scope, COBOL Mapped Name, Attributes.
-    - Follow the table with a paragraph further explaining the potential collective purpose or usage patterns of these global variables based on their characteristics.)
+(Based on 'Global/Public M204 Variables Data':
+- Begin with an introductory paragraph about the role of global/public variables in the system.
+- Present all global/public variables in a Markdown table with columns: Variable Name, Type, Scope, COBOL Mapped Name, Attributes.
+- Follow the table with a paragraph further explaining the potential collective purpose or usage patterns of these global variables based on their characteristics.)
 """
         },
         {
@@ -582,36 +613,18 @@ The input provides the main processing loop as a block of M204 code (not as stru
             "title": "## 6. JCL DD Statements",
             "required_data": ["dd_statements", "source_file_llm_summaries"],
             "instructions": """
-   (Based on 'JCL DD Statements Data' and relevant 'Source File LLM-Generated Summaries' for JCL files:
-    - Start with a paragraph describing the role of JCL DD statements in interfacing the M204 application with datasets. Refer to the LLM-generated summaries for the JCL files to provide context on the overall purpose of the JCLs containing these DD statements.
-    - List the relevant DD statements. You can use bullet points for each DD statement, detailing its DD Name, DSN, Disposition, and the Job and Step context. A compact table could also be appropriate here if there are many with similar structures.
-    - Conclude with a paragraph highlighting any DD statements that seem particularly critical (e.g., for primary input/output files, connections to other systems), considering their role within the summarized JCL job flow.)
-"""
+        (Based on 'JCL DD Statements Data' and relevant 'Source File LLM-Generated Summaries' for JCL files:
+        - Start with a paragraph describing the role of JCL DD statements in interfacing the M204 application with datasets. Refer to the LLM-generated summaries for the JCL files to provide context on the overall purpose of the JCLs containing these DD statements.
+        - Present all DD statements in a Markdown table with columns: DD Name, DSN, Disposition, Job Name, Step Name.
+        - Conclude with a paragraph highlighting any DD statements that seem particularly critical (e.g., for primary input/output files, connections to other systems), considering their role within the summarized JCL job flow.)
+        """
         },
         {
             "id": "jcl_job_step_flow_diagram",
             "title": "### 6.1. JCL Job/Step Flow Diagram",
             "required_data": ["dd_statements"],
-            "instructions": """
-      (Based on 'JCL DD Statements Data' (`job_name`, `step_name`, `dd_name`, `dsn`), generate a Mermaid flowchart diagram illustrating the JCL job and step flow.
-       Group DD statements under their respective steps, and steps under their respective jobs.
-       Represent jobs as `Job: <job_name>`, steps as `Step: <step_name>`. DD statements can be represented by their `dd_name` and `dsn`.
-       **Enclose the syntactically correct Mermaid code within a fenced code block like this:**
-       **A better example for JCL Job/Step Flow using subgraphs:**
-       ```mermaid
-       graph TD;
-           subgraph "Job: JOB01"
-               direction LR;
-               J1_STEP01["Step: STEP01"];
-               J1_STEP01 --> J1_DDIN["DD: DDIN (DSN: INPUT.FILE)"];
-               J1_STEP01 --> J1_DDOUT["DD: DDOUT (DSN: OUTPUT.FILE)"];
-           end
-           subgraph "Job: JOB02"
-               direction LR;
-               J2_STEPX["Step: STEPX"];
-               J2_STEPX --> J2_DDSYS["DD: SYSIN (DSN: *.STEPX.SYSIN)"];
-           end
-       ```
+            "instructions": diagram_json_prompt + """
+Describe the JCL job and step flow, grouping DD statements under steps and steps under jobs. Emit only the JSON structure for the diagram. If insufficient, emit an empty JSON object.
 """
         },
         {
@@ -619,68 +632,53 @@ The input provides the main processing loop as a block of M204 code (not as stru
             "title": "## 7. Procedure Call Flow",
             "required_data": ["procedure_calls", "procedures"],
             "instructions": """
-   (Based on 'Procedure Call Relationships Data':
-    - Describe the procedure call flow using narrative paragraphs to explain major sequences or interactions.
-    - Supplement with bullet points to list specific call relationships, indicating the calling procedure, the called procedure, the line number of the call, and whether it's an external call.
-    - Focus on making the control flow and dependencies clear. Try to identify and describe any main processing sequences, critical execution paths, or highly interconnected modules.
+(Based on 'Procedure Call Relationships Data':
+- Describe the procedure call flow using narrative paragraphs to explain major sequences or interactions.
+- Supplement with bullet points to list specific call relationships, indicating the calling procedure, the called procedure, the line number of the call, and whether it's an external call.
+- Focus on making the control flow and dependencies clear. Try to identify and describe any main processing sequences, critical execution paths, or highly interconnected modules.)
 """
         },
         {
             "id": "procedure_call_diagram",
             "title": "### 7.1. Procedure Call Diagram",
             "required_data": ["procedure_calls"],
-            "instructions": """
-      (Based on the 'Procedure Call Relationships Data', generate a Mermaid flowchart diagram (e.g., `graph TD;` for Top-Down or `graph LR;` for Left-to-Right) illustrating the direct call relationships between procedures.
-       The diagram should clearly show which procedure calls which other procedure(s). Use the actual procedure names found in the data.
-       **Enclose the syntactically correct Mermaid code within a fenced code block like this:**
-       ```mermaid
-       graph TD;
-           PROC_A["Procedure A"] --> PROC_B["Procedure B"];
-           PROC_A["Procedure A"] --> PROC_C["Procedure C"];
-           PROC_B["Procedure B"] --> PROC_D["Procedure D"];
-           PROC_E["Procedure E"]; // A procedure that is called but doesn't call, or isn't called but exists
-       ```
-       Ensure all unique procedure names involved in any call (callers and callees) are represented as nodes in the diagram.
-"""
-        },
-        {
-            "id": "data_dictionary",
-            "title": "## 8. Data Dictionary / Key Data Elements",
-            "required_data": ["m204_files", "global_variables", "procedures"],
-            "instructions": """
-   (Synthesize information from 'M204 File Definitions Data' (primarily `file_definition_json` if available for field details), 'Global/Public M204 Variables Data', and 'M204 Procedures Data' (variables_in_procedure).
-    - Describe key data elements in paragraphs. For each element or group of related elements, discuss its apparent meaning and use.
-    - Use bullet points to list specific attributes like M204 data type/attributes (from `file_definition_json` or variable definitions) and where it's primarily used (e.g., in which files or procedure types).
-    - If a comprehensive dictionary isn't directly inferable due to lack of detailed field definitions, provide a narrative summary of the main types of data the system processes based on file names, variable names, and their significance.)
+            "instructions": diagram_json_prompt + """
+Describe the direct call relationships between procedures.
+
+**Important:** Always use the procedure names (not numeric IDs) for all nodes in the diagram, including the root/start node and all called procedures. Do not use any numeric IDs anywhere in the diagram.
+
+Emit only the JSON structure for the diagram. If insufficient, emit an empty JSON object.
 """
         },
         {
             "id": "external_interfaces",
-            "title": "## 9. External Interfaces",
+            "title": "## 8. External Interfaces",
             "required_data": ["dd_statements", "m204_files", "procedure_calls"],
             "instructions": """
-   (Infer from 'JCL DD Statements Data' (DSNs), 'M204 File Definitions Data' (attributes suggesting external links), and 'Procedure Call Relationships Data' (`is_external` flag).
-    - Describe in paragraph form any identified external systems, datasets, or interfaces that the M204 application interacts with. Explain the nature of these interactions if discernible.)
+(Infer from 'JCL DD Statements Data' (DSNs), 'M204 File Definitions Data' (attributes suggesting external links), and 'Procedure Call Relationships Data' (`is_external` flag).
+- Describe in paragraph form any identified external systems, datasets, or interfaces that the M204 application interacts with. Explain the nature of these interactions if discernible.)
 """
         },
         {
             "id": "non_functional_requirements",
-            "title": "## 10. Non-Functional Requirements",
+            "title": "## 9. Non-Functional Requirements",
             "required_data": full_context_data,
             "instructions": """
-   (Review all provided data for hints towards non-functional requirements.
-    - Describe any identified NFRs (e.g., performance considerations from file attributes, security aspects from field encryption, operational constraints) in paragraph form.
+(Review all provided data for hints towards non-functional requirements.
+- Describe any identified NFRs (e.g., performance considerations from file attributes, security aspects from field encryption, operational constraints) in paragraph form.
 """
         },
         {
             "id": "other_observations",
-            "title": "## 11. Other Observations / Summary",
+            "title": "## 10. Other Observations / Summary",
             "required_data": full_context_data,
             "instructions": """
-   (Provide a concluding summary of the system in narrative paragraphs. Highlight any overarching patterns, complexities, or notable observations that don't fit neatly into other sections. Address points from the 'Additional Instructions/Custom Section from User' here if not covered elsewhere.)
+(Provide a concluding summary of the system in narrative paragraphs. Highlight any overarching patterns, complexities, or notable observations that don't fit neatly into other sections. Address points from the 'Additional Instructions/Custom Section from User' here if not covered elsewhere.)
 """
         },
     ]
+
+
 
 async def _validate_mermaid_code(mermaid_code: str, section_title: str = "") -> tuple[bool, Optional[str], Optional[int]]:
     """
@@ -767,11 +765,20 @@ async def _generate_llm_section(
 ) -> str:
     """
     Generates content for a single section of the requirements document using the LLM.
-    Includes a validation and self-correction loop for Mermaid diagrams.
+    For diagram sections, expects JSON, converts to Mermaid, and validates.
     """
     # If there are no instructions and no data, it's likely a title-only section.
     if not section_instructions.strip() and not formatted_data_for_prompt.strip():
         return section_title
+
+    # List of diagram section IDs (update if you add more diagram sections)
+    diagram_section_ids = {
+        "conceptual_data_model",
+        "main_processing_loop_diagram",
+        "m204_file_vsam_jcl_diagram",
+        "jcl_job_step_flow_diagram",
+        "procedure_call_diagram"
+    }
 
     prompt_for_section = f"""
 You are a senior technical analyst and writer. Your task is to generate the content for *only* the following section of a Software Requirements Specification (SRS) document in Markdown format for an existing M204-based system.
@@ -810,16 +817,71 @@ Ensure the entire output for this section is valid Markdown.
         completion_response = await llm_config._llm.acomplete(prompt=prompt_for_section)
         if completion_response and completion_response.text:
             section_content = completion_response.text.strip()
-
             log.debug(f"Raw LLM response for section '{section_id}':\n{section_content}")
 
-            # --- START SANITIZATION AND MERMAID FIXING ---
+            # --- Diagram Section Handling ---
+            if section_id in diagram_section_ids:
+                # Try to extract JSON from the response
+                json_text = section_content
+                # Remove markdown fences if present
+                if json_text.startswith("```json"):
+                    json_text = json_text[7:]
+                if json_text.endswith("```"):
+                    json_text = json_text[:-3]
+                json_text = json_text.strip()
+                # Sometimes LLM may wrap in code block or add explanation, try to sanitize
+                # Remove any heading/title lines
+                if json_text.startswith(section_title):
+                    json_text = json_text[len(section_title):].strip()
+                # Remove any explanation before JSON
+                json_start = json_text.find("{")
+                if json_start > 0:
+                    json_text = json_text[json_start:]
+                # Parse JSON
+                try:
+                    diagram_json = json.loads(json_text)
+                except Exception as e:
+                    log.error(f"Failed to parse JSON for diagram section '{section_id}': {e}. Raw text: '{json_text[:500]}'")
+                    return f"{section_title}\n\nDiagram JSON could not be parsed. Raw response:\n```\n{section_content}\n```"
+                # Convert to Mermaid
+                try:
+                    mermaid_code = json_to_mermaid(diagram_json)
+                except Exception as e:
+                    log.error(f"Failed to convert diagram JSON to Mermaid for section '{section_id}': {e}. JSON: {json.dumps(diagram_json)[:500]}")
+                    return f"{section_title}\n\nDiagram JSON could not be converted to Mermaid. JSON:\n```\n{json.dumps(diagram_json, indent=2)}\n```"
+                # Validate Mermaid
+                last_error_msg = "Diagram validation failed."
+                for attempt in range(MAX_MERMAID_FIX_ATTEMPTS):
+                    is_valid, error_msg, error_line = await _validate_mermaid_code(mermaid_code, section_title)
+                    if is_valid:
+                        log.info(f"[Mermaid Validation][{section_title}] Mermaid diagram is valid after {attempt} fix attempts.")
+                        break
+                    last_error_msg = error_msg or "Unknown validation error."
+                    log.warning(f"[Mermaid Validation][{section_title}] Mermaid fix attempt {attempt + 1}/{MAX_MERMAID_FIX_ATTEMPTS} failed. Error: {last_error_msg}")
+                    if attempt < MAX_MERMAID_FIX_ATTEMPTS - 1:
+                        fixed_code = await _attempt_to_fix_mermaid_code(mermaid_code, last_error_msg, error_line or 0, section_title)
+                        if fixed_code:
+                            mermaid_code = fixed_code
+                        else:
+                            log.error(f"[Mermaid Fix][{section_title}] LLM could not provide a fix. Aborting fix attempts.")
+                            break
+                else:
+                    log.error(f"[Mermaid Validation][{section_title}] Failed to validate Mermaid diagram after {MAX_MERMAID_FIX_ATTEMPTS} attempts.")
+
+                # Compose Markdown output
+                markdown = f"{section_title}\n\n"
+                if not diagram_json.get("nodes") or not diagram_json.get("edges"):
+                    markdown += "No meaningful diagram data was provided for this section."
+                else:
+                    markdown += f"```mermaid\n{mermaid_code}\n```"
+                return markdown
+
+            # --- Non-diagram Section Handling ---
+            # START SANITIZATION AND MERMAID FIXING (legacy, for non-diagram sections)
             if section_content.startswith("```markdown"):
                 section_content = section_content[len("```markdown"):].lstrip()
-
             if section_content.endswith("```"):
                 section_content = section_content[:-len("```")].rstrip()
-
             # Fix for unclosed mermaid blocks before validation
             if "```mermaid" in section_content and section_content.count("```mermaid") > section_content.count("```\n", section_content.find("```mermaid")):
                 parts = section_content.split("```mermaid")
@@ -832,27 +894,22 @@ Ensure the entire output for this section is valid Markdown.
                     else:
                         processed_content += parts[i]
                 section_content = processed_content
-
-            # --- MERMAID VALIDATION AND SELF-CORRECTION LOOP ---
+            # MERMAID VALIDATION AND SELF-CORRECTION LOOP
             mermaid_match = re.search(r"```mermaid\n(.*?)\n```", section_content, re.DOTALL)
             if mermaid_match:
                 original_mermaid_block = mermaid_match.group(0)
                 mermaid_code = mermaid_match.group(1).strip()
                 last_error_msg = "Diagram validation failed."
-
                 for attempt in range(MAX_MERMAID_FIX_ATTEMPTS):
                     is_valid, error_msg, error_line = await _validate_mermaid_code(mermaid_code, section_title)
-
                     if is_valid:
                         log.info(f"[Mermaid Validation][{section_title}] Mermaid diagram is valid after {attempt} fix attempts.")
                         if attempt > 0:
                             new_mermaid_block = f"```mermaid\n{mermaid_code}\n```"
                             section_content = section_content.replace(original_mermaid_block, new_mermaid_block)
                         break
-
                     last_error_msg = error_msg or "Unknown validation error."
                     log.warning(f"[Mermaid Validation][{section_title}] Mermaid fix attempt {attempt + 1}/{MAX_MERMAID_FIX_ATTEMPTS} failed. Error: {last_error_msg}")
-
                     if attempt < MAX_MERMAID_FIX_ATTEMPTS - 1:
                         fixed_code = await _attempt_to_fix_mermaid_code(mermaid_code, last_error_msg, error_line or 0, section_title)
                         if fixed_code:
@@ -873,8 +930,9 @@ Ensure the entire output for this section is valid Markdown.
                     if not section_content.startswith(f"{section_title}\n\n"):
                         if lines[1].strip() and not (lines[1].strip().startswith(("*", "-", "```"))):
                             section_content = f"{section_title}\n\n{section_content[len(lines[0]):].lstrip()}"
-
-            log.info(f"Successfully generated content for section '{section_id}'. Length: {len(section_content)}")
+            
+            token_count = count_tokens(section_content)
+            log.info(f"Successfully generated content for section '{section_id}'. Tokens: {token_count}")
             return section_content
         else:
             log.warning(f"LLM returned empty or no text content for section '{section_id}'.")
@@ -888,12 +946,7 @@ Ensure the entire output for this section is valid Markdown.
         log.debug(f"Prompt length for failed section '{section_id}': {len(prompt_for_section)}")
         return f"{section_title}\n\nError generating content for this section: {str(e_llm_section)}"
 
-
 async def _generate_individual_procedure_requirements(procedures: list) -> str:
-    """
-    For each procedure, call the LLM with only code and summary (no COBOL function name, no source file summary).
-    Returns Markdown content for each procedure, with the procedure name as a heading.
-    """
     if not procedures:
         return "No M204 procedures (subroutines) are defined for this file/project."
     results = []
@@ -915,7 +968,6 @@ You are a senior technical analyst. For the following M204 procedure (subroutine
     * Include relevant code snippets from the source for clarity.
 - Add bullet points for parameters and variables.
 
-
 Procedure Name: {proc_name}
 Type: {proc_type}
 Summary: {proc_summary}
@@ -931,14 +983,25 @@ Variables:
 """
         completion_response = await llm_config._llm.acomplete(prompt=prompt)
         if completion_response and completion_response.text:
-            # Add procedure name as a heading before its content
-            results.append(f"### {proc_name}\n\n{completion_response.text.strip()}")
+            results.append(
+                f"### {proc_name}\n\n"
+                f"**Summary:**\n\n"
+                f"{proc_summary if proc_summary else 'No summary available.'}\n\n"
+                f"**Detailed Logic Flow and Bullet Points:**\n\n"
+                f"{completion_response.text.strip()}\n\n"
+                f"**Parameters and Variables:**\n\n"
+                f"- Parameters: {proc_params if proc_params else 'None'}\n"
+                f"- Variables:\n"
+                + "\n".join(
+                    f"  * {v.get('variable_name', 'N/A')} (Type: {v.get('variable_type', 'N/A')}, Scope: {v.get('scope', 'N/A')}, COBOL Mapped Name: {v.get('cobol_mapped_variable_name', 'N/A')})"
+                    for v in proc_vars
+                )
+            )
         else:
             results.append(f"### {proc_name}\n\nNo content generated.")
 
     section_content = "\n\n".join(results)
     return section_content
-
 
 
 
@@ -1023,7 +1086,6 @@ async def generate_and_save_project_requirements_document(
                 section_id = sections_config[idx].get("id", "unknown")
                 section_title = sections_config[idx].get("title", "unknown")
                 log.warning(f"Section '{section_id}' ('{section_title}') returned None and will be skipped in the final document.")
-        markdown_parts.extend(generated_sections_content)
         markdown_parts.extend(generated_sections_content)
         log.info("All parallel section generation tasks completed.")
     except Exception as e_gather:

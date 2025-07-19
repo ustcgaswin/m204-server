@@ -862,8 +862,7 @@ Ensure the entire output for this section is valid Markdown.
                             break
                 else:
                     log.error(f"[Mermaid Validation][{section_title}] Failed to validate Mermaid diagram after {MAX_MERMAID_FIX_ATTEMPTS} attempts.")
-                    error_block = f"```\n[Mermaid Diagram Generation Failed]\nThe LLM failed to generate a valid diagram after multiple correction attempts. The final error was:\n{last_error_msg}\n```"
-                    section_content = section_content.replace(original_mermaid_block, error_block)
+                    section_content = section_content.replace(original_mermaid_block, f"```mermaid\n{mermaid_code}\n```")
 
             if not section_content.lstrip().startswith(section_title):
                 log.warning(f"LLM output for section '{section_id}' did not start with the expected title. Expected: '{section_title}'. Got: '{section_content[:200]}'. Prepending title.")
@@ -1018,7 +1017,7 @@ async def generate_and_save_project_requirements_document(
         log.error(f"Error during parallel generation of sections: {e_gather}", exc_info=True)
         markdown_parts.append(f"\n\n## Error During Document Assembly\n\nAn error occurred while assembling the document sections: {str(e_gather)}")
 
-    markdown_content = "\n\n".join(markdown_parts)
+    markdown_content = "\n\n".join([part for part in markdown_parts if part is not None])
     log.info(f"All sections processed. Total Markdown content length: {len(markdown_content)}")
 
     if not markdown_content.strip() or len(markdown_content.strip()) < len(f"# {document_title}") + 50:

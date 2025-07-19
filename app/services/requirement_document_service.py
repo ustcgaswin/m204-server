@@ -987,7 +987,6 @@ Variables:
                 f"### {proc_name}\n\n"
                 f"**Summary:**\n\n"
                 f"{proc_summary if proc_summary else 'No summary available.'}\n\n"
-                f"**Detailed Logic Flow and Bullet Points:**\n\n"
                 f"{completion_response.text.strip()}\n\n"
                 f"**Parameters and Variables:**\n\n"
                 f"- Parameters: {proc_params if proc_params else 'None'}\n"

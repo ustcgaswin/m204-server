@@ -213,12 +213,12 @@ async def fix_mermaid_diagram_endpoint(
 ):
     """
     Accepts a Mermaid diagram string and an error message, then uses an LLM
-    to correct the diagram's syntax.
+    to correct the diagram's syntax and explain the issue/fix.
     """
     log.info("ANALYSIS_ROUTER: Received request to fix a Mermaid diagram.")
     try:
-        fixed_code = await analysis_service.fix_mermaid_diagram(request)
-        return MermaidFixResponseSchema(fixed_mermaid_code=fixed_code)
+        result = await analysis_service.fix_mermaid_diagram(request)
+        return MermaidFixResponseSchema(**result)
     except HTTPException as he:
         log.warning(f"ANALYSIS_ROUTER: HTTPException during Mermaid fix: {he.detail}")
         raise he

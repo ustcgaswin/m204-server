@@ -23,6 +23,7 @@ class MermaidFixRequestSchema(BaseModel):
     error_message: str
 
 class MermaidFixResponseSchema(BaseModel):
-    """Schema for the response containing the fixed Mermaid diagram."""
+    """Schema for the response containing the fixed Mermaid diagram and explanation."""
     fixed_mermaid_code: str
-    
+    detected_issue: str
+    fix_explanation: str

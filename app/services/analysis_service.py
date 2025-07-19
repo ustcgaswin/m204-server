@@ -30,8 +30,10 @@ def get_new_db():
 
 
 class MermaidCorrectionResponse(BaseModel):
-    """Structured output for a corrected Mermaid diagram."""
-    fixed_mermaid_code: str = Field(description="The complete and corrected Mermaid diagram code, ready for rendering. The code should not be wrapped in markdown backticks.")
+    """Structured output for a corrected Mermaid diagram and explanation."""
+    fixed_mermaid_code: str = Field(description="The corrected Mermaid diagram code, ready for rendering.")
+    detected_issue: str = Field(description="A brief summary of the detected issue in the original code.")
+    fix_explanation: str = Field(description="A brief explanation of how the issue was fixed.")
 
 
 
@@ -336,15 +338,10 @@ async def enhance_project_vsam_suggestions(project_id: int):
 
 
 
-async def fix_mermaid_diagram(request: MermaidFixRequestSchema) -> str:
+async def fix_mermaid_diagram(request: MermaidFixRequestSchema) -> dict:
     """
     Uses an LLM to fix a Mermaid diagram based on the provided code and error message.
-
-    Args:
-        request: A request object containing the broken mermaid_code and the error_message.
-
-    Returns:
-        A string containing the fixed Mermaid diagram code.
+    Returns the fixed code, detected issue, and fix explanation.
     """
     if not llm_config._llm:
         log.warning("MERMAID_FIXER: LLM not configured. Cannot fix Mermaid diagram.")
@@ -359,9 +356,11 @@ async def fix_mermaid_diagram(request: MermaidFixRequestSchema) -> str:
 You are an expert in Mermaid.js syntax. I will give you a small snippet of Mermaid code where an error occurred, along with the renderer’s error message. Your task is to:
 
 1. Diagnose the syntax issue using the error message.
-2. Apply the minimal change(s) needed to fix it.
-3. Preserve all original node IDs, labels, connections, indentation, and line breaks.
-4. Return only the fixed snippet—do NOT include the graph declaration (e.g. `graph TD`),
+2. Briefly summarize the detected issue in plain English.
+3. Apply the minimal change(s) needed to fix it.
+4. Briefly explain how you fixed the issue.
+5. Preserve all original node IDs, labels, connections, indentation, and line breaks.
+6. Return only the fixed snippet—do NOT include the graph declaration (e.g. `graph TD`),
    surrounding context, markdown fences, or any extra keys.
 
 INPUT SNIPPET:
@@ -377,7 +376,9 @@ ERROR MESSAGE:
 RESPOND WITH A JSON OBJECT:
 ```json
 {{
-  "fixed_mermaid_code": "<raw corrected Mermaid code here>"
+  "fixed_mermaid_code": "<raw corrected Mermaid code here>",
+  "detected_issue": "<brief summary of the issue>",
+  "fix_explanation": "<brief explanation of the fix>"
 }}
 ```
 """
@@ -393,10 +394,19 @@ RESPOND WITH A JSON OBJECT:
         correction = MermaidCorrectionResponse(**loaded_correction_data)
 
         fixed_code = correction.fixed_mermaid_code.strip()
+        detected_issue = correction.detected_issue.strip()
+        fix_explanation = correction.fix_explanation.strip()
 
         log.info("MERMAID_FIXER: Successfully generated and parsed a fix for the diagram.")
         log.debug(f"MERMAID_FIXER: Corrected code:\n{fixed_code}")
-        return fixed_code
+        log.debug(f"MERMAID_FIXER: Detected issue: {detected_issue}")
+        log.debug(f"MERMAID_FIXER: Fix explanation: {fix_explanation}")
+
+        return {
+            "fixed_mermaid_code": fixed_code,
+            "detected_issue": detected_issue,
+            "fix_explanation": fix_explanation
+        }
 
     except json.JSONDecodeError as e_json:
         log.error(f"MERMAID_FIXER: JSON parsing error for Mermaid fix: {e_json}. Raw output: '{json_text_output}'")

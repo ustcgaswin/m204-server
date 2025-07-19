@@ -366,7 +366,7 @@ You are an expert in Mermaid.js syntax. I will give you a small snippet of Merma
 
 INPUT SNIPPET:
 ```mermaid
-{request.snippet_code}
+{request.mermaid_code}
 ```
 
 ERROR MESSAGE:
@@ -377,7 +377,7 @@ ERROR MESSAGE:
 RESPOND WITH A JSON OBJECT:
 ```json
 {{
-  "fixed_snippet": "<raw corrected Mermaid code here>"
+  "fixed_mermaid_code": "<raw corrected Mermaid code here>"
 }}
 ```
 """

@@ -1,5 +1,5 @@
 import asyncio
-from logger import log
+from app.utils.logger import log
 
 async def async_retry(
     func,
